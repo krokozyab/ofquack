@@ -17,7 +17,9 @@
 #include <string>
 
 using namespace duckdb;
-using namespace tinyxml2;
+//using namespace tinyxml2;
+//avoid collision with MSXML
+namespace tx2 = tinyxml2;
 
 struct FusionBindData : public TableFunctionData {
     string endpoint, user, pass, path, sql;
@@ -106,12 +108,12 @@ static std::string FetchSoap(const std::string &endpoint, const std::string &use
 // 4) Parse the SOAP XML, extract <reportBytes>, decode, and return the decoded XML
 //--------------------------------------------------------------------------------------------------
 static std::string ExtractReportXML(const std::string &soap_xml) {
-    XMLDocument doc;
-    if (doc.Parse(soap_xml.c_str()) != XML_SUCCESS) {
+    tx2::XMLDocument doc;
+    if (doc.Parse(soap_xml.c_str()) != tx2::XML_SUCCESS) {
         throw std::runtime_error("Failed to parse SOAP XML");
     }
     // Helper to find a child element by local name, ignoring prefix
-    auto find_local = [&](XMLNode *parent, const std::string &local_name) {
+    auto find_local = [&](tx2::XMLNode *parent, const std::string &local_name) {
         for (auto node = parent->FirstChild(); node; node = node->NextSibling()) {
             auto elem = node->ToElement();
             if (!elem) continue;
@@ -120,21 +122,21 @@ static std::string ExtractReportXML(const std::string &soap_xml) {
             std::string local = pos == std::string::npos ? full : full.substr(pos + 1);
             if (local == local_name) return elem;
         }
-        return (XMLElement *)nullptr;
+        return (tx2::XMLElement *)nullptr;
     };
     // Find Envelope
-    XMLElement *envelope = find_local(&doc, "Envelope");
+    tx2::XMLElement *envelope = find_local(&doc, "Envelope");
     if (!envelope) {
         throw std::runtime_error("Missing SOAP Envelope");
     }
     // Find Body under Envelope
-    XMLElement *body = find_local(envelope, "Body");
+    tx2::XMLElement *body = find_local(envelope, "Body");
     if (!body) {
         throw std::runtime_error("Missing SOAP Body");
     }
     // Recursively find <reportBytes> by local name
-    std::function<XMLElement*(XMLNode*, const std::string&)> find_deep =
-        [&](XMLNode *node, const std::string &local_name) -> XMLElement* {
+    std::function<tx2::XMLElement*(tx2::XMLNode*, const std::string&)> find_deep =
+        [&](tx2::XMLNode *node, const std::string &local_name) -> tx2::XMLElement* {
             for (auto child = node->FirstChild(); child; child = child->NextSibling()) {
                 auto elem = child->ToElement();
                 if (elem) {
@@ -153,7 +155,7 @@ static std::string ExtractReportXML(const std::string &soap_xml) {
             return nullptr;
         };
     // Search entire Body subtree for reportBytes
-    XMLElement *rb = find_deep(body, "reportBytes");
+    tx2::XMLElement *rb = find_deep(body, "reportBytes");
     if (!rb || !rb->GetText()) {
         throw std::runtime_error("Missing reportBytes in response");
     }
@@ -167,13 +169,13 @@ static std::string ExtractReportXML(const std::string &soap_xml) {
 //    (Utils.parseXml + createResultSetFromRowNodes)
 //--------------------------------------------------------------------------------------------------
 static std::vector<std::unordered_map<std::string, std::string>> ParseRows(const std::string &xml, std::set<std::string> &cols) {
-    XMLDocument doc;
-    if (doc.Parse(xml.c_str()) != XML_SUCCESS) {
+    tx2::XMLDocument doc;
+    if (doc.Parse(xml.c_str()) != tx2::XML_SUCCESS) {
         throw std::runtime_error("Bad report XML");
     }
     // Find all <RESULT> elements anywhere in the document
-    std::vector<XMLElement*> result_elems;
-    std::function<void(XMLNode*)> collect_results = [&](XMLNode *node) {
+    std::vector<tx2::XMLElement*> result_elems;
+    std::function<void(tx2::XMLNode*)> collect_results = [&](tx2::XMLNode *node) {
         for (auto child = node->FirstChild(); child; child = child->NextSibling()) {
             if (auto elem = child->ToElement()) {
                 std::string full = elem->Name();
@@ -192,8 +194,8 @@ static std::vector<std::unordered_map<std::string, std::string>> ParseRows(const
     for (auto result_elem : result_elems) {
         const char *inner = result_elem->GetText();
         if (!inner) continue;
-        XMLDocument inner_doc;
-        if (inner_doc.Parse(inner) != XML_SUCCESS) continue;
+        tx2::XMLDocument inner_doc;
+        if (inner_doc.Parse(inner) != tx2::XML_SUCCESS) continue;
         auto rowset = inner_doc.FirstChildElement("ROWSET");
         if (!rowset) continue;
         // Iterate <ROW> children
