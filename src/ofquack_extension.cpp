@@ -1,17 +1,15 @@
+#define DUCKDB_EXTENSION_MAIN
 #include <stdexcept>
 #include <iostream>
-#define DUCKDB_EXTENSION_MAIN
 #include "ofquack_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension_util.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
-
 #include <curl/curl.h>
 #include <tinyxml2.h>
 #include "base64.h"
-
 #include <sstream>
 #include <unordered_map>
 #include <set>
@@ -43,7 +41,7 @@ static size_t CurlWrite(void* contents, size_t size, size_t nmemb, void* userp) 
 }
 
 //--------------------------------------------------------------------------------------------------
-// 2) Build SOAP envelope (mirrors Utils.createSoapEnvelope)
+// 2) Build SOAP envelope (Utils.createSoapEnvelope)
 //--------------------------------------------------------------------------------------------------
 static std::string BuildEnvelope(const std::string &sql, const std::string &reportPath) {
     std::ostringstream oss;
@@ -65,7 +63,7 @@ static std::string BuildEnvelope(const std::string &sql, const std::string &repo
 
 //--------------------------------------------------------------------------------------------------
 // 3) Send SOAP request and return raw XML
-//    (mirrors Utils.sendSqlViaWsdl up to parseXml call)
+//    (Utils.sendSqlViaWsdl up to parseXml call)
 //--------------------------------------------------------------------------------------------------
 static std::string FetchSoap(const std::string &endpoint, const std::string &user, const std::string &pass,
                         const std::string &reportPath, const std::string &sql) {
@@ -159,14 +157,14 @@ static std::string ExtractReportXML(const std::string &soap_xml) {
     if (!rb || !rb->GetText()) {
         throw std::runtime_error("Missing reportBytes in response");
     }
-    std::cerr << "[DEBUG] ExtractReportXML: found reportBytes length=" << strlen(rb->GetText()) << std::endl;
+    //std::cerr << "[DEBUG] ExtractReportXML: found reportBytes length=" << strlen(rb->GetText()) << std::endl;
     // Decode Base64 content
     return base64_decode(rb->GetText());
 }
 
 //--------------------------------------------------------------------------------------------------
 // 5) Parse the decoded report XML into rows + collect schema
-//    (mirrors Utils.parseXml + createResultSetFromRowNodes)
+//    (Utils.parseXml + createResultSetFromRowNodes)
 //--------------------------------------------------------------------------------------------------
 static std::vector<std::unordered_map<std::string, std::string>> ParseRows(const std::string &xml, std::set<std::string> &cols) {
     XMLDocument doc;
@@ -230,32 +228,78 @@ unique_ptr<FunctionData> fuse_bind(ClientContext &ctx, TableFunctionBindInput &i
     bind->path     = input.inputs[3].GetValue<string>();
     bind->sql      = input.inputs[4].GetValue<string>();
 
-    std::cerr << "[DEBUG] fuse_bind: endpoint=" << bind->endpoint
-              << " user=" << bind->user
-              << " reportPath=" << bind->path << std::endl;
+    //std::cerr << "[DEBUG] fuse_bind: endpoint=" << bind->endpoint
+    //          << " user=" << bind->user
+    //          << " reportPath=" << bind->path << std::endl;
 
     // fetch report
     auto soap_xml   = FetchSoap(bind->endpoint, bind->user, bind->pass, bind->path, bind->sql);
 
-    std::cerr << "[DEBUG] fuse_bind: fetched SOAP length=" << soap_xml.size() << std::endl;
+    //std::cerr << "[DEBUG] fuse_bind: fetched SOAP length=" << soap_xml.size() << std::endl;
     // DEBUG: print raw SOAP XML
-    std::cerr << "[DEBUG] Raw SOAP XML:\n" << soap_xml << std::endl;
-    auto report_xml = ExtractReportXML(soap_xml);
-    // DEBUG: print decoded report XML
-    std::cerr << "[DEBUG] Raw Report XML (decoded):\n" << report_xml << std::endl;
-
-    // parse rows and infer schema
+    //std::cerr << "[DEBUG] Raw SOAP XML:\n" << soap_xml << std::endl;
     set<string> cols;
-    bind->rows = ParseRows(report_xml, cols);
+    try {
+        auto report_xml = ExtractReportXML(soap_xml);
+        // DEBUG: print decoded report XML
+        //std::cerr << "[DEBUG] Raw Report XML (decoded):\n" << report_xml << std::endl;
+        bind->rows = ParseRows(report_xml, cols);
+    } catch (const std::runtime_error &e) {
+        // No reportBytes or SOAP Fault -- return empty result set
+        std::cerr << "[DEBUG] fuse_bind: SOAP fault or no data, returning 0 rows: " << e.what() << std::endl;
+        // bind->rows remains empty, cols empty
+    }
 
-    std::cerr << "[DEBUG] fuse_bind: parsed " << bind->rows.size() << " rows, columns: ";
+    //std::cerr << "[DEBUG] fuse_bind: parsed " << bind->rows.size() << " rows, columns: ";
     for (auto &col : bind->columns) std::cerr << col << ",";
     std::cerr << std::endl;
 
-    for (auto &col : cols) {
-        bind->columns.push_back(col);
-        names.push_back(col);
-        return_types.push_back(LogicalType::VARCHAR);
+    if (!cols.empty()) {
+        // Dynamic schema from parsed columns
+        for (auto &col : cols) {
+            bind->columns.push_back(col);
+            names.push_back(col);
+            return_types.push_back(LogicalType::VARCHAR);
+        }
+    } else {
+        // No data: derive column list from the SQL, or fall back to RESULT
+        std::string sql = bind->sql;
+        // Extract text between SELECT and FROM
+        std::string cols_txt;
+        auto sel = sql.find("SELECT");
+        auto frm = sql.find("FROM");
+        if (sel != std::string::npos && frm != std::string::npos && frm > sel) {
+            cols_txt = sql.substr(sel + 6, frm - (sel + 6));
+        }
+        // Simple split on commas
+        std::vector<std::string> parts;
+        std::string part;
+        std::istringstream iss(cols_txt);
+        while (std::getline(iss, part, ',')) {
+            // trim whitespace
+            auto first = part.find_first_not_of(" \t\n\r");
+            if (first == std::string::npos) continue;
+            auto last = part.find_last_not_of(" \t\n\r");
+            auto name = part.substr(first, last - first + 1);
+            parts.push_back(name);
+        }
+        if (parts.size() == 1 && parts[0] == "*") {
+            // wildcard: fallback to single RESULT column
+            bind->columns.push_back("RESULT");
+            names.push_back("RESULT");
+            return_types.push_back(LogicalType::VARCHAR);
+        } else if (!parts.empty()) {
+            for (auto &name : parts) {
+                bind->columns.push_back(name);
+                names.push_back(name);
+                return_types.push_back(LogicalType::VARCHAR);
+            }
+        } else {
+            // ultimate fallback
+            bind->columns.push_back("RESULT");
+            names.push_back("RESULT");
+            return_types.push_back(LogicalType::VARCHAR);
+        }
     }
     return bind;
 }
@@ -275,9 +319,9 @@ void fuse_func(ClientContext &ctx, TableFunctionInput &data, DataChunk &out) {
     auto &lstate = data.local_state->Cast<FusionLocalState>();
     auto &rows = bind.rows;
 
-    std::cerr << "[DEBUG] fuse_func: offset=" << lstate.offset
-              << " rows_total=" << rows.size()
-              << std::endl;
+    //std::cerr << "[DEBUG] fuse_func: offset=" << lstate.offset
+    //          << " rows_total=" << rows.size()
+    //          << std::endl;
 
     idx_t total = rows.size();
     if (lstate.offset >= total) {
@@ -286,8 +330,8 @@ void fuse_func(ClientContext &ctx, TableFunctionInput &data, DataChunk &out) {
     }
     idx_t to_emit = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - lstate.offset);
 
-    std::cerr << "[DEBUG] fuse_func: emitting " << to_emit
-              << " rows starting at " << lstate.offset << std::endl;
+    //std::cerr << "[DEBUG] fuse_func: emitting " << to_emit
+    //          << " rows starting at " << lstate.offset << std::endl;
 
     out.SetCardinality(to_emit);
     for (idx_t r = 0; r < to_emit; r++) {
