@@ -4,7 +4,7 @@ This repository is based on https://github.com/duckdb/extension-template, check 
 
 ---
 
-This extension, Ofquack, allow you to ... <extension_goal>.
+This extension, Ofquack, UNDER CONSTRUCTION.
 
 
 ## Building
