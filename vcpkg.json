@@ -1,5 +1,10 @@
 {
+  "name": "ofquack",
+  "version-string": "0.1.0",
   "dependencies": [
-    "openssl"
+    "curl",
+    "openssl",
+    "cpp-base64",
+    "tinyxml2"
   ]
 }
