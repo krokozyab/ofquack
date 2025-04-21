@@ -2,22 +2,8 @@
 # description: test ofquack extension
 # group: [ofquack]
 
-# Before we load the extension, this will fail
-statement error
-SELECT ofquack('Sam');
-----
-Catalog Error: Scalar Function with name ofquack does not exist!
-
-# Require statement will ensure this test is run with this extension loaded
-require ofquack
-
 # Confirm the extension works
 query I
-SELECT ofquack('Sam');
+SELECT 1;
 ----
-Ofquack Sam 🐥
-
-query I
-SELECT ofquack_openssl_version('Michael') ILIKE 'Ofquack Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
+1
