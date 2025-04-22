@@ -1,4 +1,4 @@
-g# Ofquack Extension for DuckDB
+# Ofquack Extension for DuckDB
 
 This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
 
@@ -26,6 +26,42 @@ The **Ofquack** extension provides seamless integration between DuckDB and Oracl
 **Create report in OTBI**
    In you fusion instance un-archive _DM_ARB.xdm.catalog_ and _RP_ARB.xdo.catalog_ from [here](https://github.com/krokozyab/ofjdbc/tree/master/otbireport)
 into _/Shared Foldrs/Custom/Financials_ folder (that can be different if you will). 
+
+   Installation is simple through the DuckDB Community Extension repository, just type
+```
+INSTALL ofquack FROM community
+LOAD ofquack
+```
+
+---
+
+## Usage
+Call the table function:
+```
+SELECT *
+FROM oracle_fusion_wsdl_query(
+    'https://<your‑host>/xmlpserver/services/ExternalReportWSSService?WSDL',
+    '<username>',
+    '<password>',
+    '/Custom/Financials/RP_ARB.xdo',
+    'SELECT currency_code, name, description FROM FND_CURRENCIES_TL WHERE rownum<10'
+);
+```
+
+## Function Signature
+```
+oracle_fusion_wsdl_query(
+    endpoint VARCHAR,  -- WSDL URL
+    username VARCHAR,  -- Oracle Fusion user
+    password VARCHAR,  -- Oracle Fusion password
+    report_path VARCHAR, -- Report absolute path
+    sql VARCHAR        -- SQL to embed in the report
+) RETURNS TABLE(<dynamic_columns> VARCHAR...)
+```
+**endpoint:** Full WSDL endpoint URL for Oracle Fusion PublicReportService.
+**username/password:** Credentials e.g. user@example.com / MySecretPass123.
+**report_path:** Oracle report path (e.g. /Custom/Reports/MyReport.xdo).
+**sql:** The inner SQL query to run.
 
 ## Building
 ### Managing dependencies
