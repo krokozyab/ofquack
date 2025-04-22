@@ -19,6 +19,13 @@ The **Ofquack** extension provides seamless integration between DuckDB and Oracl
 
 **Uniform VARCHAR Output:** All columns are returned as VARCHAR. Any further type conversion (e.g., to INTEGER, DATE, DECIMAL) should be performed by the recipient SQL client or query after fetching the data.
 
+---
+
+## Installation
+### Prerequities
+**Create report in OTBI**
+   In you fusion instance un-archive _DM_ARB.xdm.catalog_ and _RP_ARB.xdo.catalog_ from [here](https://github.com/krokozyab/ofjdbc/tree/master/otbireport)
+into _/Shared Foldrs/Custom/Financials_ folder (that can be different if you will). 
 
 ## Building
 ### Managing dependencies
