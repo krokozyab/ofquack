@@ -1,10 +1,10 @@
-# Ofquack
+# Ofquack Extension for DuckDB
 
 This repository is based on https://github.com/duckdb/extension-template, check it out if you want to build and ship your own DuckDB extension.
 
 ---
 
-This extension, Ofquack, UNDER CONSTRUCTION.
+The Ofquack extension provides seamless integration between DuckDB and Oracle Fusion via WSDL-based SOAP calls. It allows you to run arbitrary SQL queries against Oracle Fusion reports directly from DuckDB, inferring column names at runtime and returning all data as VARCHAR columns—as native DuckDB tables and as resultsets that can be directly consumed by downstream applications.
 
 
 ## Building
