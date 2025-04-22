@@ -59,8 +59,11 @@ oracle_fusion_wsdl_query(
 ) RETURNS TABLE(<dynamic_columns> VARCHAR...)
 ```
 **endpoint:** Full WSDL endpoint URL for Oracle Fusion PublicReportService.
+
 **username/password:** Credentials e.g. user@example.com / MySecretPass123.
+
 **report_path:** Oracle report path (e.g. /Custom/Reports/MyReport.xdo).
+
 **sql:** The inner SQL query to run.
 
 ## Building
@@ -91,16 +94,7 @@ The main binaries that will be built are:
 ## Running the extension
 To run the extension code, simply start the shell with `./build/release/duckdb`.
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `ofquack()` that takes a string arguments and returns a string:
-```
-D select ofquack('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Ofquack Jane 🐥 │
-└───────────────┘
-```
+Now we can use the features from the extension directly in DuckDB. 
 
 ## Running the tests
 Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
