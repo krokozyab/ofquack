@@ -62,7 +62,7 @@ oracle_fusion_wsdl_query(
 
 **username/password:** Credentials e.g. user@example.com / MySecretPass123.
 
-**report_path:** Oracle report path (e.g. /Custom/Reports/MyReport.xdo).
+**report_path:** Oracle report path (e.g. /Custom/Financials/RP_ARB.xdo).
 
 **sql:** The inner SQL query to run.
 
