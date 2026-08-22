@@ -18,6 +18,15 @@ struct ParsedReport {
 	//! Column names in the order the document first mentions them, which is the
 	//! order of the SELECT list. Deliberately not sorted.
 	std::vector<std::string> columns;
+	//! True when a result block was cut off partway through and only the rows
+	//! that arrived whole are here. The report has a limit on how much one
+	//! response carries and says nothing when it is reached, so the block ends
+	//! mid-element; the rows before that point are good, the rest never came.
+	//! A caller that pages by the rows it received is unaffected. A caller that
+	//! asked for everything in one request has lost data and must say so.
+	bool truncated = false;
+	//! Size of the block that was cut off, for the message that reports it.
+	size_t truncated_at_bytes = 0;
 };
 
 //! Pulls the report payload out of a SOAP response: locates <reportBytes>

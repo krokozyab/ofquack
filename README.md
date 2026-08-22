@@ -121,11 +121,14 @@ SELECT * FROM (SELECT NAME, CODE FROM FND_CURRENCIES_TL) ORDER BY 1, 2
 
 Ordering by all of them is what makes it a total order on your rows; two rows
 that tie on every column are interchangeable, so it does not matter which side
-of a page boundary they land on. Writing your own `ORDER BY` avoids the wrapper
-and the extra request it costs, and is usually cheaper for the server if you
-order by an indexed key. `stable_paging := false`, or
-`SET ofquack_stable_paging = false`, turns it off; expect repeated and missing
-rows if you do.
+of a page boundary they land on. It is also expensive on a large result: Oracle
+has to sort everything to return the first page. **For a query over a big
+table, write your own `ORDER BY` on an indexed key** — that avoids the wrapper,
+the extra request it costs, and the sort. An attached table (`ATTACH … TYPE
+oracle_fusion`) does this for you: it orders by the table's primary key from
+the dictionary, or by `ROWID` when there is none, and only a view is ordered by
+its columns. `stable_paging := false`, or `SET ofquack_stable_paging = false`,
+turns the ordering off; expect repeated and missing rows if you do.
 
 A scan ends on an empty page, not on a short one, so every result costs one
 request past the last one that had rows. BI Publisher truncates a response that

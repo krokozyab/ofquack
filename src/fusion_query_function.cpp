@@ -200,6 +200,19 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 	bind_data->transport = ofquack::CreateTransport(bind_data->config);
 	bind_data->paged_sql = bind_data->sql;
 	bind_data->first_page = FetchPageOf(*bind_data->transport, *bind_data, bind_data->sql, context, 0);
+	if (bind_data->first_page.truncated && !bind_data->paginate) {
+		// A paged scan carries on from the rows it received, so a cut costs it
+		// nothing but a request. With paging off there is no carrying on: the
+		// rows past the cut are simply gone, and returning what arrived would
+		// be a wrong answer with nothing to show it was.
+		throw IOException(
+		    "Oracle Fusion cut the response off after %llu rows (%llu bytes): the report returns at most that "
+		    "much in one response, and the rest of the result was not received.\nPaging is off for this "
+		    "statement -- because of fetch_size := 0, or because it already carries OFFSET/FETCH or ROWNUM -- "
+		    "so let the extension page it, or narrow the statement.\nSQL: %s",
+		    static_cast<unsigned long long>(bind_data->first_page.rows.size()),
+		    static_cast<unsigned long long>(bind_data->first_page.truncated_at_bytes), bind_data->sql);
+	}
 	bind_data->columns.assign(bind_data->first_page.columns.begin(), bind_data->first_page.columns.end());
 
 	if (bind_data->columns.empty()) {

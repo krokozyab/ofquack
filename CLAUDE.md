@@ -191,14 +191,30 @@ cost a request:
   truncates a response that grows too large without saying so, and a truncated page is
   indistinguishable from the last one. Every scan therefore ends with one request that comes back
   empty. A result smaller than one page costs two requests, not one.
+- **A cut-off block yields its complete rows, marked `truncated`.** The cut lands mid-element, so
+  the block fails to parse; `ParseRows` keeps everything up to the last `</ROW>` and sets
+  `ParsedReport::truncated`. A paged scan continues from the rows it received, so a cut costs one
+  extra request and nothing else. With paging off (`fetch_size := 0`, or a statement with its own
+  `OFFSET`/`ROWNUM`) there is nothing to continue from, and the scan fails naming how many rows
+  and bytes arrived — that number is the only measurement we have of the report's limit. This was
+  the dictionary-listing bug: the cut block was skipped as unparseable, the page looked empty,
+  and empty meant the end. The JDBC driver has the same cut and hides it: TagSoup swallows the
+  broken tail and its pager treats a short page as the last.
 - **A statement with no `ORDER BY` of its own is given one before it is paged.** `OFFSET`/`FETCH`
   partitions a result the server has ordered; each page is a separate execution, and Oracle owes
   no two executions the same row order, so without this a page can repeat rows the previous one
-  returned and skip others — invisibly, since every page is well formed. `oracle_fusion_query`
-  wraps the statement (`SELECT * FROM (…) ORDER BY 1, 2, …`), which needs the column count and so
-  costs one retake of the first page; the attached-table scan builds its own select list and
-  orders it from the start, skipping the LOB columns Oracle refuses to sort. `stable_paging :=
-  false` (or `SET ofquack_stable_paging = false`) turns it off.
+  returned and skip others — invisibly, since every page is well formed. **Which order is as
+  important as having one**: anything that makes Oracle sort the whole table costs the whole table
+  on every page, and a large table never returns its first row — `ORDER BY` over all hundred
+  columns of `XLA_AE_LINES` sat for two minutes for its first 500 rows. So the attached-table scan
+  orders by the **primary key** from the dictionary (`FetchPrimaryKey`, cached in `CACHE_META` as
+  `pk:<endpoint>:<TABLE>`), which Oracle walks through an index; a table without one by `ROWID`
+  (a top-N pass, not a sort); only a view by every projected column, skipping LOBs.
+  `oracle_fusion_query` has no dictionary to ask and wraps the statement
+  (`SELECT * FROM (…) ORDER BY 1, 2, …`), which needs the column count and so costs one retake
+  of the first page — and is expensive on a large unkeyed result, so a query over a big table
+  should carry its own `ORDER BY` on an indexed key. `stable_paging := false` (or
+  `SET ofquack_stable_paging = false`) turns it off.
 
 A report that ignores the row-limiting clause would now never let a scan end, so a page whose
 first row equals the previous page's first row fails the query instead.

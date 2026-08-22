@@ -257,6 +257,67 @@ void MetadataCache::SetExpectedTables(const std::string &endpoint_key, int64_t e
 	connection->Query("CHECKPOINT");
 }
 
+// Kept in CACHE_META rather than a table of its own: a key is one short row
+// per table, and a new table would mean a schema bump that drops every cache
+// out there. Column names are joined with a character Oracle does not allow in
+// an identifier.
+
+namespace {
+constexpr char PK_SEPARATOR = '\n';
+}
+
+bool MetadataCache::TryGetPrimaryKey(const std::string &endpoint_key, const std::string &table_name,
+                                     std::vector<std::string> &key_columns) {
+	std::lock_guard<std::mutex> guard(lock);
+	if (!connection) {
+		return false;
+	}
+	try {
+		auto result = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'pk:" + Escape(endpoint_key) + ":" +
+		                                Escape(StringUtil::Upper(table_name)) + "'");
+		if (!result || result->HasError() || result->RowCount() != 1) {
+			return false;
+		}
+		key_columns.clear();
+		const auto joined = result->GetValue(0, 0).ToString();
+		size_t at = 0;
+		while (at < joined.size()) {
+			const auto next = joined.find(PK_SEPARATOR, at);
+			key_columns.push_back(joined.substr(at, next == std::string::npos ? std::string::npos : next - at));
+			if (next == std::string::npos) {
+				break;
+			}
+			at = next + 1;
+		}
+		return true;
+	} catch (const std::exception &) {
+		return false;
+	}
+}
+
+void MetadataCache::PutPrimaryKey(const std::string &endpoint_key, const std::string &table_name,
+                                  const std::vector<std::string> &key_columns) {
+	std::lock_guard<std::mutex> guard(lock);
+	if (!connection || mode == CacheMode::READ_ONLY) {
+		return;
+	}
+	try {
+		std::string joined;
+		for (const auto &column : key_columns) {
+			if (!joined.empty()) {
+				joined.push_back(PK_SEPARATOR);
+			}
+			joined += column;
+		}
+		const auto key = "pk:" + Escape(endpoint_key) + ":" + Escape(StringUtil::Upper(table_name));
+		connection->Query("DELETE FROM CACHE_META WHERE KEY = '" + key + "'");
+		connection->Query("INSERT INTO CACHE_META VALUES ('" + key + "', '" + Escape(joined) + "')");
+		connection->Query("CHECKPOINT");
+	} catch (const std::exception &) {
+		// Best effort, like every other write here.
+	}
+}
+
 bool MetadataCache::TryGetTables(const std::string &endpoint_key, int64_t ttl_seconds,
                                  std::vector<ofquack::TableInfo> &tables) {
 	const auto expected = ExpectedTables(endpoint_key);

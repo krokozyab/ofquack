@@ -54,9 +54,13 @@ the report gives up and answers with nothing, which is indistinguishable from
 the end of the data. Seeking from the last name keeps every page the same
 price, so page five hundred costs what page one did.
 
-Where a page comes back empty, the session is discarded and the same page asked
-again on a fresh one. BI Publisher meters a session, and a session that has run
-out returns nothing rather than an error — the retry is what tells the two apart.
+A page the report cut short — it has a limit on how much one response carries
+and says nothing when it is reached — yields the rows that arrived whole, and
+the next page seeks from the last of them. That cut, skipped as unparseable
+and mistaken for an empty page, is what stopped the listing partway through
+the alphabet. Where a page comes back genuinely empty, the session is
+discarded and the same page asked once more on a fresh one before the end is
+believed; it costs one request.
 
 Columns still page by `OFFSET`/`FETCH`, because they never run deep enough for
 the difference to matter, and are fetched **ten tables at a time**. Not one —

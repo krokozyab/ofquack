@@ -161,11 +161,14 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 		auto page = Query(transport, context,
 		                  metadata::TablesAfter(types, after_name, after_type, rows_per_page));
 		if (page.empty()) {
-			// An empty page is how the end of the data looks -- and also how a
-			// session that has used up whatever allowance BI Publisher grants
-			// it looks, since that returns nothing rather than failing. Start a
-			// fresh session and ask once more: if the data really has run out,
-			// the answer is the same and this costs one request.
+			// An empty page is how the end of the data looks. Before the end is
+			// believed, the same page is asked once more on a fresh session --
+			// insurance, at the price of one request, against a session that
+			// has gone stale and answers with nothing rather than an error.
+			// (The listing that stopped short on a real instance turned out to
+			// be a cut-off block, now handled in ParseRows, not a session; this
+			// stays because it is cheap and the failure it guards against is
+			// silent.)
 			transport.ResetSession();
 			page = Query(transport, context,
 			             metadata::TablesAfter(types, after_name, after_type, rows_per_page));

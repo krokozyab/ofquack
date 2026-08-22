@@ -158,6 +158,109 @@ void TestParseRowsReadsNestedDocument() {
 	CHECK(report.columns.size() == 2);
 }
 
+void TestParseRowsSanitizesBareAmpersand() {
+	// The outer document correctly escapes the ampersand, but decoding its text
+	// exposes the malformed inner XML emitted by BI Publisher.
+	const auto report = ParseRows(MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;REMARKS&gt;"
+	                                                "Description with &amp; character"
+	                                                "&lt;/REMARKS&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+
+	CHECK(report.rows.size() == 1);
+	CHECK(report.rows[0].at("REMARKS") == "Description with & character");
+}
+
+void TestParseRowsPreservesValidEntities() {
+	// Entities belonging to the inner document are escaped once more in the
+	// outer one. A bare ampersand forces the fallback, which must not turn the
+	// valid entities beside it into literal "&amp;...;" text.
+	const auto report = ParseRows(MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;VALUE&gt;"
+	                                                "bare &amp; then &amp;amp;&amp;lt;&amp;gt;&amp;quot;&amp;apos;"
+	                                                "&amp;#65;&amp;#x42;"
+	                                                "&lt;/VALUE&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+
+	CHECK(report.rows.size() == 1);
+	CHECK(report.rows[0].at("VALUE") == "bare & then &<>\"'AB");
+}
+
+//! The real one. A table described as "a dictionary of <area_id, date>
+//! combinations" reaches us with the brackets unescaped, and the whole
+//! 112 KB page failed to parse -- which, skipped as unparseable, is what
+//! ended the dictionary listing at FFS_MSG_AGENT_CREDENTIAL.
+void TestParseRowsKeepsAngleBracketsInsideValues() {
+	const auto report = ParseRows(MakeReportXML(
+	    "&lt;ROWSET&gt;\n"
+	    " &lt;ROW&gt;\n"
+	    "  &lt;TABLE_CAT xsi:nil = \"true\"/&gt;\n"
+	    "  &lt;TABLE_NAME&gt;FFS_QBI_QUOTA_PAGE&lt;/TABLE_NAME&gt;\n"
+	    "  &lt;REMARKS&gt;Stores a dictionary of &lt;area_id, date&gt; combinations.&lt;/REMARKS&gt;\n"
+	    "  &lt;TABLE_ID&gt;21186&lt;/TABLE_ID&gt;\n"
+	    " &lt;/ROW&gt;\n"
+	    " &lt;ROW&gt;\n"
+	    "  &lt;TABLE_NAME&gt;NEXT_ONE&lt;/TABLE_NAME&gt;\n"
+	    // Something that looks exactly like markup is still data in a value.
+	    "  &lt;REMARKS&gt;Use &lt;b&gt;bold&lt;/b&gt; and a &lt; b and x &lt;&lt; 2&lt;/REMARKS&gt;\n"
+	    " &lt;/ROW&gt;\n"
+	    "&lt;/ROWSET&gt;"));
+
+	CHECK(!report.truncated);
+	CHECK(report.rows.size() == 2);
+	CHECK(report.rows[0].at("TABLE_NAME") == "FFS_QBI_QUOTA_PAGE");
+	CHECK(report.rows[0].at("REMARKS") == "Stores a dictionary of <area_id, date> combinations.");
+	CHECK(report.rows[0].at("TABLE_ID") == "21186");
+	// The nil column is an element with no text, not a lost one.
+	CHECK(report.rows[0].count("TABLE_CAT") == 1);
+	CHECK(report.rows[1].at("TABLE_NAME") == "NEXT_ONE");
+	CHECK(report.rows[1].at("REMARKS") == "Use <b>bold</b> and a < b and x << 2");
+}
+
+void TestParseRowsDropsInvalidControlCharacters() {
+	std::string escaped = "&lt;ROWSET&gt;&lt;ROW&gt;&lt;REMARKS&gt;before";
+	escaped.push_back('\x01');
+	escaped += "after&lt;/REMARKS&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;";
+	const auto report = ParseRows(MakeReportXML(escaped));
+
+	CHECK(report.rows.size() == 1);
+	CHECK(report.rows[0].at("REMARKS") == "beforeafter");
+}
+
+//! The report has a limit on how much one response carries, and when it is
+//! reached the block just stops mid-element. That is what stopped the table
+//! listing partway through the alphabet: the block failed to parse, was
+//! skipped, the page looked empty, and empty meant the end. The rows before
+//! the cut are intact and are what the next page should continue from.
+void TestTruncatedBlockKeepsTheCompleteRows() {
+	// dbms_xmlgen pretty-prints, so the cut lands inside an element on its own
+	// line, as it does on a real instance.
+	const auto report = ParseRows(MakeReportXML("&lt;ROWSET&gt;\n"
+	                                            " &lt;ROW&gt;\n  &lt;N&gt;1&lt;/N&gt;\n  &lt;S&gt;a&lt;/S&gt;\n &lt;/ROW&gt;\n"
+	                                            " &lt;ROW&gt;\n  &lt;N&gt;2&lt;/N&gt;\n  &lt;S&gt;b&lt;/S&gt;\n &lt;/ROW&gt;\n"
+	                                            " &lt;ROW&gt;\n  &lt;N&gt;3&lt;/N&gt;\n  &lt;S&gt;long description that was cu"));
+
+	CHECK(report.truncated);
+	CHECK(report.truncated_at_bytes > 0);
+	CHECK(report.rows.size() == 2);
+	CHECK(report.rows[0].at("N") == "1");
+	CHECK(report.rows[1].at("S") == "b");
+	// Column order still comes from the rows that did arrive.
+	CHECK(report.columns.size() == 2);
+
+	// A block that parses is not truncated, whatever else happened to it.
+	CHECK(!ParseRows(MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;N&gt;1&lt;/N&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"))
+	           .truncated);
+}
+
+//! Cut before the first row completed: nothing can be continued from, and the
+//! reason -- one row too wide for the report -- is worth naming.
+void TestTruncatedBeforeTheFirstRowIsReported() {
+	try {
+		ParseRows(MakeReportXML("&lt;ROWSET&gt;\n &lt;ROW&gt;\n  &lt;DOC&gt;enormous value that never en"));
+		CHECK(false);
+	} catch (const std::runtime_error &error) {
+		CHECK(std::string(error.what()).find("before its first row was complete") != std::string::npos);
+		CHECK(std::string(error.what()).find("bytes arrived") != std::string::npos);
+	}
+}
+
 //! A damaged block used to be skipped, and the rows of the blocks that did
 //! parse were handed back as the answer. There is no way for a caller to see
 //! that, which makes it the one failure worth being loud about.
@@ -1192,6 +1295,12 @@ const TestCase TESTS[] = {
     {"extract ignores namespace prefixes", TestExtractIgnoresNamespacePrefixes},
     {"extract rejects malformed responses", TestExtractRejectsMalformedResponses},
     {"parse rows reads nested document", TestParseRowsReadsNestedDocument},
+    {"parse rows sanitizes bare ampersand", TestParseRowsSanitizesBareAmpersand},
+    {"parse rows preserves valid entities", TestParseRowsPreservesValidEntities},
+    {"parse rows keeps angle brackets inside values", TestParseRowsKeepsAngleBracketsInsideValues},
+    {"parse rows drops invalid controls", TestParseRowsDropsInvalidControlCharacters},
+    {"a truncated block keeps the complete rows", TestTruncatedBlockKeepsTheCompleteRows},
+    {"truncated before the first row is reported", TestTruncatedBeforeTheFirstRowIsReported},
     {"a damaged result block is reported", TestDamagedResultBlockIsReported},
     {"column order follows the select list", TestColumnOrderFollowsTheSelectList},
     {"column list is deduplicated across rows", TestColumnListIsDeduplicatedAcrossRows},

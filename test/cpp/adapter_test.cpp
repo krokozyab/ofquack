@@ -19,6 +19,7 @@
 #include "duckdb.hpp"
 
 #include <algorithm>
+#include <set>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -703,6 +704,99 @@ void TestARepeatedPageIsRefused() {
 	CHECK(result->GetError().find("fetch_size := 0") != std::string::npos);
 }
 
+//! Serves rows by OFFSET/FETCH like PagingTransport, but cuts every response
+//! off mid-row after `rows_per_response` rows, whatever was asked for -- which
+//! is what the report does when a response grows past what it will carry.
+class TruncatingPagingTransport : public FusionTransport {
+public:
+	TruncatingPagingTransport(Script &script_p, int total_rows_p, int rows_per_response_p)
+	    : script(script_p), total_rows(total_rows_p), rows_per_response(rows_per_response_p) {
+	}
+
+	std::string Execute(const std::string &sql, const RequestContext &) override {
+		script.executed_sql.push_back(sql);
+
+		int offset = 0;
+		int limit = total_rows;
+		const auto offset_at = sql.find(" OFFSET ");
+		if (offset_at != std::string::npos) {
+			offset = std::atoi(sql.c_str() + offset_at + 8);
+			const auto fetch_at = sql.find(" FETCH NEXT ");
+			CHECK(fetch_at != std::string::npos);
+			limit = std::atoi(sql.c_str() + fetch_at + 12);
+		}
+
+		const int available = std::max(0, std::min(limit, total_rows - offset));
+		std::string rowset = "&lt;ROWSET&gt;\n";
+		for (int i = 0; i < std::min(available, rows_per_response); i++) {
+			rowset += " &lt;ROW&gt;\n  &lt;N&gt;" + std::to_string(offset + i) + "&lt;/N&gt;\n &lt;/ROW&gt;\n";
+		}
+		if (available > rows_per_response) {
+			// The cut: one more row starts and never finishes.
+			rowset += " &lt;ROW&gt;\n  &lt;N&gt;" + std::to_string(offset + rows_per_response).substr(0, 1);
+		} else {
+			rowset += "&lt;/ROWSET&gt;";
+		}
+		return MakeSoapResponse(MakeReportXML(rowset));
+	}
+
+private:
+	Script &script;
+	int total_rows;
+	int rows_per_response;
+};
+
+//! A page the report cut short is not the end and not an error: the scan
+//! carries on from the rows it did receive. The dictionary listing stopped at
+//! 4,000 of 28,978 tables on a real instance because a cut page was skipped
+//! as unparseable, looked empty, and empty meant the end.
+void TestTruncatedPageIsContinuedFrom() {
+	Script script;
+	ScopedTransportFactory installed(
+	    [&script](const FusionConfig &) { return std::make_shared<TruncatingPagingTransport>(script, 50, 7); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM T', fetch_size := 20)");
+
+	CHECK(result->RowCount() == 50);
+	CHECK(result->GetValue(0, 0).ToString() == "0");
+	CHECK(result->GetValue(0, 49).ToString() == "49");
+	// Every row exactly once: a continuation that skipped or repeated would
+	// still produce fifty rows of something.
+	std::set<std::string> seen;
+	for (idx_t row = 0; row < result->RowCount(); row++) {
+		seen.insert(result->GetValue(0, row).ToString());
+	}
+	CHECK(seen.size() == 50);
+	// The next page starts where the cut one ended, not a page-size later.
+	bool continued_from_the_cut = false;
+	for (const auto &sql : script.executed_sql) {
+		if (sql.find("OFFSET 7 ROWS") != std::string::npos) {
+			continued_from_the_cut = true;
+		}
+	}
+	CHECK(continued_from_the_cut);
+}
+
+//! With paging off there is nothing to continue from, and a short answer that
+//! looks complete is the worst outcome, so it fails and says how much arrived.
+void TestTruncatedResponseWithoutPagingIsAnError() {
+	Script script;
+	ScopedTransportFactory installed(
+	    [&script](const FusionConfig &) { return std::make_shared<TruncatingPagingTransport>(script, 50, 7); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT N FROM T', fetch_size := 0)");
+
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("cut the response off after 7 rows") != std::string::npos);
+	CHECK(result->GetError().find("fetch_size := 0") != std::string::npos);
+}
+
 void TestPagingCanBeDisabled() {
 	Script script;
 	auto installed = InstallPaging(script, 1637);
@@ -1335,6 +1429,12 @@ public:
 			    "&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
 			    "&lt;/ROWSET&gt;"));
 		}
+		if (sql.find("all_constraints") != std::string::npos) {
+			// The primary key, which is what a paged scan orders by.
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;COLUMN_NAME&gt;JE_HEADER_ID&lt;/COLUMN_NAME&gt;"
+			    "&lt;KEY_SEQ&gt;1&lt;/KEY_SEQ&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
 		// A scan of the table itself.
 		return MakeSoapResponse(MakeReportXML(
 		    "&lt;ROWSET&gt;"
@@ -1410,9 +1510,13 @@ void TestProjectionReachesTheStatement() {
 
 	// The last statement is the scan; earlier ones are dictionary reads.
 	const auto &scan_sql = script.executed_sql.back();
-	CHECK(scan_sql.find("\"NAME\"") != std::string::npos);
-	CHECK(scan_sql.find("JE_HEADER_ID") == std::string::npos);
 	CHECK(scan_sql.find("FROM \"GL_JE_HEADERS\"") != std::string::npos);
+	// The select list carries the projected column and nothing else. The key
+	// appears further on, in the ORDER BY that paging needs, and that is not
+	// a column travelling back.
+	const auto select_list = scan_sql.substr(0, scan_sql.find(" FROM "));
+	CHECK(select_list.find("\"NAME\"") != std::string::npos);
+	CHECK(select_list.find("JE_HEADER_ID") == std::string::npos);
 }
 
 void TestCountStarReadsOneColumnAndEmitsNone() {
@@ -1433,6 +1537,46 @@ void TestCountStarReadsOneColumnAndEmitsNone() {
 
 //! DuckDB removes a filter it has handed to a scan, so pushing one that cannot
 //! be translated exactly would silently change the answer. Off by default.
+//! The paged scan of an attached table orders by its primary key -- walked
+//! through an index, so a page costs a page -- and not by every column, which
+//! sorted all of XLA_AE_LINES for its first 500 rows and never came back.
+void TestAttachedScanOrdersByThePrimaryKey() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "ATTACH 'fusion' AS fus (TYPE oracle_fusion)");
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+
+	bool ordered_by_key = false;
+	bool asked_for_key = false;
+	for (const auto &sql : script.executed_sql) {
+		if (sql.find("all_constraints") != std::string::npos) {
+			asked_for_key = true;
+		}
+		if (sql.find("FROM \"GL_JE_HEADERS\" ORDER BY \"JE_HEADER_ID\" OFFSET") != std::string::npos) {
+			ordered_by_key = true;
+		}
+		// Never by position: the key is not among the selected columns here,
+		// and a positional order over NAME alone would not be a total order.
+		CHECK(sql.find("ORDER BY 1") == std::string::npos);
+	}
+	CHECK(asked_for_key);
+	CHECK(ordered_by_key);
+
+	// The key is cached with the rest of the dictionary: a second scan, from
+	// a new connection, does not ask for it again.
+	const auto after_first = script.executed_sql.size();
+	Connection second(db);
+	RunQuery(second, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+	for (size_t i = after_first; i < script.executed_sql.size(); i++) {
+		CHECK(script.executed_sql[i].find("all_constraints") == std::string::npos);
+	}
+}
+
 void TestFilterPushdownIsOffByDefault() {
 	ResetCache();
 	Script script;
@@ -1826,6 +1970,8 @@ const TestCase TESTS[] = {
     {"a statement with its own order is not wrapped", TestStatementWithItsOwnOrderIsNotWrapped},
     {"stable paging can be turned off", TestStablePagingCanBeTurnedOff},
     {"a repeated page is refused", TestARepeatedPageIsRefused},
+    {"a truncated page is continued from", TestTruncatedPageIsContinuedFrom},
+    {"a truncated response without paging is an error", TestTruncatedResponseWithoutPagingIsAnError},
     {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},
     {"paging can be disabled", TestPagingCanBeDisabled},
     {"statement with its own limit is not rewritten", TestStatementWithItsOwnLimitIsNotRewritten},
@@ -1852,6 +1998,7 @@ const TestCase TESTS[] = {
     {"select from attached table", TestSelectFromAttachedTable},
     {"projection reaches the statement", TestProjectionReachesTheStatement},
     {"count star reads one column and emits none", TestCountStarReadsOneColumnAndEmitsNone},
+    {"attached scan orders by the primary key", TestAttachedScanOrdersByThePrimaryKey},
     {"filter pushdown is off by default", TestFilterPushdownIsOffByDefault},
     {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},
     {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},

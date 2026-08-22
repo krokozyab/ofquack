@@ -54,6 +54,7 @@ struct FusionAttachedState {
 	bool tables_loaded = false;
 	std::vector<ofquack::TableInfo> tables;
 	std::unordered_map<string, std::vector<ofquack::ColumnInfo>> columns_by_table;
+	std::unordered_map<string, vector<string>> primary_keys;
 
 	ofquack::RequestContext RequestContextFor(ClientContext &context) {
 		ofquack::RequestContext request_context;
@@ -85,6 +86,30 @@ struct FusionAttachedState {
 			}
 		}
 		return nullptr;
+	}
+
+	//! The primary key, from memory, then from the file, then from Fusion.
+	//!
+	//! Paging a table by OFFSET/FETCH needs an order, and the key is the one
+	//! order Oracle can walk through an index without sorting the table first.
+	//! Ordering by every column instead made the first page of XLA_AE_LINES a
+	//! sort of several million rows by a hundred columns, which is how a
+	//! `FETCH FIRST 100 ROWS` sat for two minutes before being cancelled.
+	const std::vector<string> &PrimaryKey(ClientContext &context, const ofquack::TableInfo &table) {
+		const auto key = StringUtil::Upper(table.name);
+		const auto known = primary_keys.find(key);
+		if (known != primary_keys.end()) {
+			return known->second;
+		}
+		std::vector<std::string> columns;
+		auto &cache = MetadataCache::Get();
+		if (!cache.TryGetPrimaryKey(endpoint_key, table.name, columns)) {
+			columns = ofquack::FetchPrimaryKey(*transport, RequestContextFor(context), table.name);
+			cache.PutPrimaryKey(endpoint_key, table.name, columns);
+		}
+		vector<string> as_duckdb;
+		as_duckdb.assign(columns.begin(), columns.end());
+		return primary_keys.emplace(key, std::move(as_duckdb)).first->second;
 	}
 
 	const std::vector<ofquack::ColumnInfo> &Columns(ClientContext &context, const ofquack::TableInfo &table) {
@@ -236,19 +261,50 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 		// rows the previous one returned and skip others -- invisibly, since
 		// every page is individually well formed.
 		//
-		// Ordering by every projected column is a total order on the output:
-		// rows that tie on all of them are interchangeable, so it does not
-		// matter which side of a page boundary they fall.
-		std::vector<uint64_t> positions;
-		for (idx_t i = 0; i < selected.size(); i++) {
-			if (ofquack::IsSortableOracleType(bind_data.columns[selected[i]].oracle_type_name)) {
-				positions.push_back(static_cast<uint64_t>(i) + 1);
+		// Which order matters as much as having one. The primary key is walked
+		// through its index, so a page costs what a page should; anything that
+		// makes Oracle sort the whole table first costs the whole table on
+		// every page, and a large table never returns its first row.
+		auto table = bind_data.state->FindTable(context, bind_data.object_name);
+		const bool is_view = !table || StringUtil::CIEquals(table->type, "VIEW");
+		const auto &key = is_view ? vector<string>() : bind_data.state->PrimaryKey(context, *table);
+		if (!key.empty()) {
+			// By name, not position: the key need not be among the columns
+			// selected, and Oracle allows ordering by a column it does not
+			// return.
+			string order;
+			for (const auto &column : key) {
+				order += (order.empty() ? "" : ", ") + KeywordHelper::WriteQuoted(column, '"');
 			}
+			state->base_sql += " ORDER BY " + order;
+		} else if (!is_view) {
+			// No key. ROWID is unique and, short of row movement, stable, and a
+			// top-N by it is a pass over the table rather than a sort of it.
+			state->base_sql += " ORDER BY ROWID";
+		} else {
+			// A view has neither. Every projected column is a total order on
+			// the output -- rows that tie on all of them are interchangeable --
+			// and it is the only order there is, whatever it costs.
+			std::vector<uint64_t> positions;
+			for (idx_t i = 0; i < selected.size(); i++) {
+				if (ofquack::IsSortableOracleType(bind_data.columns[selected[i]].oracle_type_name)) {
+					positions.push_back(static_cast<uint64_t>(i) + 1);
+				}
+			}
+			state->base_sql = ofquack::AppendOrderByPositions(state->base_sql, positions);
 		}
-		state->base_sql = ofquack::AppendOrderByPositions(state->base_sql, positions);
 	}
 
 	state->page = FetchCatalogPage(bind_data, *state, context, 0);
+	if (state->page.truncated && !state->paginate) {
+		// Paging carries on from the rows received; without it the rows past
+		// the cut are gone, and a silent short answer is worse than an error.
+		throw IOException("Oracle Fusion cut the response off after %llu rows (%llu bytes) of %s: the report "
+		                  "returns at most that much in one response, and paging is off (fetch_size := 0). Turn "
+		                  "paging on so the table is read in pages",
+		                  static_cast<unsigned long long>(state->page.rows.size()),
+		                  static_cast<unsigned long long>(state->page.truncated_at_bytes), bind_data.object_name);
+	}
 	state->more_pages = state->paginate && !state->page.rows.empty();
 	return std::move(state);
 }
@@ -635,9 +691,10 @@ void RegisterFusionCatalog(ExtensionLoader &loader) {
 	                          "translated exactly must fail the query rather than be approximated.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	config.AddExtensionOption("ofquack_stable_paging",
-	                          "Order a paged statement by every column it returns, so that its pages partition the "
-	                          "result instead of sampling it. On by default; turn it off only if Oracle refuses "
-	                          "the ordering, and expect pages to repeat and skip rows when you do.",
+	                          "Give a paged statement an order, so that its pages partition the result instead of "
+	                          "sampling it: an attached table by its primary key (or ROWID), a query by every "
+	                          "column it returns. On by default; turn it off only if Oracle refuses the ordering, "
+	                          "and expect pages to repeat and skip rows when you do.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	auto extension = make_shared_ptr<StorageExtension>();
