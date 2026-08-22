@@ -30,3 +30,24 @@ jobs:
       ci_tools_version: v1.5-variegata
       extension_name: ofquack
       format_checks: 'tidy'
+
+  # Publishes to the maintainer's own S3 bucket, for people who install with
+  # `SET custom_extension_repository`. Installing `FROM community` does not go
+  # through this: that channel is built and served by duckdb/community-extensions
+  # from the SHA pinned in their description.yml.
+  #
+  # Needs S3 credentials in the repository secrets; without them the job fails,
+  # which is why it only runs on a tag rather than on every push.
+  duckdb-stable-deploy:
+    name: Deploy extension binaries
+    needs: duckdb-stable-build
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5-variegata
+    secrets: inherit
+    with:
+      duckdb_version: v1.5.5
+      ci_tools_version: v1.5-variegata
+      extension_name: ofquack
+      deploy_latest: true
+      deploy_versioned: true
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'

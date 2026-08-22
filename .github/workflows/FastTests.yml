@@ -1,0 +1,41 @@
+#
+# The cheap half of the test suite, on every push.
+#
+# The distribution matrix builds DuckDB itself across five platforms and takes
+# the better part of an hour. The pure suite links neither DuckDB nor libcurl,
+# so it builds and runs in seconds -- and it covers the parts most likely to be
+# got wrong: SQL rewriting, type inference, the retry policy, the JWT reader
+# and the WebSocket handshake.
+#
+# Fast feedback on those is worth its own job. This does not replace the matrix.
+#
+name: Fast tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: fast-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pure-tests:
+    name: Pure unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        # tinyxml2, OpenSSL and libcurl from the distribution: this job never
+        # builds DuckDB, so vcpkg would be the slowest part of it by far.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libtinyxml2-dev libssl-dev libcurl4-openssl-dev
+
+      - name: Build and run the pure suite
+        run: |
+          cmake -S test/standalone -B build/pure -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/pure
+          ./build/pure/ofquack_pure_test

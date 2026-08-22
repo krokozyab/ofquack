@@ -1,0 +1,105 @@
+#
+# Does this extension still compile against DuckDB's main branch?
+#
+# The extension is built against DuckDB's internal C++ API, which is not stable
+# between releases -- the migration this repository just went through from
+# v1.2.1 was mostly the cost of finding that out late. Watching `main` turns
+# that into a number that is known before the next release lands.
+#
+# One Linux build, weekly and on demand, that never fails the repository: it
+# compiles against `main` with `-k` so every error is seen, counts them per
+# file, and writes the count to the job summary. A red mark here means "DuckDB
+# moved", not "the repository is broken", and the two must not look alike.
+#
+# Deliberately not the distribution matrix: that would cost five platforms to
+# answer a question one answers, and the reusable workflow cannot be told to
+# tolerate failure.
+#
+name: DuckDB next
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'   # Mondays, 05:23 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: duckdb-next
+  cancel-in-progress: true
+
+jobs:
+  compile-against-main:
+    name: Compile against DuckDB main
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libcurl4-openssl-dev libtinyxml2-dev pkg-config ninja-build
+
+      - name: Point the duckdb submodule at main
+        run: |
+          git -C duckdb fetch --quiet --depth 1 origin main
+          git -C duckdb checkout --quiet FETCH_HEAD
+          echo "DUCKDB_MAIN_SHA=$(git -C duckdb rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "DUCKDB_MAIN_DATE=$(git -C duckdb log -1 --format=%cs)" >> "$GITHUB_ENV"
+
+      - name: Build, keeping going past errors
+        run: |
+          set +e
+          GEN=ninja make release > build.log 2>&1
+          # A second pass with -k reaches every translation unit: the log is the
+          # product here, not the binary.
+          (cd build/release && ninja -k 0 >> ../../build.log 2>&1)
+          exit 0
+
+      - name: Count errors per file
+        id: count
+        run: |
+          python3 - <<'PY' | tee summary.md
+          import re, collections, os
+          text = open("build.log", errors="replace").read()
+          # This project's sources only. The path must be rooted at our checkout
+          # and not inside the duckdb submodule; and one count per distinct
+          # (file, line), because the static and loadable targets compile every
+          # source twice and would otherwise double every number.
+          own = re.findall(
+              r'(?:^|\s)(?:/[^\s:]*?/)?((?:src|test)/(?!.*\bduckdb/)[A-Za-z0-9_./-]+\.(?:cpp|hpp)):(\d+):\d+: error:',
+              text, re.M)
+          own = [(f, l) for f, l in own if not f.startswith("src/include/duckdb/")]
+          per_file = collections.Counter(f for f, _ in set(own))
+          total = sum(per_file.values())
+          sha, date = os.environ["DUCKDB_MAIN_SHA"], os.environ["DUCKDB_MAIN_DATE"]
+          print("## ofquack against DuckDB main `%s` (%s)\n" % (sha, date))
+          if total == 0:
+              print("**Compiles cleanly.** 0 errors in this project's sources.\n")
+          else:
+              print("**%d errors in %d files** of this project's sources.\n" % (total, len(per_file)))
+              print("| File | Errors |\n| --- | ---: |")
+              for f, n in per_file.most_common():
+                  print("| `%s` | %d |" % (f, n))
+              kinds = collections.Counter(
+                  re.sub(r"'[^']*'", "'…'", m)
+                  for m in re.findall(r'error: ([^\n]*)', text))
+              print("\n**Distinct breakages**\n\n| Message | Count |\n| --- | ---: |")
+              for k, n in kinds.most_common(12):
+                  print("| %s | %d |" % (k.replace("|", "\\|")[:110], n))
+          if "too many errors emitted" in text:
+              print("\n_Some files hit the compiler's error limit; counts there are a lower bound._")
+          open(os.environ["GITHUB_OUTPUT"], "a").write("total=%d\n" % total)
+          PY
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the full log
+        uses: actions/upload-artifact@v4
+        with:
+          name: duckdb-main-build-log-${{ env.DUCKDB_MAIN_SHA }}
+          path: build.log
+          retention-days: 30
+
+      - name: Report
+        run: |
+          echo "DuckDB main ${DUCKDB_MAIN_SHA} (${DUCKDB_MAIN_DATE}): ${{ steps.count.outputs.total }} errors"
+          test "${{ steps.count.outputs.total }}" = "0"

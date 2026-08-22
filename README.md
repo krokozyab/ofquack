@@ -4,28 +4,35 @@ This repository is based on https://github.com/duckdb/extension-template, check 
 
 ---
 
-The **Ofquack** extension provides seamless integration between DuckDB and Oracle Fusion via WSDL-based SOAP calls. It allows you to run arbitrary SQL queries against Oracle Fusion database directly from DuckDB, inferring column names at runtime and returning all data as VARCHAR columns—as native DuckDB tables and as resultsets that can be directly consumed by downstream applications.
+Oracle Fusion exposes no SQL endpoint. **Ofquack** reaches its database the way
+Oracle leaves open: your `SELECT` is wrapped in a SOAP `runReport` call to BI
+Publisher, a report runs it through `dbms_xmlgen`, and the rows come back as
+XML — which this extension turns into an ordinary DuckDB result.
+
+Read-only, by construction: BI Publisher cannot write.
 
 ---
 ## Features
 
-**Dynamic Schema Inference:** Automatically parses XML report output, inferring column names at runtime (all columns returned as VARCHAR).
+**Query Fusion directly.** `SELECT * FROM oracle_fusion_query('SELECT … FROM GL_JE_HEADERS')`, with column order following your select list.
 
-**Table Function Interface:** Exposes a simple table function oracle_fusion_query(...) in DuckDB CLI and clients.
+**Or attach it as a database.** `ATTACH 'fusion' AS f (TYPE oracle_fusion)`, then query tables by name, typed from Fusion's own dictionary.
 
-**Credential Handling: Securely** sends Basic‑auth credentials over SOAP.
+**Corporate SSO.** Sign in through a real browser — Okta, Entra, MFA, whatever your organisation uses — with no client secret and no password in the process.
 
-**Chunked Results:** Efficiently streams large result sets in vectorized chunks.
+**Credentials in secrets.** The connection lives in a DuckDB secret, so passwords stay out of SQL text and query history.
 
-**Inferred Column Types:** Numbers, dates and timestamps come back as native DuckDB types, inferred from the data; `all_varchar := true` returns everything as VARCHAR instead.
+**Native column types.** Numbers, dates and timestamps arrive as INTEGER, DECIMAL, DATE and TIMESTAMP rather than as strings; `all_varchar := true` opts out.
 
-**Paging:** Large results are fetched a page at a time, so a wide table does not have to fit in one SOAP response.
+**Paging.** Large results are fetched a page at a time, so a wide table need not fit in one SOAP response.
 
-**Credentials in secrets:** The connection lives in a DuckDB secret, so passwords stay out of SQL text and query history.
+**Cached metadata.** Reading Fusion's dictionary is slow, so the answers are kept on disk between sessions.
 
-**Resilient:** Transient failures are retried with exponential backoff; a failing instance trips a circuit breaker instead of being hammered.
+**Resilient.** Transient failures are retried with exponential backoff; a failing instance trips a circuit breaker instead of being hammered, and requests to one host are serialised so BI Publisher sessions do not pile up.
 
-Column order follows the SELECT list, and a column that Oracle returned as NULL arrives as SQL NULL rather than an empty string.
+A column Oracle returned as NULL arrives as SQL NULL rather than as an empty string.
+
+Further reading: [SSO](docs/SSO.md) · [metadata and caching](docs/METADATA.md) · [capabilities and limits](docs/CAPABILITIES.md)
 
 ---
 
@@ -256,40 +263,59 @@ so its schema is unknown. Add a predicate that matches at least one row, or
 wrap the query so that it always returns one.
 
 ## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
-### Build steps
-Now to build the extension, run:
-```sh
-make
+Dependencies (libcurl, OpenSSL, tinyxml2) come from vcpkg:
+
+```shell
+git clone https://github.com/Microsoft/vcpkg.git ~/vcpkg
+~/vcpkg/bootstrap-vcpkg.sh
+export VCPKG_TOOLCHAIN_PATH=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
-The main binaries that will be built are:
+
+Then:
+
 ```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/ofquack/ofquack.duckdb_extension
+git submodule update --init --recursive
+export GEN=ninja          # the default generator is considerably slower here
+make release              # or: make debug
 ```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `ofquack.duckdb_extension` is the loadable binary as it would be distributed.
+
+Built binaries:
+
+- `./build/release/duckdb` — the DuckDB shell with the extension linked in
+- `./build/release/extension/ofquack/ofquack.duckdb_extension` — the loadable binary
+- `./build/release/test/unittest` — DuckDB's test runner
+
+The extension is built against DuckDB **v1.5.5**. A loadable extension refuses
+to load into any other version, so the `duckdb` submodule, the
+`extension-ci-tools` submodule and `duckdb_version` in the CI workflow have to
+move together.
 
 ## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`.
 
-Now we can use the features from the extension directly in DuckDB. 
+```sh
+./build/release/duckdb
+```
 
 ## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
+
+Three suites, in increasing order of cost:
+
 ```sh
+# Pure unit tests: no DuckDB, no network, about a second.
+cmake -S test/standalone -B build/pure -G Ninja && cmake --build build/pure
+./build/pure/ofquack_pure_test
+
+# Adapter tests: drive the table functions and the catalog against a scripted
+# transport -- still no network and no credentials.
+./build/release/extension/ofquack/ofquack_adapter_test
+
+# SQL tests.
 make test
 ```
+
+Anything that would otherwise need a live Fusion instance belongs in
+`test/cpp/adapter_test.cpp`, which swaps the transport for a scripted one.
 
 ### Installing the deployed binaries
 To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
