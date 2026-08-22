@@ -141,6 +141,24 @@ SELECT * FROM oracle_fusion_query(sql);
 Calling the old name reports this migration rather than "function does not
 exist". That stub will be removed in a later release.
 
+## Choosing an authentication mode
+
+The secret decides, and the extension cannot work it out for you — it has no
+way of knowing whether an instance is behind single sign-on until it tries, and
+trying a password against an SSO instance is pointless.
+
+| What the secret contains | Mode used |
+|---|---|
+| `AUTH 'basic'`, `'bearer'` or `'browser'` | exactly that |
+| `PROVIDER browser` | bearer, via sign-in |
+| a `TOKEN` | bearer |
+| none of the above | basic |
+
+So a secret with `USERNAME` and `PASSWORD` and nothing else uses Basic
+authentication; `PROVIDER browser` is what selects single sign-on. A secret
+with neither is refused up front, naming both possibilities, rather than
+sending an empty credential and reporting Fusion's 401 as a wrong password.
+
 ## Signing in with SSO
 
 If your Fusion instance is behind corporate single sign-on, you do not need a

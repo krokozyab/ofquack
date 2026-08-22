@@ -379,6 +379,28 @@ void TestRemovedFunctionExplainsMigration() {
 	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
 }
 
+//! A secret with no username and no browser provider cannot authenticate at
+//! all. Sending an empty Basic credential and reporting Fusion's 401 would
+//! blame the password, when the mistake is nearly always the mode: an instance
+//! behind single sign-on has no password to give.
+void TestSecretWithNoCredentialNamesBothPossibilities() {
+	Script script;
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	auto created = connection.Query("CREATE SECRET no_creds (TYPE oracle_fusion, "
+	                                "ENDPOINT 'https://plain.example.com/x?WSDL', REPORT_PATH '/r.xdo')");
+	CHECK(!created->HasError());
+
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', secret := 'no_creds')");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("USERNAME") != std::string::npos);
+	CHECK(result->GetError().find("PROVIDER browser") != std::string::npos);
+	// Nothing was sent: an empty credential never reaches Fusion.
+	CHECK(script.executed_sql.empty());
+}
+
 //! An unknown AUTH is a typo worth reporting, and the message names what is
 //! actually accepted.
 void TestUnknownAuthModeIsReported() {
@@ -1313,6 +1335,7 @@ const TestCase TESTS[] = {
     {"fetch size is validated", TestFetchSizeIsValidated},
     {"removed function explains migration", TestRemovedFunctionExplainsMigration},
     {"unknown auth mode is reported", TestUnknownAuthModeIsReported},
+    {"secret with no credential names both possibilities", TestSecretWithNoCredentialNamesBothPossibilities},
     {"paging fetches every row in exactly the right number of requests", TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests},
     {"short first page costs one request", TestShortFirstPageCostsOneRequest},
     {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},

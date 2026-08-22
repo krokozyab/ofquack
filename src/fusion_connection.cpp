@@ -105,10 +105,27 @@ void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 	// Not folded into ResolveFusionConfig, because the SSO functions resolve
 	// the same configuration precisely in order to report on, or fix, the
 	// missing token -- for them this is not an error.
-	if (config.auth != ofquack::AuthMode::BEARER || !config.token.empty()) {
+	const auto host = ofquack::HostOf(config.endpoint);
+
+	if (config.auth == ofquack::AuthMode::BASIC) {
+		// Basic with no username would go out as an empty credential and come
+		// back as a 401, whose message is about checking the password. The real
+		// mistake is almost always the mode: an instance behind single sign-on
+		// has no password to give, and the secret needed PROVIDER browser.
+		if (config.username.empty()) {
+			throw InvalidInputException(
+			    "The secret for %s has no USERNAME, so it cannot authenticate.\n"
+			    "If this instance uses a username and password, add USERNAME and PASSWORD to the secret.\n"
+			    "If it is behind single sign-on, recreate the secret with PROVIDER browser and run "
+			    "SELECT * FROM ofquack_sso_login().",
+			    host);
+		}
 		return;
 	}
-	const auto host = ofquack::HostOf(config.endpoint);
+
+	if (!config.token.empty()) {
+		return;
+	}
 	if (ofquack::TokenCache::Get().Lookup(host).Valid()) {
 		return;
 	}
