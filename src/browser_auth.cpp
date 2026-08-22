@@ -97,6 +97,26 @@ const char *TokenCollectionScript() {
 })())JS";
 }
 
+std::string DefaultLoginUrl(const std::string &endpoint) {
+	if (endpoint.empty()) {
+		return {};
+	}
+	const auto scheme_end = endpoint.find("://");
+	const auto scheme = scheme_end == std::string::npos ? std::string("https://") : endpoint.substr(0, scheme_end + 3);
+	auto rest = scheme_end == std::string::npos ? endpoint : endpoint.substr(scheme_end + 3);
+
+	const auto path = rest.find_first_of("/?#");
+	if (path != std::string::npos) {
+		rest = rest.substr(0, path);
+	}
+	// Credentials in the authority would otherwise be handed to the browser.
+	const auto at = rest.rfind('@');
+	if (at != std::string::npos) {
+		rest = rest.substr(at + 1);
+	}
+	return rest.empty() ? std::string() : scheme + rest;
+}
+
 std::string FindBrowser(const std::string &configured_path) {
 	const auto from_environment = EnvironmentValue("OFQUACK_CHROME_PATH");
 	if (!from_environment.empty()) {

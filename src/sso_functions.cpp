@@ -80,11 +80,7 @@ unique_ptr<FunctionData> SsoLoginBind(ClientContext &context, TableFunctionBindI
 
 	auto settings = options.sso;
 	if (settings.login_url.empty()) {
-		// Signing in happens on the Fusion application host, which is the same
-		// host as the report endpoint.
-		const auto scheme_end = config.endpoint.find("://");
-		settings.login_url = (scheme_end == std::string::npos ? "https://" : config.endpoint.substr(0, scheme_end + 3)) +
-		                     host;
+		settings.login_url = ofquack::DefaultLoginUrl(config.endpoint);
 	}
 
 	std::lock_guard<std::mutex> guard(SignInLock());

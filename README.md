@@ -169,12 +169,16 @@ CREATE SECRET fusion (
     TYPE oracle_fusion,
     PROVIDER browser,
     ENDPOINT 'https://<host>/xmlpserver/services/ExternalReportWSSService?WSDL',
-    REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
-    SSO_LOGIN_URL 'https://<host>'
+    REPORT_PATH '/Custom/Financials/RP_ARB.xdo'
 );
 
 SELECT * FROM ofquack_sso_login();
 ```
+
+The browser is sent to the endpoint's own host, since that is where the
+application lives and reaching it unauthenticated is what triggers the sign-on
+redirect. `SSO_LOGIN_URL` overrides that, for the instances where sign-in
+starts somewhere else.
 
 A browser window opens on your Fusion instance. Sign in the way you normally
 do — Okta, Entra, a second factor, whatever your organisation uses — and the

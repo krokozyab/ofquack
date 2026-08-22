@@ -10,12 +10,18 @@ CREATE SECRET fusion (
     TYPE oracle_fusion,
     PROVIDER browser,
     ENDPOINT 'https://<host>/xmlpserver/services/ExternalReportWSSService?WSDL',
-    REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
-    SSO_LOGIN_URL 'https://<host>'
+    REPORT_PATH '/Custom/Financials/RP_ARB.xdo'
 );
 
 SELECT * FROM ofquack_sso_login();
 ```
+
+There is no separate sign-in URL to configure. The report endpoint and the
+Fusion application share a host, and reaching that host unauthenticated is
+precisely what triggers the sign-on redirect — so the scheme and host of
+`ENDPOINT` are all the browser needs. `SSO_LOGIN_URL` exists only for instances
+where that is not true: a separate vanity host, or a sign-in that has to start
+at a particular page.
 
 1. A browser is launched with a debugging port on loopback and pointed at your
    Fusion instance.

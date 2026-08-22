@@ -40,6 +40,15 @@ BrowserAuthResult AuthenticateThroughBrowser(const BrowserAuthSettings &settings
 //! Order: OFQUACK_CHROME_PATH, then the usual install locations.
 std::string FindBrowser(const std::string &configured_path);
 
+//! Where to send the browser when the secret does not say.
+//!
+//! The report endpoint and the application live on the same host, and reaching
+//! the application unauthenticated is what triggers the sign-on redirect -- so
+//! the scheme and host of the endpoint are all that is needed. sso_login_url
+//! exists for the instances where they are not: a separate vanity host, or a
+//! sign-in that has to start at a particular page.
+std::string DefaultLoginUrl(const std::string &endpoint);
+
 //! The JavaScript run in the signed-in page to collect the token. Exposed so a
 //! test can assert the endpoints it uses without launching anything.
 const char *TokenCollectionScript();

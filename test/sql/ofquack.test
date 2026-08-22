@@ -46,9 +46,10 @@ true
 
 # Creating a browser secret must not open a browser: CREATE SECRET is routinely
 # run from a script, and an interactive step there would hang it.
+# SSO_LOGIN_URL is deliberately absent: it defaults to the endpoint's host.
 statement ok
 CREATE SECRET sso (TYPE oracle_fusion, PROVIDER browser, ENDPOINT 'https://sso.example.com/x?WSDL',
-                   REPORT_PATH '/r.xdo', SSO_LOGIN_URL 'https://sso.example.com');
+                   REPORT_PATH '/r.xdo');
 
 # It also holds no credential at all -- that is the point of it.
 query I

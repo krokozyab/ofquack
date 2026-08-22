@@ -845,6 +845,19 @@ void TestJsonQuoting() {
 	CHECK(ofquack::json::QuoteString("back\\slash") == "\"back\\\\slash\"");
 }
 
+//! sso_login_url is optional: the report endpoint and the application share a
+//! host, and reaching the application unauthenticated is what triggers the
+//! sign-on redirect. Asking for it again would be asking twice for one fact.
+void TestDefaultLoginUrl() {
+	CHECK(ofquack::DefaultLoginUrl("https://fa.example.com/xmlpserver/services/X?WSDL") == "https://fa.example.com");
+	CHECK(ofquack::DefaultLoginUrl("https://fa.example.com:443/x") == "https://fa.example.com:443");
+	// An endpoint with no scheme still yields something openable.
+	CHECK(ofquack::DefaultLoginUrl("fa.example.com/x") == "https://fa.example.com");
+	// Credentials in the authority must not be handed to the browser.
+	CHECK(ofquack::DefaultLoginUrl("https://user:pass@fa.example.com/x") == "https://fa.example.com");
+	CHECK(ofquack::DefaultLoginUrl("").empty());
+}
+
 //! The script is what actually collects the token, so the endpoints it calls
 //! are worth pinning: they are the whole integration contract with Fusion.
 void TestTokenCollectionScript() {
@@ -1047,6 +1060,7 @@ const TestCase TESTS[] = {
     {"json field reading", TestJsonFieldReading},
     {"json array splitting", TestJsonArraySplitting},
     {"json quoting", TestJsonQuoting},
+    {"default login url", TestDefaultLoginUrl},
     {"token collection script", TestTokenCollectionScript},
     {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},
     {"breaker resets on success", TestBreakerResetsOnSuccess},

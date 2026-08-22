@@ -1164,13 +1164,14 @@ void TestShowTablesListsCachedNamesOnly() {
 // SSO
 // ---------------------------------------------------------------------------
 
+//! Note the absence of SSO_LOGIN_URL: it defaults to the endpoint's host, and
+//! requiring it would be asking twice for one fact.
 void CreateBrowserSecret(Connection &connection, const char *name = "sso") {
 	auto result = connection.Query(std::string("CREATE SECRET ") + name +
 	                               " (TYPE oracle_fusion, PROVIDER browser, "
 	                               "ENDPOINT 'https://sso.example.com/xmlpserver/services/"
 	                               "ExternalReportWSSService?WSDL', "
-	                               "REPORT_PATH '/Custom/Financials/RP_ARB.xdo', "
-	                               "SSO_LOGIN_URL 'https://sso.example.com')");
+	                               "REPORT_PATH '/Custom/Financials/RP_ARB.xdo')");
 	if (result->HasError()) {
 		std::cerr << "CREATE SECRET failed: " << result->GetError() << std::endl;
 		std::abort();
