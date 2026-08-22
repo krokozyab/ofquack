@@ -24,7 +24,12 @@ namespace metadata {
 
 //! Rows are limited by an outer ROWNUM wrapper rather than OFFSET/FETCH: these
 //! statements are built by concatenation and may already end in ORDER BY.
-constexpr uint64_t PAGE_SIZE = 2000;
+//!
+//! Kept below the point where BI Publisher truncates a response. It silently
+//! returns fewer rows than asked for rather than reporting anything, so a page
+//! size above that limit does not fail -- it quietly loses the rest of the
+//! dictionary. The same limit is why columns are fetched ten tables at a time.
+constexpr uint64_t PAGE_SIZE = 400;
 
 //! Columns are fetched for several tables at once, but not too many: the report
 //! truncates a response beyond roughly 500 rows, and ten tables of thirty

@@ -732,6 +732,14 @@ void TestHintSurvivesToTheWire() {
 // ---------------------------------------------------------------------------
 
 //! Answers dictionary queries by recognising which one it was asked.
+//! True when a paged dictionary statement is asking for anything past the
+//! first page. A fake that ignores the offset would serve the same rows for
+//! ever, which is what the paging loop's own safety limit is there to catch.
+bool AsksForALaterPage(const std::string &sql) {
+	const auto at = sql.find("rn > ");
+	return at != std::string::npos && sql.compare(at + 5, 1, "0") != 0;
+}
+
 class DictionaryTransport : public FusionTransport {
 public:
 	explicit DictionaryTransport(Script &script_p) : script(script_p) {
@@ -739,6 +747,9 @@ public:
 
 	std::string Execute(const std::string &sql, const RequestContext &) override {
 		script.executed_sql.push_back(sql);
+		if (AsksForALaterPage(sql)) {
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
 
 		if (sql.find("FND_VIEWS") != std::string::npos) {
 			// The outer ROWNUM wrapper means the driver asked for a page; one
@@ -802,9 +813,53 @@ void TestListTables() {
 	CHECK(result->GetValue(1, 0).ToString() == "VIEW");
 	CHECK(result->GetValue(0, 1).ToString() == "GL_JE_HEADERS");
 
-	// The dictionary query is paged by an outer ROWNUM wrapper, not OFFSET.
-	CHECK(script.executed_sql.size() == 1);
+	// Paged by an outer ROWNUM wrapper, not OFFSET. Two requests: the rows,
+	// then the empty page that ends the listing -- a short page cannot end it,
+	// because BI Publisher truncates without saying so.
+	CHECK(script.executed_sql.size() == 2);
 	CHECK(script.executed_sql[0].find("ROWNUM") != std::string::npos);
+}
+
+//! BI Publisher truncates a response without saying so, and a truncated page
+//! is indistinguishable from the last one. Treating a short page as the end
+//! therefore stopped the table list partway through the alphabet -- silently,
+//! so the missing tables looked like tables that do not exist.
+void TestTruncatedPageDoesNotEndTheListing() {
+	ResetCache();
+	struct TruncatingTransport : FusionTransport {
+		int pages = 0;
+		std::vector<std::string> executed;
+
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			executed.push_back(sql);
+			// Three pages: two short ones the server chose to cut, then empty.
+			// A page size of one row is enough to make the point.
+			if (pages++ >= 2) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			const std::string name = pages == 1 ? "AAA_FIRST" : "XLA_AE_LINES";
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;" + name +
+			    "&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;"
+			    "&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	auto transport = std::make_shared<TruncatingTransport>();
+	ScopedTransportFactory installed([&transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT table_name FROM oracle_fusion_tables() ORDER BY table_name");
+
+	// Both pages, not just the first.
+	CHECK(result->RowCount() == 2);
+	CHECK(result->GetValue(0, 0).ToString() == "AAA_FIRST");
+	CHECK(result->GetValue(0, 1).ToString() == "XLA_AE_LINES");
+	// Three requests: two with rows and the empty one that ends it.
+	CHECK(transport->executed.size() == 3);
+	// The offset advances by what actually arrived, not by the page size asked for.
+	CHECK(transport->executed[1].find("rn > 1") != std::string::npos);
 }
 
 //! The whole reason the cache exists: every metadata question costs a BI
@@ -994,6 +1049,9 @@ public:
 
 	std::string Execute(const std::string &sql, const RequestContext &) override {
 		script.executed_sql.push_back(sql);
+		if (AsksForALaterPage(sql)) {
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
 
 		if (sql.find("FND_VIEWS") != std::string::npos) {
 			return MakeSoapResponse(MakeReportXML(
@@ -1191,6 +1249,9 @@ void TestListedButUndescribableTableIsExplained() {
 	ResetCache();
 	struct NoColumnsTransport : FusionTransport {
 		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
 			if (sql.find("FND_VIEWS") != std::string::npos) {
 				return MakeSoapResponse(MakeReportXML(
 				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;XLA_AE_LINES&lt;/TABLE_NAME&gt;"
@@ -1506,6 +1567,7 @@ const TestCase TESTS[] = {
     {"nulls in typed columns", TestNullsInTypedColumns},
     {"hint survives to the wire", TestHintSurvivesToTheWire},
     {"list tables", TestListTables},
+    {"truncated page does not end the listing", TestTruncatedPageDoesNotEndTheListing},
     {"second listing costs nothing", TestSecondListingCostsNothing},
     {"refresh bypasses the cache", TestRefreshBypassesTheCache},
     {"invalidate forces a refetch", TestInvalidateForcesARefetch},

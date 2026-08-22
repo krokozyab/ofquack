@@ -14,6 +14,10 @@ namespace ofquack {
 
 namespace {
 
+//! Upper bound on how many dictionary rows one listing may return, as a guard
+//! against a paging loop that never terminates.
+constexpr size_t MAX_METADATA_ROWS = 500000;
+
 std::string Upper(const std::string &text) {
 	std::string upper;
 	upper.reserve(text.size());
@@ -104,10 +108,21 @@ std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestConte
 			row.erase("rn");
 			all.push_back(std::move(row));
 		}
-		if (page_size < metadata::PAGE_SIZE) {
+		// Stop on an empty page, not on a short one. BI Publisher truncates a
+		// response without saying so, and a truncated page looks exactly like
+		// the last one -- which silently cut the table list off partway
+		// through the alphabet. The cost of being right is one extra request
+		// at the end.
+		if (page_size == 0) {
 			return all;
 		}
 		offset += page_size;
+		// A server that keeps returning rows without advancing would loop for
+		// ever; the dictionary is large but finite.
+		if (all.size() > MAX_METADATA_ROWS) {
+			throw PermanentError("Oracle Fusion returned more than " + std::to_string(MAX_METADATA_ROWS) +
+			                     " dictionary rows without ending; giving up rather than looping");
+		}
 	}
 }
 
