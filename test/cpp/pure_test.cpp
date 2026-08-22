@@ -845,6 +845,31 @@ void TestJsonQuoting() {
 	CHECK(ofquack::json::QuoteString("back\\slash") == "\"back\\\\slash\"");
 }
 
+//! The BI Publisher service is at the same path on every Fusion instance, so
+//! naming the host is enough; requiring the whole URL asks the user to repeat
+//! a constant, and getting it slightly wrong sends the request to the
+//! application, which answers with its home page.
+void TestEndpointNormalisation() {
+	using ofquack::NormalizeFusionEndpoint;
+	const std::string SERVICE = "/xmlpserver/services/ExternalReportWSSService?WSDL";
+
+	CHECK(NormalizeFusionEndpoint("https://fa.example.com") == "https://fa.example.com" + SERVICE);
+	CHECK(NormalizeFusionEndpoint("https://fa.example.com/") == "https://fa.example.com" + SERVICE);
+	// A missing scheme is assumed to be https, not http.
+	CHECK(NormalizeFusionEndpoint("fa.example.com") == "https://fa.example.com" + SERVICE);
+	CHECK(NormalizeFusionEndpoint("  https://fa.example.com  ") == "https://fa.example.com" + SERVICE);
+	CHECK(NormalizeFusionEndpoint("https://fa.example.com:443") == "https://fa.example.com:443" + SERVICE);
+
+	// An endpoint that already carries a path was written deliberately.
+	const auto full = "https://fa.example.com" + SERVICE;
+	CHECK(NormalizeFusionEndpoint(full) == full);
+	CHECK(NormalizeFusionEndpoint("https://proxy.example.com/fusion/xmlpserver/services/X?WSDL") ==
+	      "https://proxy.example.com/fusion/xmlpserver/services/X?WSDL");
+
+	CHECK(NormalizeFusionEndpoint("").empty());
+	CHECK(NormalizeFusionEndpoint("   ").empty());
+}
+
 //! sso_login_url is optional: the report endpoint and the application share a
 //! host, and reaching the application unauthenticated is what triggers the
 //! sign-on redirect. Asking for it again would be asking twice for one fact.
@@ -1060,6 +1085,7 @@ const TestCase TESTS[] = {
     {"json field reading", TestJsonFieldReading},
     {"json array splitting", TestJsonArraySplitting},
     {"json quoting", TestJsonQuoting},
+    {"endpoint normalisation", TestEndpointNormalisation},
     {"default login url", TestDefaultLoginUrl},
     {"token collection script", TestTokenCollectionScript},
     {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},

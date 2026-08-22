@@ -237,9 +237,12 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 	}
 
 	if (config.endpoint.empty()) {
-		throw BinderException("No ENDPOINT: set it on the secret or pass endpoint := 'https://…/"
-		                      "ExternalReportWSSService?WSDL'");
+		throw BinderException("No ENDPOINT: set it on the secret or pass endpoint := 'https://<your-fusion-host>'");
 	}
+	// Done before the endpoint is used as a cache key or a throttle key, so
+	// that naming the host and naming the full service URL are one connection
+	// rather than two.
+	config.endpoint = ofquack::NormalizeFusionEndpoint(config.endpoint);
 	if (config.report_path.empty()) {
 		throw BinderException("No REPORT_PATH: set it on the secret or pass "
 		                      "report_path := '/Custom/Financials/RP_ARB.xdo'");

@@ -379,6 +379,44 @@ void TestRemovedFunctionExplainsMigration() {
 	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
 }
 
+//! A secret naming only the instance is completed to the service URL. The
+//! path is the same on every Fusion instance, and getting it slightly wrong
+//! sends the POST to the application, which answers with its home page --
+//! a failure several layers removed from its cause.
+void TestBareHostEndpointIsCompleted() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	auto created = connection.Query("CREATE SECRET host_only (TYPE oracle_fusion, "
+	                                "ENDPOINT 'https://fa.example.com', REPORT_PATH '/Custom/RP_ARB.xdo', "
+	                                "USERNAME 'u', PASSWORD 'p')");
+	CHECK(!created->HasError());
+
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM T', secret := 'host_only')");
+
+	CHECK(script.configs.size() == 1);
+	CHECK(script.configs[0].endpoint ==
+	      "https://fa.example.com/xmlpserver/services/ExternalReportWSSService?WSDL");
+}
+
+//! An endpoint that already names the service is left exactly as written.
+void TestFullEndpointIsLeftAlone() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM T')");
+
+	CHECK(script.configs[0].endpoint ==
+	      "https://fusion.example.com/xmlpserver/services/ExternalReportWSSService?WSDL");
+}
+
 //! Defined with the metadata tests below; the cache is a process-wide
 //! singleton, so a test asserting a fetch must start from an empty one.
 void ResetCache();
@@ -1368,6 +1406,8 @@ const TestCase TESTS[] = {
     {"unknown auth mode is reported", TestUnknownAuthModeIsReported},
     {"secret with no credential names both possibilities", TestSecretWithNoCredentialNamesBothPossibilities},
     {"metadata failure shows what arrived", TestMetadataFailureShowsWhatArrived},
+    {"bare host endpoint is completed", TestBareHostEndpointIsCompleted},
+    {"full endpoint is left alone", TestFullEndpointIsLeftAlone},
     {"paging fetches every row in exactly the right number of requests", TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests},
     {"short first page costs one request", TestShortFirstPageCostsOneRequest},
     {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},

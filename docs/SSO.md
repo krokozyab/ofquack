@@ -9,7 +9,7 @@ no password to put in a secret. This is the way round that.
 CREATE SECRET fusion (
     TYPE oracle_fusion,
     PROVIDER browser,
-    ENDPOINT 'https://<host>/xmlpserver/services/ExternalReportWSSService?WSDL',
+    ENDPOINT 'https://<your-fusion-host>',
     REPORT_PATH '/Custom/Financials/RP_ARB.xdo'
 );
 

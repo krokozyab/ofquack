@@ -57,7 +57,7 @@ Store the connection once, as a DuckDB secret, then query:
 ```sql
 CREATE SECRET fusion (
     TYPE oracle_fusion,
-    ENDPOINT 'https://<your-host>/xmlpserver/services/ExternalReportWSSService?WSDL',
+    ENDPOINT 'https://<your-fusion-host>',
     REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
     USERNAME '<username>',
     PASSWORD '<password>'
@@ -91,7 +91,7 @@ parameters override whatever the secret carries:
 | Parameter | Meaning |
 |---|---|
 | `secret` | Name of the secret to use. Needed only when several are defined. |
-| `endpoint` | WSDL endpoint URL. |
+| `endpoint` | The Fusion instance, e.g. `https://host.fa.ocs.oraclecloud.com`. The BI Publisher path is appended for you; give a full URL only if yours is non-standard. |
 | `report_path` | Absolute path of the report, e.g. `/Custom/Financials/RP_ARB.xdo`. |
 | `username`, `password` | Fusion credentials. |
 | `fetch_size` | Rows per request, 1–10000. `0` disables paging. |
@@ -168,7 +168,7 @@ password in a secret at all:
 CREATE SECRET fusion (
     TYPE oracle_fusion,
     PROVIDER browser,
-    ENDPOINT 'https://<host>/xmlpserver/services/ExternalReportWSSService?WSDL',
+    ENDPOINT 'https://<your-fusion-host>',
     REPORT_PATH '/Custom/Financials/RP_ARB.xdo'
 );
 

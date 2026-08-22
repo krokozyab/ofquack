@@ -53,6 +53,15 @@ std::shared_ptr<CircuitBreaker> BreakerForHost(const std::string &host, const Ci
 //! Host part of a URL, used as the throttle and breaker key.
 std::string HostOf(const std::string &url);
 
+//! Completes an endpoint that names only the instance.
+//!
+//! The BI Publisher service lives at the same path on every Fusion instance,
+//! so making the user repeat it is asking for a constant. Given a bare host
+//! this appends `/xmlpserver/services/ExternalReportWSSService?WSDL`, adds
+//! https:// when no scheme is given, and leaves an endpoint that already has a
+//! path alone -- that one was written deliberately.
+std::string NormalizeFusionEndpoint(const std::string &endpoint);
+
 //! Test seam: drops every registered throttle and breaker.
 void ResetHostStateForTesting();
 

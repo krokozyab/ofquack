@@ -57,6 +57,35 @@ std::string HostOf(const std::string &url) {
 	return rest;
 }
 
+std::string NormalizeFusionEndpoint(const std::string &endpoint) {
+	auto trimmed = endpoint;
+	const auto first = trimmed.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos) {
+		return {};
+	}
+	const auto last = trimmed.find_last_not_of(" \t\r\n");
+	trimmed = trimmed.substr(first, last - first + 1);
+
+	const auto scheme_end = trimmed.find("://");
+	const auto scheme = scheme_end == std::string::npos ? std::string("https://") : trimmed.substr(0, scheme_end + 3);
+	auto rest = scheme_end == std::string::npos ? trimmed : trimmed.substr(scheme_end + 3);
+
+	// Anything past the authority is the user's own choice of path, including a
+	// query string, and is kept.
+	const auto path_start = rest.find_first_of("/?#");
+	if (path_start != std::string::npos) {
+		const auto path = rest.substr(path_start);
+		if (path != "/") {
+			return scheme + rest;
+		}
+		rest = rest.substr(0, path_start);
+	}
+	if (rest.empty()) {
+		return {};
+	}
+	return scheme + rest + "/xmlpserver/services/ExternalReportWSSService?WSDL";
+}
+
 std::shared_ptr<HostThrottle> ThrottleForHost(const std::string &host, uint32_t max_concurrent) {
 	auto &registry = Registry();
 	std::lock_guard<std::mutex> guard(registry.lock);
