@@ -100,12 +100,10 @@ std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestConte
 	std::vector<ReportRow> all;
 	uint64_t offset = 0;
 	for (;;) {
-		auto page = Query(transport, context, metadata::PaginateByRownum(base_sql, offset));
+		auto page = Query(transport, context, metadata::PaginateByOffset(base_sql, offset));
 		const auto page_size = page.size();
 		for (auto &row : page) {
-			// The wrapper adds RN; it is an artefact of paging, not data.
-			row.erase("RN");
-			row.erase("rn");
+			// OFFSET/FETCH adds no columns of its own, so nothing to strip.
 			all.push_back(std::move(row));
 		}
 		// Stop on an empty page, not on a short one. BI Publisher truncates a

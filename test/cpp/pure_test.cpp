@@ -641,14 +641,19 @@ void TestMetadataQueriesEscapeLiterals() {
 	CHECK(!Contains(columns, "DROP TABLE"));
 }
 
-void TestRownumPagination() {
-	const auto paged = ofquack::metadata::PaginateByRownum("SELECT a FROM t", 0, 2000);
-	CHECK(Contains(paged, "ROWNUM <= 2000"));
-	CHECK(Contains(paged, "rn > 0"));
+void TestOffsetPagination() {
+	// The row-limiting clause is appended after ORDER BY, not wrapped around
+	// the statement. A ROWNUM wrapper makes the inner query produce offset+n
+	// rows and discard the first offset of them; once that inner count passes
+	// the report's own row limit the server truncates it, the outer filter
+	// finds nothing, and the listing looks finished. That stopped a
+	// 27,000-table dictionary at 4,000 on a real instance.
+	const auto first = ofquack::metadata::PaginateByOffset("SELECT a FROM t ORDER BY a", 0, 400);
+	CHECK(first == "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 400 ROWS ONLY");
+	CHECK(!Contains(first, "ROWNUM"));
 
-	const auto second = ofquack::metadata::PaginateByRownum("SELECT a FROM t", 2000, 2000);
-	CHECK(Contains(second, "ROWNUM <= 4000"));
-	CHECK(Contains(second, "rn > 2000"));
+	const auto deep = ofquack::metadata::PaginateByOffset("SELECT a FROM t ORDER BY a", 26000, 400);
+	CHECK(Contains(deep, "OFFSET 26000 ROWS FETCH NEXT 400 ROWS ONLY"));
 }
 
 //! The dictionary aliases are shifted by one: the column labelled
@@ -1074,7 +1079,7 @@ const TestCase TESTS[] = {
     {"apply secured views", TestApplySecuredViews},
     {"metadata queries use fusion dictionary", TestMetadataQueriesUseFusionDictionary},
     {"metadata queries escape literals", TestMetadataQueriesEscapeLiterals},
-    {"rownum pagination", TestRownumPagination},
+    {"offset pagination", TestOffsetPagination},
     {"oracle type mapping", TestOracleTypeMapping},
     {"jwt claims", TestJwtClaims},
     {"base64url decoding", TestBase64UrlDecoding},

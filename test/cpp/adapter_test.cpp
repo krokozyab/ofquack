@@ -736,8 +736,8 @@ void TestHintSurvivesToTheWire() {
 //! first page. A fake that ignores the offset would serve the same rows for
 //! ever, which is what the paging loop's own safety limit is there to catch.
 bool AsksForALaterPage(const std::string &sql) {
-	const auto at = sql.find("rn > ");
-	return at != std::string::npos && sql.compare(at + 5, 1, "0") != 0;
+	const auto at = sql.find("OFFSET ");
+	return at != std::string::npos && sql.compare(at + 7, 1, "0") != 0;
 }
 
 class DictionaryTransport : public FusionTransport {
@@ -822,7 +822,7 @@ void TestListTables() {
 	// without saying so -- which is what the count is there to catch.
 	CHECK(script.executed_sql.size() == 3);
 	CHECK(script.executed_sql[0].find("COUNT(*)") != std::string::npos);
-	CHECK(script.executed_sql[1].find("ROWNUM") != std::string::npos);
+	CHECK(script.executed_sql[1].find("OFFSET 0 ROWS FETCH NEXT") != std::string::npos);
 }
 
 //! BI Publisher truncates a response without saying so, and a truncated page
@@ -870,7 +870,7 @@ void TestTruncatedPageDoesNotEndTheListing() {
 	// Four requests: the count, two with rows, and the empty one that ends it.
 	CHECK(transport->executed.size() == 4);
 	// The offset advances by what actually arrived, not by the page size asked for.
-	CHECK(transport->executed[2].find("rn > 1") != std::string::npos);
+	CHECK(transport->executed[2].find("OFFSET 1 ROWS") != std::string::npos);
 }
 
 //! A listing that comes back short of what the instance says it has is

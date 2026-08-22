@@ -39,8 +39,19 @@ constexpr size_t COLUMN_BATCH_SIZE = 10;
 //! Fusion's dictionary presents everything under one schema.
 constexpr const char *SCHEMA = "FUSION";
 
-//! Wraps a statement so it returns rows (offset, offset + PAGE_SIZE].
-std::string PaginateByRownum(const std::string &base_sql, uint64_t offset, uint64_t page_size = PAGE_SIZE);
+//! Limits a statement to rows (offset, offset + page_size].
+//!
+//! Uses Oracle's row-limiting clause rather than a ROWNUM wrapper. The wrapper
+//! form -- SELECT * FROM (SELECT ROWNUM rn, … WHERE ROWNUM <= offset+n) WHERE
+//! rn > offset -- makes the *inner* query produce offset+n rows and throws away
+//! the first offset of them. Once that inner count passes the report's own row
+//! limit the server truncates it, the outer filter finds nothing, and the
+//! listing appears to have ended: on a real instance that stopped a
+//! 27,000-table dictionary at 4,000.
+//!
+//! OFFSET/FETCH pushes the skipping into the server, so each page costs one
+//! page of rows however deep it is.
+std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint64_t page_size = PAGE_SIZE);
 
 //! Tables and views. `types` is a list such as {"TABLE", "VIEW"}.
 std::string TablesByTypes(const std::vector<std::string> &types);

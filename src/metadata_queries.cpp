@@ -69,10 +69,11 @@ std::string QuoteLiteral(const std::string &value) {
 	return quoted;
 }
 
-std::string PaginateByRownum(const std::string &base_sql, uint64_t offset, uint64_t page_size) {
+std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint64_t page_size) {
+	// Appended, not wrapped: every statement here ends in ORDER BY, which is
+	// exactly where the row-limiting clause belongs.
 	std::ostringstream oss;
-	oss << "SELECT * FROM (SELECT ROWNUM AS rn, sub.* FROM (" << base_sql << ") sub WHERE ROWNUM <= "
-	    << offset + page_size << ") WHERE rn > " << offset;
+	oss << base_sql << " OFFSET " << offset << " ROWS FETCH NEXT " << page_size << " ROWS ONLY";
 	return oss.str();
 }
 

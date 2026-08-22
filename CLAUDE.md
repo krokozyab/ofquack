@@ -221,8 +221,11 @@ must not be "tidied":
   `NUM_PREC_RADIX` — shifted by one from what the names say. `metadata_fetch.cpp` un-shifts them
   once; correcting one end without the other turns `NUMBER(10,0)` into `DECIMAL(0,10)`.
 
-Paging here uses an outer `ROWNUM` wrapper, not `OFFSET/FETCH`, because these statements are
-built by concatenation and may already end in `ORDER BY`. Columns are fetched ten tables at a
+Paging here appends Oracle`s row-limiting clause after the `ORDER BY` these statements already
+end in. A `ROWNUM` wrapper looks equivalent and is not: it makes the inner query produce
+`offset+n` rows and discard the first `offset`, so once that inner count passes the report`s own
+row limit the server truncates it, the outer filter finds nothing, and the listing appears to
+end. That stopped a 27,000-table dictionary at 4,000. Columns are fetched ten tables at a
 time: the report truncates a response past roughly 500 rows.
 
 Unlike the JDBC driver, names are escaped before interpolation (`QuoteLiteral`) and non-numeric
