@@ -27,7 +27,7 @@ struct ColumnInfo {
 
 //! Lists tables and views. Cost: one request per PAGE_SIZE rows.
 std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
-                                   const std::vector<std::string> &types);
+                                   const std::vector<std::string> &types, uint64_t page_size = 0);
 
 //! How many tables and views the dictionary holds, in one request.
 //!

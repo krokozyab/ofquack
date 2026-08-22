@@ -35,18 +35,44 @@ turns `NUMBER(10,0)` into `DECIMAL(0,10)`.
 
 ## Paging and batching
 
-Dictionary statements are paged with an outer `ROWNUM` wrapper rather than
-`OFFSET`/`FETCH`, because they are assembled by concatenation and may already
-end in `ORDER BY`:
+The dictionary is far larger than one report response can carry, so every
+listing is paged. How it is paged differs by statement, and the difference is
+not cosmetic.
+
+**The table listing seeks, it does not skip.** Each page asks for the names that
+sort after the last name of the previous page:
 
 ```sql
-SELECT * FROM (SELECT ROWNUM AS rn, sub.* FROM (<statement>) sub
-               WHERE ROWNUM <= <offset+2000>) WHERE rn > <offset>
+... WHERE (t.table_name > '<last>'
+           OR (t.table_name = '<last>' AND t.table_type > '<last type>'))
+    ORDER BY t.table_name, t.table_type FETCH FIRST 400 ROWS ONLY
 ```
 
-Columns are fetched **ten tables at a time**. Not one — that would be ten times
-the round trips — and not a hundred: the report truncates a response past
+`OFFSET 20000 ROWS` makes the server sort and discard twenty thousand rows to
+return four hundred, and the cost grows with every page — deep in the alphabet
+the report gives up and answers with nothing, which is indistinguishable from
+the end of the data. Seeking from the last name keeps every page the same
+price, so page five hundred costs what page one did.
+
+Where a page comes back empty, the session is discarded and the same page asked
+again on a fresh one. BI Publisher meters a session, and a session that has run
+out returns nothing rather than an error — the retry is what tells the two apart.
+
+Columns still page by `OFFSET`/`FETCH`, because they never run deep enough for
+the difference to matter, and are fetched **ten tables at a time**. Not one —
+that would be ten times the round trips — and not a hundred: the report truncates a response past
 roughly 500 rows, and ten tables of thirty columns stays under that.
+
+Page size is 400 rows and can be lowered when an instance is stingier than that:
+
+```sql
+SET ofquack_metadata_page_size = 200;
+```
+
+A listing that ends short is never cached. `oracle_fusion_tables()` first asks
+the instance how many tables and views it has, and refuses a listing that
+returned fewer — a partial dictionary that looks complete is worse than an
+error, because every later lookup silently misses.
 
 ## The cache
 

@@ -823,10 +823,10 @@ void TestListTables() {
 	CHECK(result->GetValue(1, 0).ToString() == "VIEW");
 	CHECK(result->GetValue(0, 1).ToString() == "GL_JE_HEADERS");
 
-	// Three requests: the count, the rows, and the empty page that ends the
-	// listing. A short page cannot end it, because BI Publisher truncates
-	// without saying so -- which is what the count is there to catch.
-	CHECK(script.executed_sql.size() == 3);
+	// Four requests: the count, the rows, the empty page, and one retry of it
+	// on a fresh session -- an exhausted BI Publisher session also returns
+	// nothing, so an empty page is confirmed before it is believed.
+	CHECK(script.executed_sql.size() == 4);
 	CHECK(script.executed_sql[0].find("COUNT(*)") != std::string::npos);
 	CHECK(script.executed_sql[1].find("FETCH FIRST") != std::string::npos);
 	// Keyset paging, so the first page carries no seek predicate.
@@ -875,12 +875,64 @@ void TestTruncatedPageDoesNotEndTheListing() {
 	CHECK(result->RowCount() == 2);
 	CHECK(result->GetValue(0, 0).ToString() == "AAA_FIRST");
 	CHECK(result->GetValue(0, 1).ToString() == "XLA_AE_LINES");
-	// Four requests: the count, two with rows, and the empty one that ends it.
-	CHECK(transport->executed.size() == 4);
+	// Five requests: the count, two with rows, the empty one, and its retry on
+	// a fresh session.
+	CHECK(transport->executed.size() == 5);
 	// The cursor is the last name the page actually delivered, so a page the
 	// server chose to cut short resumes from where it stopped rather than from
 	// where a fixed page size would have put it.
 	CHECK(transport->executed[2].find("t.table_name > 'AAA_FIRST'") != std::string::npos);
+}
+
+//! An empty page is retried on a fresh session before it is believed.
+//!
+//! A BI Publisher session appears to have an allowance: past it, pages come
+//! back empty rather than failing, which is exactly what running out of data
+//! looks like. On a real instance the listing stopped at 4,000 rows, then
+//! 5,600, then 7,200 as the statement got cheaper -- a boundary that moves with
+//! cost, not a boundary in the data.
+void TestEmptyPageIsRetriedOnAFreshSession() {
+	ResetCache();
+	struct ExhaustingTransport : FusionTransport {
+		int pages = 0;
+		int resets = 0;
+
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("COUNT(*)") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;2&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			pages++;
+			// The session gives one page, then goes quiet until it is reset.
+			if (pages == 2 && resets == 0) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			if (pages > 3) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			const std::string name = pages == 1 ? "AAA_FIRST" : "ZZZ_LAST";
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;" + name +
+			    "&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;"
+			    "&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+
+		void ResetSession() override {
+			resets++;
+		}
+	};
+	auto transport = std::make_shared<ExhaustingTransport>();
+	ScopedTransportFactory installed([&transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT table_name FROM oracle_fusion_tables() ORDER BY table_name");
+
+	// Both rows: the row after the exhausted session was not lost.
+	CHECK(result->RowCount() == 2);
+	CHECK(result->GetValue(0, 1).ToString() == "ZZZ_LAST");
+	CHECK(transport->resets >= 1);
 }
 
 //! A listing that comes back short of what the instance says it has is
@@ -1629,6 +1681,7 @@ const TestCase TESTS[] = {
     {"hint survives to the wire", TestHintSurvivesToTheWire},
     {"list tables", TestListTables},
     {"truncated page does not end the listing", TestTruncatedPageDoesNotEndTheListing},
+    {"empty page is retried on a fresh session", TestEmptyPageIsRetriedOnAFreshSession},
     {"short listing is reported rather than cached", TestShortListingIsReportedRatherThanCached},
     {"second listing costs nothing", TestSecondListingCostsNothing},
     {"refresh bypasses the cache", TestRefreshBypassesTheCache},

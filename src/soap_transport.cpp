@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <memory>
 #include <random>
 #include <thread>
 
@@ -146,6 +147,11 @@ public:
 	      random_engine(std::random_device {}()) {
 	}
 
+	void ResetSession() override {
+		HostThrottle::Slot slot(*throttle);
+		client = std::make_unique<HttpClient>();
+	}
+
 	std::string Execute(const std::string &sql, const RequestContext &context) override {
 		const RetryPolicy policy {config.max_attempts, config.retry_base_ms, config.retry_max_ms, 2.0, 0.2};
 
@@ -205,7 +211,7 @@ private:
 
 		HttpResponse response;
 		try {
-			response = client.Post(request);
+			response = client->Post(request);
 		} catch (const FusionError &) {
 			breaker->RecordFailure();
 			throw;
@@ -250,7 +256,7 @@ private:
 	std::string host;
 	std::shared_ptr<HostThrottle> throttle;
 	std::shared_ptr<CircuitBreaker> breaker;
-	HttpClient client;
+	std::unique_ptr<HttpClient> client = std::make_unique<HttpClient>();
 	std::mt19937 random_engine;
 };
 

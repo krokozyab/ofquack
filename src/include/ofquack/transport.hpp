@@ -60,6 +60,17 @@ public:
 	//! Runs one SQL statement through BI Publisher and returns the raw SOAP
 	//! response body. Throws on transport failure.
 	virtual std::string Execute(const std::string &sql, const RequestContext &context) = 0;
+
+	//! Drops the connection and its session cookie, so the next request starts
+	//! a fresh BI Publisher session.
+	//!
+	//! Reusing one session across a long listing is normally the right thing --
+	//! it saves the server the cost of establishing one per page. But a session
+	//! appears to accumulate some allowance, after which pages come back empty
+	//! rather than failing, which is indistinguishable from having reached the
+	//! end of the data. Starting over is how that is told apart.
+	virtual void ResetSession() {
+	}
 };
 
 using TransportFactory = std::function<std::shared_ptr<FusionTransport>(const FusionConfig &)>;

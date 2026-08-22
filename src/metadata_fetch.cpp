@@ -142,7 +142,8 @@ int TypePriority(const std::string &type) {
 } // namespace
 
 std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
-                                   const std::vector<std::string> &types) {
+                                   const std::vector<std::string> &types, uint64_t page_size) {
+	const auto rows_per_page = page_size > 0 ? page_size : metadata::PAGE_SIZE;
 	// Paged by seeking from the last name seen rather than by OFFSET: see
 	// TablesAfter for why depth-proportional paging fails against this report.
 	std::vector<ReportRow> rows;
@@ -150,9 +151,19 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 	std::string after_type;
 	for (;;) {
 		auto page = Query(transport, context,
-		                  metadata::TablesAfter(types, after_name, after_type, metadata::PAGE_SIZE));
+		                  metadata::TablesAfter(types, after_name, after_type, rows_per_page));
 		if (page.empty()) {
-			break;
+			// An empty page is how the end of the data looks -- and also how a
+			// session that has used up whatever allowance BI Publisher grants
+			// it looks, since that returns nothing rather than failing. Start a
+			// fresh session and ask once more: if the data really has run out,
+			// the answer is the same and this costs one request.
+			transport.ResetSession();
+			page = Query(transport, context,
+			             metadata::TablesAfter(types, after_name, after_type, rows_per_page));
+			if (page.empty()) {
+				break;
+			}
 		}
 
 		// The cursor comes from the last row of the page as the server ordered

@@ -85,6 +85,20 @@ bool WantsRefresh(const named_parameter_map_t &named_parameters) {
 	return entry != named_parameters.end() && !entry->second.IsNull() && entry->second.GetValue<bool>();
 }
 
+//! Rows per dictionary page, overridable because the limit that governs it
+//! lives on the server and is not documented anywhere we can read.
+uint64_t MetadataPageSize(ClientContext &context, const named_parameter_map_t &named_parameters) {
+	const auto entry = named_parameters.find("page_size");
+	if (entry != named_parameters.end() && !entry->second.IsNull()) {
+		return entry->second.GetValue<uint64_t>();
+	}
+	Value setting;
+	if (context.TryGetCurrentSetting("ofquack_metadata_page_size", setting) && !setting.IsNull()) {
+		return setting.GetValue<uint64_t>();
+	}
+	return 0; // the built-in default
+}
+
 int64_t TtlFor(const named_parameter_map_t &named_parameters) {
 	const auto entry = named_parameters.find("cache_ttl_seconds");
 	if (entry == named_parameters.end() || entry->second.IsNull()) {
@@ -119,15 +133,21 @@ unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInp
 		// that reads the cache.
 		const auto expected = WithTranslatedErrors(
 		    [&]() { return ofquack::FetchTableCount(*transport, request_context, {"TABLE", "VIEW"}); });
+		const auto page_size = MetadataPageSize(context, input.named_parameters);
 		tables = WithTranslatedErrors(
-		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}); });
+		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}, page_size); });
 
 		if (expected >= 0 && static_cast<int64_t>(tables.size()) < expected) {
+			// The last name reached is the useful part: where the listing gave
+			// up says more about why than the count does.
+			const auto reached = tables.empty() ? std::string("nothing") : tables.back().name;
 			throw IOException(
 			    "Oracle Fusion says its dictionary holds %lld tables and views but the listing returned only "
-			    "%lld.\nThe response was truncated somewhere, so the list is incomplete and has not been "
-			    "cached. Retry, or lower the page size if this persists.",
-			    static_cast<long long>(expected), static_cast<long long>(tables.size()));
+			    "%lld, stopping after %s.\nThe list is incomplete and has not been cached. This is a limit on "
+			    "the report rather than on the query -- retry, and if it stops in the same place again, ask for "
+			    "smaller pages: SET ofquack_metadata_page_size = %llu.",
+			    static_cast<long long>(expected), static_cast<long long>(tables.size()), reached,
+			    static_cast<unsigned long long>((page_size > 0 ? page_size : ofquack::metadata::PAGE_SIZE) / 2));
 		}
 		cache.PutTables(endpoint_key, tables);
 		cache.SetExpectedTables(endpoint_key, expected);
@@ -468,10 +488,17 @@ unique_ptr<FunctionData> CacheInvalidateBind(ClientContext &context, TableFuncti
 } // namespace
 
 void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
+	DBConfig::GetConfig(loader.GetDatabaseInstance())
+	    .AddExtensionOption("ofquack_metadata_page_size",
+	                        "Rows per page when listing Oracle Fusion's dictionary. Lower it if a listing "
+	                        "keeps stopping short of the instance's own table count.",
+	                        LogicalType::UBIGINT, Value::UBIGINT(ofquack::metadata::PAGE_SIZE));
+
 	TableFunction tables("oracle_fusion_tables", {}, ScanMaterialised, TablesBind, InitMaterialised);
 	AddFusionNamedParameters(tables);
 	tables.named_parameters["refresh"] = LogicalType::BOOLEAN;
 	tables.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
+	tables.named_parameters["page_size"] = LogicalType::UBIGINT;
 	loader.RegisterFunction(tables);
 
 	TableFunction columns("oracle_fusion_columns", {LogicalType::VARCHAR}, ScanMaterialised, ColumnsBind,
