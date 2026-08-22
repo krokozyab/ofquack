@@ -52,6 +52,18 @@ std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const R
 std::vector<ColumnInfo> FetchColumnsOfView(FusionTransport &transport, const RequestContext &context,
                                            const std::string &view_name);
 
+//! One index: its name and its columns in position order.
+struct IndexInfo {
+	std::string name;
+	std::vector<std::string> columns;
+};
+
+//! The unique indexes of a table, fewest columns first. A Fusion table often
+//! has no declared primary key but does have a unique index (the _U1), which
+//! serves the same purpose for ordering a paged read.
+std::vector<IndexInfo> FetchUniqueIndexes(FusionTransport &transport, const RequestContext &context,
+                                          const std::string &table_name);
+
 //! Primary key column names, in key order. Empty when there is no primary key.
 std::vector<std::string> FetchPrimaryKey(FusionTransport &transport, const RequestContext &context,
                                          const std::string &table_name);

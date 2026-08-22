@@ -47,11 +47,13 @@ public:
 	int64_t ExpectedTables(const std::string &endpoint_key);
 	void SetExpectedTables(const std::string &endpoint_key, int64_t expected);
 
-	//! Primary key of a table, in key order; an empty list is a recorded "no
-	//! primary key", which is as much an answer as any other. False on a miss.
-	bool TryGetPrimaryKey(const std::string &endpoint_key, const std::string &table_name,
+	//! The key a paged read of the table seeks by -- the primary key, or failing
+	//! that a unique index over NOT NULL columns -- in key order. An empty list
+	//! is a recorded "no key", which is as much an answer as any other. False
+	//! on a miss.
+	bool TryGetOrderKey(const std::string &endpoint_key, const std::string &table_name,
 	                      std::vector<std::string> &key_columns);
-	void PutPrimaryKey(const std::string &endpoint_key, const std::string &table_name,
+	void PutOrderKey(const std::string &endpoint_key, const std::string &table_name,
 	                   const std::vector<std::string> &key_columns);
 
 	//! Returns false when nothing is cached for this endpoint, when what is

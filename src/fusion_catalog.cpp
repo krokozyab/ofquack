@@ -25,9 +25,11 @@
 #include "ofquack/transport.hpp"
 #include "ofquack/xml_report.hpp"
 
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -54,7 +56,7 @@ struct FusionAttachedState {
 	bool tables_loaded = false;
 	std::vector<ofquack::TableInfo> tables;
 	std::unordered_map<string, std::vector<ofquack::ColumnInfo>> columns_by_table;
-	std::unordered_map<string, vector<string>> primary_keys;
+	std::unordered_map<string, vector<string>> order_keys;
 
 	ofquack::RequestContext RequestContextFor(ClientContext &context) {
 		ofquack::RequestContext request_context;
@@ -88,28 +90,51 @@ struct FusionAttachedState {
 		return nullptr;
 	}
 
-	//! The primary key, from memory, then from the file, then from Fusion.
+	//! The key a paged read seeks by: the primary key, or failing that a unique
+	//! index over NOT NULL columns. From memory, then the file, then Fusion.
 	//!
-	//! Paging a table by OFFSET/FETCH needs an order, and the key is the one
-	//! order Oracle can walk through an index without sorting the table first.
-	//! Ordering by every column instead made the first page of XLA_AE_LINES a
-	//! sort of several million rows by a hundred columns, which is how a
-	//! `FETCH FIRST 100 ROWS` sat for two minutes before being cancelled.
-	const std::vector<string> &PrimaryKey(ClientContext &context, const ofquack::TableInfo &table) {
+	//! Paging needs an order, and it needs one Oracle can walk through an index
+	//! rather than sort the table for. Ordering by every column made the first
+	//! page of XLA_AE_LINES a sort of several million rows by a hundred
+	//! columns, which is how a `FETCH FIRST 100 ROWS` sat for two minutes. A
+	//! unique index is accepted only over NOT NULL columns: a NULL in the key
+	//! is a row nothing sorts after, and the seek would skip it.
+	//!
+	//! Empty means there is no key at all, which is answered with ROWID.
+	const std::vector<string> &OrderKey(ClientContext &context, const ofquack::TableInfo &table) {
 		const auto key = StringUtil::Upper(table.name);
-		const auto known = primary_keys.find(key);
-		if (known != primary_keys.end()) {
+		const auto known = order_keys.find(key);
+		if (known != order_keys.end()) {
 			return known->second;
 		}
 		std::vector<std::string> columns;
 		auto &cache = MetadataCache::Get();
-		if (!cache.TryGetPrimaryKey(endpoint_key, table.name, columns)) {
-			columns = ofquack::FetchPrimaryKey(*transport, RequestContextFor(context), table.name);
-			cache.PutPrimaryKey(endpoint_key, table.name, columns);
+		if (!cache.TryGetOrderKey(endpoint_key, table.name, columns)) {
+			const auto request_context = RequestContextFor(context);
+			columns = ofquack::FetchPrimaryKey(*transport, request_context, table.name);
+			if (columns.empty()) {
+				std::unordered_set<string> nullable;
+				for (const auto &column : Columns(context, table)) {
+					if (column.nullable) {
+						nullable.insert(StringUtil::Upper(column.name));
+					}
+				}
+				for (const auto &index : ofquack::FetchUniqueIndexes(*transport, request_context, table.name)) {
+					bool usable = true;
+					for (const auto &column : index.columns) {
+						usable = usable && nullable.count(StringUtil::Upper(column)) == 0;
+					}
+					if (usable) {
+						columns = index.columns;
+						break;
+					}
+				}
+			}
+			cache.PutOrderKey(endpoint_key, table.name, columns);
 		}
 		vector<string> as_duckdb;
 		as_duckdb.assign(columns.begin(), columns.end());
-		return primary_keys.emplace(key, std::move(as_duckdb)).first->second;
+		return order_keys.emplace(key, std::move(as_duckdb)).first->second;
 	}
 
 	const std::vector<ofquack::ColumnInfo> &Columns(ClientContext &context, const ofquack::TableInfo &table) {
@@ -177,6 +202,30 @@ struct FusionCatalogScanState : public GlobalTableFunctionState {
 	//! Number of vectors the chunk carries. COUNT(*) reads no columns at all.
 	idx_t chunk_columns = 0;
 
+	//! How pages are cut. KEYSET asks for the rows after the last one seen, in
+	//! key order, so every page costs what a page should. OFFSET makes Oracle
+	//! skip everything before the page, which grows with every page and makes
+	//! a full read of a large table quadratic; it is what remains when there
+	//! is no key to seek by. NONE is a single request.
+	enum class PagingMode { NONE, OFFSET, KEYSET };
+	PagingMode mode = PagingMode::NONE;
+
+	//! One column of the seek key.
+	struct KeyPart {
+		string expression; //!< as written in the statement: "COL", or ROWID
+		string xml_name;   //!< the element its value arrives in
+		ofquack::KeyKind kind;
+	};
+	vector<KeyPart> key;
+	//! The key of the last row received, as Oracle literals; empty before the
+	//! first page.
+	vector<string> last_key;
+	//! SELECT ... FROM "T", with the key columns added when they were not
+	//! projected -- the seek has to read them back.
+	string select_from;
+	string order_clause;
+
+	//! The statement for OFFSET and NONE, order included.
 	string base_sql;
 	ofquack::ParsedReport page;
 	idx_t offset_in_page = 0;
@@ -189,15 +238,97 @@ struct FusionCatalogScanState : public GlobalTableFunctionState {
 	}
 };
 
+//! How a key column's value is written back into a seek, by its DuckDB type.
+//! False for a type whose text cannot be turned into an Oracle literal safely.
+bool KeyKindOf(const LogicalType &type, ofquack::KeyKind &kind) {
+	switch (type.id()) {
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::DECIMAL:
+		kind = ofquack::KeyKind::NUMBER;
+		return true;
+	case LogicalTypeId::VARCHAR:
+		kind = ofquack::KeyKind::TEXT;
+		return true;
+	case LogicalTypeId::DATE:
+		kind = ofquack::KeyKind::DATE;
+		return true;
+	case LogicalTypeId::TIMESTAMP:
+		kind = ofquack::KeyKind::TIMESTAMP;
+		return true;
+	default:
+		return false;
+	}
+}
+
 [[noreturn]] void RethrowAsDatabaseError(const ofquack::FusionError &error, const string &sql) {
 	throw IOException("%s\nSQL: %s", error.what(), sql);
 }
 
+//! The statement for the next page, by the scan's paging mode.
+string NextPageStatement(const FusionCatalogScanBindData &bind_data, const FusionCatalogScanState &state,
+                         idx_t offset) {
+	const auto fetch_size = bind_data.state->options.fetch_size;
+	switch (state.mode) {
+	case FusionCatalogScanState::PagingMode::NONE:
+		return state.base_sql;
+	case FusionCatalogScanState::PagingMode::OFFSET:
+		return ofquack::ApplyPagination(state.base_sql, offset, fetch_size);
+	case FusionCatalogScanState::PagingMode::KEYSET: {
+		auto statement = state.select_from;
+		vector<string> conditions;
+		if (!state.where_clause.empty()) {
+			conditions.push_back("(" + state.where_clause + ")");
+		}
+		if (!state.last_key.empty()) {
+			std::vector<std::string> expressions;
+			for (const auto &part : state.key) {
+				expressions.push_back(part.expression);
+			}
+			conditions.push_back(ofquack::SeekPredicate(expressions, std::vector<std::string>(state.last_key.begin(),
+			                                                                                   state.last_key.end())));
+		}
+		if (!conditions.empty()) {
+			statement += " WHERE " + StringUtil::Join(conditions, " AND ");
+		}
+		return statement + " ORDER BY " + state.order_clause + " FETCH FIRST " + std::to_string(fetch_size) +
+		       " ROWS ONLY";
+	}
+	}
+	return state.base_sql;
+}
+
+//! Records the key of the last row of a page, which is where the next page
+//! starts. A key that cannot be read back -- NULL, or a value that will not
+//! make a literal -- leaves nowhere to continue from, and says so.
+void NoteLastKey(FusionCatalogScanState &state, const string &object_name) {
+	if (state.mode != FusionCatalogScanState::PagingMode::KEYSET || state.page.rows.empty()) {
+		return;
+	}
+	const auto &last = state.page.rows.back();
+	vector<string> literals;
+	for (const auto &part : state.key) {
+		const auto found = last.find(part.xml_name);
+		const auto literal = found == last.end() ? std::string() : ofquack::KeyLiteral(part.kind, found->second);
+		if (literal.empty()) {
+			throw IOException("Cannot continue reading %s: key column %s is NULL or unreadable in the last row of a "
+			                  "page, so there is nowhere to seek to. Read the table with stable_paging := false, or "
+			                  "through oracle_fusion_query with an ORDER BY of your own",
+			                  object_name, part.expression);
+		}
+		literals.push_back(literal);
+	}
+	if (literals == state.last_key) {
+		throw IOException("Oracle Fusion returned the same last row again for %s, so the seek is not advancing and "
+		                  "reading it would never end",
+		                  object_name);
+	}
+	state.last_key = std::move(literals);
+}
+
 ofquack::ParsedReport FetchCatalogPage(FusionCatalogScanBindData &bind_data, FusionCatalogScanState &state,
                                        ClientContext &context, idx_t offset) {
-	const auto statement =
-	    state.paginate ? ofquack::ApplyPagination(state.base_sql, offset, bind_data.state->options.fetch_size)
-	                   : state.base_sql;
+	const auto statement = NextPageStatement(bind_data, state, offset);
 	ofquack::RequestContext request_context;
 	request_context.is_cancelled = [&context]() { return context.interrupted.load(); };
 	try {
@@ -247,42 +378,88 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 		state->where_clause = BuildOracleWhereClause(*input.filters, bind_data.columns, selected);
 	}
 
-	state->base_sql = "SELECT " + select_list + " FROM " + KeywordHelper::WriteQuoted(bind_data.object_name, '"');
-	if (!state->where_clause.empty()) {
-		state->base_sql += " WHERE " + state->where_clause;
-	}
-	state->paginate = ofquack::ClassifyForPagination(state->base_sql, bind_data.state->options.fetch_size) ==
+	const auto from_table = " FROM " + KeywordHelper::WriteQuoted(bind_data.object_name, '"');
+	const auto where = state->where_clause.empty() ? string() : " WHERE " + state->where_clause;
+	state->paginate = ofquack::ClassifyForPagination("SELECT " + select_list + from_table + where,
+	                                                 bind_data.state->options.fetch_size) ==
 	                  ofquack::PaginationVerdict::YES;
+	state->mode = state->paginate ? FusionCatalogScanState::PagingMode::OFFSET
+	                              : FusionCatalogScanState::PagingMode::NONE;
 
+	// Paging needs an order: each page is a separate execution of the
+	// statement, and Oracle owes no two executions the same row order, so
+	// without one a page can repeat rows the previous one returned and skip
+	// others -- invisibly, since every page is individually well formed.
+	//
+	// And the order decides what a page costs. With a key to seek by, a page
+	// asks for the rows after the last one it saw and Oracle walks the index
+	// to them: every page costs the same. Anything else makes Oracle skip or
+	// sort everything before the page, which grows with every page until a
+	// large table never finishes -- a full read of AP_INVOICES_ALL sat for
+	// four minutes without producing a row.
+	string order_by_names;
+	bool is_view = true;
 	if (state->paginate && bind_data.state->options.stable_paging) {
-		// OFFSET/FETCH only partitions a result the server has already ordered.
-		// Each page is a separate execution of the statement, and Oracle owes no
-		// two executions the same row order, so without this a page can repeat
-		// rows the previous one returned and skip others -- invisibly, since
-		// every page is individually well formed.
-		//
-		// Which order matters as much as having one. The primary key is walked
-		// through its index, so a page costs what a page should; anything that
-		// makes Oracle sort the whole table first costs the whole table on
-		// every page, and a large table never returns its first row.
 		auto table = bind_data.state->FindTable(context, bind_data.object_name);
-		const bool is_view = !table || StringUtil::CIEquals(table->type, "VIEW");
-		const auto &key = is_view ? vector<string>() : bind_data.state->PrimaryKey(context, *table);
-		if (!key.empty()) {
-			// By name, not position: the key need not be among the columns
-			// selected, and Oracle allows ordering by a column it does not
-			// return.
-			string order;
-			for (const auto &column : key) {
-				order += (order.empty() ? "" : ", ") + KeywordHelper::WriteQuoted(column, '"');
+		is_view = !table || StringUtil::CIEquals(table->type, "VIEW");
+		if (!is_view) {
+			vector<FusionCatalogScanState::KeyPart> parts;
+			bool seekable = true;
+			for (const auto &name : bind_data.state->OrderKey(context, *table)) {
+				order_by_names += (order_by_names.empty() ? "" : ", ") + KeywordHelper::WriteQuoted(name, '"');
+				optional_ptr<const FusionColumn> column;
+				for (const auto &candidate : bind_data.columns) {
+					if (StringUtil::CIEquals(candidate.name, name)) {
+						column = &candidate;
+					}
+				}
+				ofquack::KeyKind kind = ofquack::KeyKind::TEXT;
+				if (!column || !column->type_from_dictionary || !KeyKindOf(column->type, kind)) {
+					// A key of a type whose value cannot be written back as a
+					// literal: the order still holds, the seek does not.
+					seekable = false;
+					continue;
+				}
+				parts.push_back({KeywordHelper::WriteQuoted(name, '"'), column->name, kind});
 			}
-			state->base_sql += " ORDER BY " + order;
+			if (seekable && parts.empty()) {
+				// No key at all. ROWID is unique and, short of row movement,
+				// stable; a seek on it is a range scan from where the last page
+				// ended rather than a sort of the table.
+				parts.push_back({"ROWID", "OFQUACK_ROWID", ofquack::KeyKind::ROWID});
+			}
+			if (seekable) {
+				state->mode = FusionCatalogScanState::PagingMode::KEYSET;
+				state->key = std::move(parts);
+				for (const auto &part : state->key) {
+					// The seek reads the key back from each page, so the key
+					// travels with it even when it was not asked for.
+					bool projected = false;
+					for (const auto &name : state->projected_names) {
+						projected = projected || StringUtil::CIEquals(name, part.xml_name);
+					}
+					if (!projected) {
+						select_list += ", " + (part.kind == ofquack::KeyKind::ROWID
+						                           ? string("ROWID AS \"OFQUACK_ROWID\"")
+						                           : part.expression);
+					}
+					state->order_clause += (state->order_clause.empty() ? "" : ", ") + part.expression;
+				}
+			}
+		}
+	}
+
+	state->select_from = "SELECT " + select_list + from_table;
+	state->base_sql = state->select_from + where;
+	if (state->mode == FusionCatalogScanState::PagingMode::OFFSET && bind_data.state->options.stable_paging) {
+		if (!order_by_names.empty()) {
+			// A key that orders but cannot be sought: by name, since Oracle
+			// allows ordering by a column it does not return.
+			state->base_sql += " ORDER BY " + order_by_names;
 		} else if (!is_view) {
-			// No key. ROWID is unique and, short of row movement, stable, and a
-			// top-N by it is a pass over the table rather than a sort of it.
 			state->base_sql += " ORDER BY ROWID";
 		} else {
-			// A view has neither. Every projected column is a total order on
+			// A view has no key. Every projected column is a total order on
 			// the output -- rows that tie on all of them are interchangeable --
 			// and it is the only order there is, whatever it costs.
 			std::vector<uint64_t> positions;
@@ -296,6 +473,7 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 	}
 
 	state->page = FetchCatalogPage(bind_data, *state, context, 0);
+	NoteLastKey(*state, bind_data.object_name);
 	if (state->page.truncated && !state->paginate) {
 		// Paging carries on from the rows received; without it the rows past
 		// the cut are gone, and a silent short answer is worse than an error.
@@ -328,6 +506,7 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 		}
 		state.page = std::move(fetched);
 		state.offset_in_page = 0;
+		NoteLastKey(state, bind_data.object_name);
 		// Only an empty page ends the scan. A short one used to, and that is
 		// wrong twice over: BI Publisher truncates a response that grows too
 		// large without saying so, and a truncated page is indistinguishable
@@ -577,8 +756,30 @@ public:
 		DuckCatalog::Initialize(load_builtin);
 		auto transaction = CatalogTransaction::GetSystemTransaction(GetAttached().GetDatabase());
 		auto &schema = GetSchema(transaction, DEFAULT_SCHEMA).Cast<DuckSchemaEntry>();
-		schema.GetCatalogSet(CatalogType::TABLE_ENTRY)
-		    .SetDefaultGenerator(make_uniq<FusionTableGenerator>(*this, schema, state));
+		auto table_generator = make_uniq<FusionTableGenerator>(*this, schema, state);
+		generator = table_generator.get();
+		schema.GetCatalogSet(CatalogType::TABLE_ENTRY).SetDefaultGenerator(std::move(table_generator));
+	}
+
+	//! Every entry lookup passes through here first, which makes it the place
+	//! to undo what a schema listing does to the generator.
+	//!
+	//! Once CatalogSet::Scan has asked the generator for all its entries -- a
+	//! SHOW TABLES, a client expanding the table tree, even the "did you mean"
+	//! search after a failed lookup -- it sets created_all_entries, and from
+	//! then on a name that is not already an entry is never offered to the
+	//! generator again. For a generator whose listing is deliberately partial
+	//! (only tables whose columns are cached; the rest would cost a request
+	//! each) that froze the catalog: a table first asked for after the
+	//! listing "did not exist", however real it was. Clearing the flag before
+	//! each lookup keeps the generator in the loop. The listing is repeated on
+	//! the next scan as a consequence, which costs one read of the cache.
+	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
+	                                              OnEntryNotFound if_not_found) override {
+		if (generator) {
+			generator->created_all_entries = false;
+		}
+		return DuckCatalog::LookupSchema(transaction, schema_lookup, if_not_found);
 	}
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override {
@@ -625,6 +826,8 @@ public:
 
 private:
 	std::shared_ptr<FusionAttachedState> state;
+	//! Owned by the table CatalogSet; kept here to reset its flag on lookup.
+	optional_ptr<FusionTableGenerator> generator;
 };
 
 // ---------------------------------------------------------------------------
@@ -648,6 +851,14 @@ unique_ptr<Catalog> FusionAttach(optional_ptr<StorageExtensionInfo>, ClientConte
 	}
 	if (!info.path.empty() && parameters.find("secret") == parameters.end()) {
 		parameters["secret"] = Value(info.path);
+	}
+	// Consumed here, and removed so that nothing downstream sees them. A
+	// DuckCatalog opens a local StorageManager, and that one rejects any
+	// option it does not know -- "Unrecognized option for attach
+	// \"fetch_size\"" -- without knowing that the option was ours.
+	options.options.clear();
+	for (auto entry = info.options.begin(); entry != info.options.end();) {
+		entry = StringUtil::Lower(entry->first) == "type" ? std::next(entry) : info.options.erase(entry);
 	}
 
 	state->config = ResolveFusionConfig(context, parameters, state->options);

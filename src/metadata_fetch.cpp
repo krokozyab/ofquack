@@ -351,6 +351,37 @@ std::vector<ColumnInfo> FetchColumnsOfView(FusionTransport &transport, const Req
 	return columns;
 }
 
+std::vector<IndexInfo> FetchUniqueIndexes(FusionTransport &transport, const RequestContext &context,
+                                          const std::string &table_name) {
+	auto rows = Query(transport, context, metadata::Indexes(table_name, true));
+	std::sort(rows.begin(), rows.end(), [](const ReportRow &a, const ReportRow &b) {
+		const auto name_a = Field(a, "INDEX_NAME");
+		const auto name_b = Field(b, "INDEX_NAME");
+		if (name_a != name_b) {
+			return name_a < name_b;
+		}
+		return IntField(a, "ORDINAL_POSITION") < IntField(b, "ORDINAL_POSITION");
+	});
+
+	std::vector<IndexInfo> indexes;
+	for (const auto &row : rows) {
+		const auto name = Field(row, "INDEX_NAME");
+		const auto column = Field(row, "COLUMN_NAME");
+		if (name.empty() || column.empty()) {
+			continue;
+		}
+		if (indexes.empty() || indexes.back().name != name) {
+			indexes.push_back(IndexInfo {name, {}});
+		}
+		indexes.back().columns.push_back(column);
+	}
+	// Fewest columns first: a one-column key makes the cheapest seek. Stable,
+	// so equal widths keep their name order.
+	std::stable_sort(indexes.begin(), indexes.end(),
+	                 [](const IndexInfo &a, const IndexInfo &b) { return a.columns.size() < b.columns.size(); });
+	return indexes;
+}
+
 std::vector<std::string> FetchPrimaryKey(FusionTransport &transport, const RequestContext &context,
                                          const std::string &table_name) {
 	auto rows = Query(transport, context, metadata::PrimaryKeys(table_name));

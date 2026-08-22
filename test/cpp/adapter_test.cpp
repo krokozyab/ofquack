@@ -11,6 +11,7 @@
 #endif
 
 #include "ofquack/metadata_cache.hpp"
+#include "ofquack/metadata_fetch.hpp"
 #include "ofquack/token_cache.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/transport.hpp"
@@ -1514,8 +1515,15 @@ public:
 			    "&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
 			    "&lt;/ROWSET&gt;"));
 		}
+		if (sql.find("all_indexes") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
+		if (sql.find("\"JE_HEADER_ID\" > 2") != std::string::npos) {
+			// A seek past the last row there is: the page after the data.
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
 		if (sql.find("all_constraints") != std::string::npos) {
-			// The primary key, which is what a paged scan orders by.
+			// The primary key, which is what a paged scan seeks by.
 			return MakeSoapResponse(MakeReportXML(
 			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;COLUMN_NAME&gt;JE_HEADER_ID&lt;/COLUMN_NAME&gt;"
 			    "&lt;KEY_SEQ&gt;1&lt;/KEY_SEQ&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
@@ -1548,6 +1556,31 @@ void Attach(Connection &connection) {
 //! ATTACH must be free. The schema is fixed and the secret is already known, so
 //! there is nothing to ask Fusion -- and a multi-second ATTACH would be felt on
 //! every session start.
+//! ATTACH takes the query function's options. They have to be taken away
+//! again before DuckDB's own storage layer sees them: it opens a local
+//! StorageManager for the catalog and refuses any option it does not know,
+//! which is how FETCH_SIZE was "Unrecognized option for attach".
+void TestAttachOptionsReachTheScan() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "ATTACH 'fusion' AS fus (TYPE oracle_fusion, FETCH_SIZE 2000)");
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+
+	bool paged_as_asked = false;
+	for (const auto &sql : script.executed_sql) {
+		if (sql.find("FROM \"GL_JE_HEADERS\"") != std::string::npos &&
+		    sql.find("FETCH FIRST 2000 ROWS ONLY") != std::string::npos) {
+			paged_as_asked = true;
+		}
+	}
+	CHECK(paged_as_asked);
+}
+
 void TestAttachCostsNoRequests() {
 	ResetCache();
 	Script script;
@@ -1596,12 +1629,11 @@ void TestProjectionReachesTheStatement() {
 	// The last statement is the scan; earlier ones are dictionary reads.
 	const auto &scan_sql = script.executed_sql.back();
 	CHECK(scan_sql.find("FROM \"GL_JE_HEADERS\"") != std::string::npos);
-	// The select list carries the projected column and nothing else. The key
-	// appears further on, in the ORDER BY that paging needs, and that is not
-	// a column travelling back.
+	// The select list carries the projected column, plus the key the paged
+	// read seeks by -- it has to be read back from each page -- and nothing
+	// else. Of the table's columns, only those two travel back.
 	const auto select_list = scan_sql.substr(0, scan_sql.find(" FROM "));
-	CHECK(select_list.find("\"NAME\"") != std::string::npos);
-	CHECK(select_list.find("JE_HEADER_ID") == std::string::npos);
+	CHECK(select_list == "SELECT \"NAME\", \"JE_HEADER_ID\"");
 }
 
 void TestCountStarReadsOneColumnAndEmitsNone() {
@@ -1622,6 +1654,66 @@ void TestCountStarReadsOneColumnAndEmitsNone() {
 
 //! DuckDB removes a filter it has handed to a scan, so pushing one that cannot
 //! be translated exactly would silently change the answer. Off by default.
+//! A Fusion table often has no declared primary key but does have a unique
+//! index; its columns, in position order, are the key a paged read seeks by.
+//! Narrowest first, since a one-column key is the cheapest seek.
+void TestUniqueIndexesArriveGroupedAndNarrowestFirst() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(
+	    "&lt;ROWSET&gt;"
+	    "&lt;ROW&gt;&lt;INDEX_NAME&gt;AP_INVOICES_U2&lt;/INDEX_NAME&gt;&lt;ORDINAL_POSITION&gt;2&lt;/ORDINAL_POSITION&gt;"
+	    "&lt;COLUMN_NAME&gt;INVOICE_NUM&lt;/COLUMN_NAME&gt;&lt;/ROW&gt;"
+	    "&lt;ROW&gt;&lt;INDEX_NAME&gt;AP_INVOICES_U2&lt;/INDEX_NAME&gt;&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;"
+	    "&lt;COLUMN_NAME&gt;VENDOR_ID&lt;/COLUMN_NAME&gt;&lt;/ROW&gt;"
+	    "&lt;ROW&gt;&lt;INDEX_NAME&gt;AP_INVOICES_U1&lt;/INDEX_NAME&gt;&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;"
+	    "&lt;COLUMN_NAME&gt;INVOICE_ID&lt;/COLUMN_NAME&gt;&lt;/ROW&gt;"
+	    "&lt;/ROWSET&gt;"));
+	FakeTransport transport(script, FusionConfig());
+
+	const auto indexes = ofquack::FetchUniqueIndexes(transport, RequestContext(), "AP_INVOICES_ALL");
+
+	CHECK(indexes.size() == 2);
+	CHECK(indexes[0].name == "AP_INVOICES_U1");
+	CHECK(indexes[0].columns.size() == 1);
+	CHECK(indexes[0].columns[0] == "INVOICE_ID");
+	CHECK(indexes[1].name == "AP_INVOICES_U2");
+	CHECK(indexes[1].columns.size() == 2);
+	CHECK(indexes[1].columns[0] == "VENDOR_ID");
+	CHECK(indexes[1].columns[1] == "INVOICE_NUM");
+	CHECK(script.executed_sql.size() == 1);
+	CHECK(script.executed_sql[0].find("uniqueness = 'UNIQUE'") != std::string::npos);
+}
+
+//! Listing the schema must not freeze it. DuckDB stops consulting a default
+//! generator once a scan has asked it for everything; with a listing that is
+//! deliberately partial, a table first named after the listing -- after the
+//! client expanded the table tree, say -- "did not exist". PO_LINES_ALL did
+//! not exist on a live instance, right after XLA_AE_LINES had worked.
+void TestTableIsFoundAfterTheSchemaWasListed() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	// A cold cache: the listing has nothing describable to offer, so the scan
+	// produces no entries and marks the generator as exhausted.
+	auto listed = RunQuery(connection, "SELECT table_name FROM duckdb_tables() WHERE database_name = 'fus'");
+	CHECK(listed->RowCount() == 0);
+
+	// The table is still there when asked for by name.
+	auto result = RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS ORDER BY NAME");
+	CHECK(result->RowCount() == 2);
+	CHECK(result->GetValue(0, 0).ToString() == "Alpha");
+
+	// And, once described, it appears in the listing.
+	auto relisted = RunQuery(connection, "SELECT table_name FROM duckdb_tables() WHERE database_name = 'fus'");
+	CHECK(relisted->RowCount() == 1);
+}
+
 //! The paged scan of an attached table orders by its primary key -- walked
 //! through an index, so a page costs a page -- and not by every column, which
 //! sorted all of XLA_AE_LINES for its first 500 rows and never came back.
@@ -1636,21 +1728,35 @@ void TestAttachedScanOrdersByThePrimaryKey() {
 	RunQuery(connection, "ATTACH 'fusion' AS fus (TYPE oracle_fusion)");
 	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
 
-	bool ordered_by_key = false;
+	bool first_page_by_key = false;
+	bool next_page_sought = false;
 	bool asked_for_key = false;
 	for (const auto &sql : script.executed_sql) {
 		if (sql.find("all_constraints") != std::string::npos) {
 			asked_for_key = true;
 		}
-		if (sql.find("FROM \"GL_JE_HEADERS\" ORDER BY \"JE_HEADER_ID\" OFFSET") != std::string::npos) {
-			ordered_by_key = true;
+		// The first page: key order, no OFFSET. The key travels with the page
+		// even though only NAME was asked for, because the seek reads it back.
+		if (sql.find("SELECT \"NAME\", \"JE_HEADER_ID\" FROM \"GL_JE_HEADERS\" ORDER BY \"JE_HEADER_ID\" FETCH FIRST "
+		             "500 ROWS ONLY") != std::string::npos) {
+			first_page_by_key = true;
+		}
+		// The next: everything after the last row seen, not everything after
+		// a count of rows. That is what keeps a page's cost flat.
+		if (sql.find("WHERE (\"JE_HEADER_ID\" > 2) ORDER BY \"JE_HEADER_ID\" FETCH FIRST 500 ROWS ONLY") !=
+		    std::string::npos) {
+			next_page_sought = true;
+		}
+		if (sql.find("FROM \"GL_JE_HEADERS\"") != std::string::npos) {
+			CHECK(sql.find("OFFSET") == std::string::npos);
 		}
 		// Never by position: the key is not among the selected columns here,
 		// and a positional order over NAME alone would not be a total order.
 		CHECK(sql.find("ORDER BY 1") == std::string::npos);
 	}
 	CHECK(asked_for_key);
-	CHECK(ordered_by_key);
+	CHECK(first_page_by_key);
+	CHECK(next_page_sought);
 
 	// The key is cached with the rest of the dictionary: a second scan, from
 	// a new connection, does not ask for it again.
@@ -1673,7 +1779,11 @@ void TestFilterPushdownIsOffByDefault() {
 	Attach(connection);
 	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS WHERE JE_HEADER_ID = 1");
 
-	CHECK(script.executed_sql.back().find("WHERE") == std::string::npos);
+	// No statement carries the predicate. A WHERE as such is not the test:
+	// the seek that pages the table writes one of its own.
+	for (const auto &sql : script.executed_sql) {
+		CHECK(sql.find("= 1") == std::string::npos);
+	}
 }
 
 void TestFilterPushdownWhenEnabled() {
@@ -2080,10 +2190,13 @@ const TestCase TESTS[] = {
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
     {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},
     {"secured views is off by default", TestSecuredViewsIsOffByDefault},
+    {"attach options reach the scan", TestAttachOptionsReachTheScan},
     {"attach costs no requests", TestAttachCostsNoRequests},
     {"select from attached table", TestSelectFromAttachedTable},
     {"projection reaches the statement", TestProjectionReachesTheStatement},
     {"count star reads one column and emits none", TestCountStarReadsOneColumnAndEmitsNone},
+    {"unique indexes arrive grouped and narrowest first", TestUniqueIndexesArriveGroupedAndNarrowestFirst},
+    {"table is found after the schema was listed", TestTableIsFoundAfterTheSchemaWasListed},
     {"attached scan orders by the primary key", TestAttachedScanOrdersByThePrimaryKey},
     {"filter pushdown is off by default", TestFilterPushdownIsOffByDefault},
     {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},

@@ -206,10 +206,19 @@ cost a request:
   returned and skip others — invisibly, since every page is well formed. **Which order is as
   important as having one**: anything that makes Oracle sort the whole table costs the whole table
   on every page, and a large table never returns its first row — `ORDER BY` over all hundred
-  columns of `XLA_AE_LINES` sat for two minutes for its first 500 rows. So the attached-table scan
-  orders by the **primary key** from the dictionary (`FetchPrimaryKey`, cached in `CACHE_META` as
-  `pk:<endpoint>:<TABLE>`), which Oracle walks through an index; a table without one by `ROWID`
-  (a top-N pass, not a sort); only a view by every projected column, skipping LOBs.
+  columns of `XLA_AE_LINES` sat for two minutes for its first 500 rows.
+- **An attached table is read by keyset, not by OFFSET.** `OFFSET n` costs O(n) on every page
+  even through an index, so a full read of a large table is quadratic — `AP_INVOICES_ALL` sat for
+  four minutes without a row. The scan (`PagingMode::KEYSET`) asks for the rows *after the last
+  one it saw*: `WHERE (key) > (last) ORDER BY key FETCH FIRST n ROWS ONLY`, with the composite
+  comparison expanded by `SeekPredicate` (Oracle has no row-value comparison) and the values
+  written back by `KeyLiteral` per type — text from the report, typed by the dictionary, formats
+  spelt out so NLS settings cannot reinterpret them. The key (`FusionAttachedState::OrderKey`,
+  cached in `CACHE_META` as `key:<endpoint>:<TABLE>`) is the primary key, else a unique index over
+  NOT NULL columns (a NULL in the key is a row nothing sorts after), else `ROWID`. Key columns are
+  added to the select list when not projected — the seek has to read them back. A key column of a
+  type `KeyKindOf` cannot write as a literal drops the scan to OFFSET with `ORDER BY` by name; a
+  view, which has no key, is ordered by every projected column, skipping LOBs, and paged by OFFSET.
   `oracle_fusion_query` has no dictionary to ask and wraps the statement
   (`SELECT * FROM (…) ORDER BY 1, 2, …`), which needs the column count and so costs one retake
   of the first page — and is expensive on a large unkeyed result, so a query over a big table
@@ -315,6 +324,12 @@ Things that will bite if changed:
 - `Create()` returns `nullptr` for an unknown name. That is not an error — DuckDB asks every
   attached catalog about names belonging to none of them, and a catalog that throws breaks
   those lookups.
+- **`LookupSchema` clears `created_all_entries` on the generator before every lookup.** After
+  any full scan of the table set (`SHOW TABLES`, a client expanding the tree, the "did you mean"
+  search after a miss) `CatalogSet` sets that flag and never offers an unknown name to the
+  generator again. With a deliberately partial listing that froze the catalog: `PO_LINES_ALL`
+  "did not exist" on a live instance right after `XLA_AE_LINES` had worked. The cost is that a
+  scan re-runs `GetDefaultEntries()` each time, which is a cache read.
 - `GetStorage()` must throw `NotImplementedException`. The base implementation throws
   `InternalException`, which marks the database invalid and kills the connection.
 - `GetVirtualColumns()`/`GetRowIdColumns()` return empty. A report has no rowid, and the

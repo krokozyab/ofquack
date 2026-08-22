@@ -266,14 +266,14 @@ namespace {
 constexpr char PK_SEPARATOR = '\n';
 }
 
-bool MetadataCache::TryGetPrimaryKey(const std::string &endpoint_key, const std::string &table_name,
+bool MetadataCache::TryGetOrderKey(const std::string &endpoint_key, const std::string &table_name,
                                      std::vector<std::string> &key_columns) {
 	std::lock_guard<std::mutex> guard(lock);
 	if (!connection) {
 		return false;
 	}
 	try {
-		auto result = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'pk:" + Escape(endpoint_key) + ":" +
+		auto result = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'key:" + Escape(endpoint_key) + ":" +
 		                                Escape(StringUtil::Upper(table_name)) + "'");
 		if (!result || result->HasError() || result->RowCount() != 1) {
 			return false;
@@ -295,7 +295,7 @@ bool MetadataCache::TryGetPrimaryKey(const std::string &endpoint_key, const std:
 	}
 }
 
-void MetadataCache::PutPrimaryKey(const std::string &endpoint_key, const std::string &table_name,
+void MetadataCache::PutOrderKey(const std::string &endpoint_key, const std::string &table_name,
                                   const std::vector<std::string> &key_columns) {
 	std::lock_guard<std::mutex> guard(lock);
 	if (!connection || mode == CacheMode::READ_ONLY) {
@@ -309,7 +309,7 @@ void MetadataCache::PutPrimaryKey(const std::string &endpoint_key, const std::st
 			}
 			joined += column;
 		}
-		const auto key = "pk:" + Escape(endpoint_key) + ":" + Escape(StringUtil::Upper(table_name));
+		const auto key = "key:" + Escape(endpoint_key) + ":" + Escape(StringUtil::Upper(table_name));
 		connection->Query("DELETE FROM CACHE_META WHERE KEY = '" + key + "'");
 		connection->Query("INSERT INTO CACHE_META VALUES ('" + key + "', '" + Escape(joined) + "')");
 		connection->Query("CHECKPOINT");

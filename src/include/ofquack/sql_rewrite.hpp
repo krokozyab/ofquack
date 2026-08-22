@@ -62,4 +62,20 @@ std::string WrapWithOrderByPositions(const std::string &normalized_sql, const st
 //! it), so the refusal itself is the only probe there is.
 std::string OrderProbe(const std::string &normalized_sql, const std::vector<uint64_t> &positions);
 
+//! How a key value read back from the report is written into the next page's
+//! seek predicate. The report hands every value over as text; what the text
+//! means depends on the column's type, and Oracle has to be told in a way
+//! that no session setting (NLS_DATE_FORMAT above all) can reinterpret.
+enum class KeyKind { NUMBER, TEXT, DATE, TIMESTAMP, ROWID };
+
+//! The Oracle literal for a key value, or empty when the text cannot be one --
+//! an empty string, which Oracle stores as NULL and cannot seek past, or a
+//! number that is not a number.
+std::string KeyLiteral(KeyKind kind, const std::string &text);
+
+//! "Strictly after this row" in the order of the given expressions, expanded
+//! the way Oracle needs it -- it has no row-value comparison outside IN:
+//!   (a > :a OR (a = :a AND b > :b) OR (a = :a AND b = :b AND c > :c))
+std::string SeekPredicate(const std::vector<std::string> &expressions, const std::vector<std::string> &literals);
+
 } // namespace ofquack

@@ -666,6 +666,49 @@ void TestOrderProbe() {
 	      "SELECT * FROM (SELECT a, doc, b FROM t) ORDER BY 1, 3");
 }
 
+//! A seek writes the last row's key back into the next statement. The report
+//! hands every value over as text; the literal has to say what the text is
+//! in a way no session setting can reinterpret.
+void TestKeyLiterals() {
+	using ofquack::KeyKind;
+	using ofquack::KeyLiteral;
+
+	CHECK(KeyLiteral(KeyKind::NUMBER, "42") == "42");
+	CHECK(KeyLiteral(KeyKind::NUMBER, "-1.5") == "-1.5");
+	CHECK(KeyLiteral(KeyKind::NUMBER, "") == "");
+	CHECK(KeyLiteral(KeyKind::NUMBER, "12abc") == "");
+	CHECK(KeyLiteral(KeyKind::NUMBER, "1.2.3") == "");
+
+	CHECK(KeyLiteral(KeyKind::TEXT, "INV-001") == "'INV-001'");
+	CHECK(KeyLiteral(KeyKind::TEXT, "O'Brien") == "'O''Brien'");
+	// Oracle stores '' as NULL, and nothing sorts after NULL.
+	CHECK(KeyLiteral(KeyKind::TEXT, "") == "");
+
+	// dbms_xmlgen writes dates in ISO 8601 with a T; the format model is spelt
+	// out so NLS_DATE_FORMAT has no say.
+	CHECK(KeyLiteral(KeyKind::DATE, "2024-01-31") == "TO_DATE('2024-01-31', 'YYYY-MM-DD')");
+	CHECK(KeyLiteral(KeyKind::DATE, "2024-01-31T10:20:30") ==
+	      "TO_DATE('2024-01-31 10:20:30', 'YYYY-MM-DD HH24:MI:SS')");
+	CHECK(KeyLiteral(KeyKind::DATE, "31-JAN-24") == "");
+	CHECK(KeyLiteral(KeyKind::TIMESTAMP, "2024-01-31T10:20:30.123456") ==
+	      "TO_TIMESTAMP('2024-01-31 10:20:30.123456', 'YYYY-MM-DD HH24:MI:SS.FF')");
+	CHECK(KeyLiteral(KeyKind::TIMESTAMP, "2024-01-31T10:20:30") ==
+	      "TO_TIMESTAMP('2024-01-31 10:20:30', 'YYYY-MM-DD HH24:MI:SS')");
+
+	CHECK(KeyLiteral(KeyKind::ROWID, "AAAR3sAAEAAAACXAAA") == "CHARTOROWID('AAAR3sAAEAAAACXAAA')");
+	CHECK(KeyLiteral(KeyKind::ROWID, "") == "");
+}
+
+//! "After this row" over a composite key, expanded the way Oracle needs it.
+void TestSeekPredicate() {
+	using ofquack::SeekPredicate;
+
+	CHECK(SeekPredicate({"\"ID\""}, {"42"}) == "(\"ID\" > 42)");
+	CHECK(SeekPredicate({"\"A\"", "\"B\""}, {"1", "'x'"}) == "(\"A\" > 1 OR (\"A\" = 1 AND \"B\" > 'x'))");
+	CHECK(SeekPredicate({"\"A\"", "\"B\"", "\"C\""}, {"1", "2", "3"}) ==
+	      "(\"A\" > 1 OR (\"A\" = 1 AND \"B\" > 2) OR (\"A\" = 1 AND \"B\" = 2 AND \"C\" > 3))");
+}
+
 //! Sorting by a LOB is ORA-00932, so those columns have to stay out of an
 //! ordering that exists only to make paging deterministic.
 void TestSortableOracleTypes() {
@@ -1365,6 +1408,8 @@ const TestCase TESTS[] = {
     {"order by detection", TestOrderByDetection},
     {"ordering rewrites", TestOrderingRewrites},
     {"order probe", TestOrderProbe},
+    {"key literals", TestKeyLiterals},
+    {"seek predicate", TestSeekPredicate},
     {"sortable oracle types", TestSortableOracleTypes},
     {"host of", TestHostOf},
     {"throttle serialises concurrent callers", TestThrottleSerialisesConcurrentCallers},
