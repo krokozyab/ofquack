@@ -16,6 +16,7 @@
 #include "base64.h"
 #include "duckdb.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -150,7 +151,10 @@ void TestSecretSuppliesTheConnection() {
 	CHECK(script.configs[0].password == "hunter2");
 	CHECK(script.configs[0].report_path == "/Custom/Financials/RP_ARB.xdo");
 	CHECK(script.executed_sql.size() == 1);
-	CHECK(script.executed_sql[0] == "SELECT NAME, CODE FROM FND_CURRENCIES_TL");
+	// Paging is on by default, so the statement reaches Fusion with the row
+	// limiting clause appended to it.
+	CHECK(script.executed_sql[0] == "SELECT NAME, CODE FROM FND_CURRENCIES_TL "
+	                                "OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY");
 }
 
 //! The password must not be readable through duckdb_secrets(). Note this hides
@@ -385,6 +389,246 @@ void TestBrowserProviderReportsNotImplemented() {
 	CHECK(result->GetError().find("not implemented yet") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+//! Serves a table of rows, honouring the OFFSET/FETCH the adapter wrote into
+//! the statement -- so the number of requests is a real observation, not a
+//! rehearsal of the code under test.
+class PagingTransport : public FusionTransport {
+public:
+	PagingTransport(Script &script_p, int total_rows_p) : script(script_p), total_rows(total_rows_p) {
+	}
+
+	std::string Execute(const std::string &sql, const RequestContext &) override {
+		script.executed_sql.push_back(sql);
+
+		int offset = 0;
+		int limit = total_rows;
+		const auto offset_at = sql.find(" OFFSET ");
+		if (offset_at != std::string::npos) {
+			offset = std::atoi(sql.c_str() + offset_at + 8);
+			const auto fetch_at = sql.find(" FETCH NEXT ");
+			CHECK(fetch_at != std::string::npos);
+			limit = std::atoi(sql.c_str() + fetch_at + 12);
+		}
+
+		std::string rowset = "&lt;ROWSET&gt;";
+		for (int i = offset; i < std::min(offset + limit, total_rows); i++) {
+			rowset += "&lt;ROW&gt;&lt;N&gt;" + std::to_string(i) + "&lt;/N&gt;&lt;/ROW&gt;";
+		}
+		rowset += "&lt;/ROWSET&gt;";
+		return MakeSoapResponse(MakeReportXML(rowset));
+	}
+
+private:
+	Script &script;
+	int total_rows;
+};
+
+ScopedTransportFactory InstallPaging(Script &script, int total_rows) {
+	return ScopedTransportFactory(
+	    [&script, total_rows](const FusionConfig &) { return std::make_shared<PagingTransport>(script, total_rows); });
+}
+
+//! 1637 rows at 500 per page is three full pages and a short one, and the short
+//! page is what tells the scan to stop -- so exactly four requests, not five.
+void TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests() {
+	Script script;
+	auto installed = InstallPaging(script, 1637);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG', fetch_size := 500)");
+
+	CHECK(result->RowCount() == 1637);
+	CHECK(script.executed_sql.size() == 4);
+	CHECK(result->GetValue(0, 0).ToString() == "0");
+	CHECK(result->GetValue(0, 1636).ToString() == "1636");
+
+	// Offsets advance by the page size, and the first page starts at zero.
+	CHECK(script.executed_sql[0].find("OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY") != std::string::npos);
+	CHECK(script.executed_sql[1].find("OFFSET 500 ROWS") != std::string::npos);
+	CHECK(script.executed_sql[3].find("OFFSET 1500 ROWS") != std::string::npos);
+}
+
+//! A result that fits in one page must not cost a second request just to
+//! discover there is nothing more.
+void TestShortFirstPageCostsOneRequest() {
+	Script script;
+	auto installed = InstallPaging(script, 3);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM SMALL', fetch_size := 500)");
+
+	CHECK(result->RowCount() == 3);
+	CHECK(script.executed_sql.size() == 1);
+}
+
+//! An exactly-full last page is indistinguishable from a full one, so one extra
+//! request is unavoidable -- but only one, and it must come back empty rather
+//! than erroring on the empty schema.
+void TestExactlyFullPageCostsOneExtraRequest() {
+	Script script;
+	auto installed = InstallPaging(script, 20);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM T', fetch_size := 10)");
+
+	CHECK(result->RowCount() == 20);
+	CHECK(script.executed_sql.size() == 3);
+}
+
+void TestPagingCanBeDisabled() {
+	Script script;
+	auto installed = InstallPaging(script, 1637);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG', fetch_size := 0)");
+
+	CHECK(result->RowCount() == 1637);
+	CHECK(script.executed_sql.size() == 1);
+	CHECK(script.executed_sql[0].find("OFFSET") == std::string::npos);
+}
+
+//! The author already limited the result, so wrapping ours around theirs would
+//! change which rows come back.
+void TestStatementWithItsOwnLimitIsNotRewritten() {
+	Script script;
+	auto installed = InstallPaging(script, 1637);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query("
+	                                   "'SELECT N FROM BIG OFFSET 100 ROWS FETCH NEXT 5 ROWS ONLY', fetch_size := 500)");
+
+	CHECK(script.executed_sql.size() == 1);
+	CHECK(result->RowCount() == 5);
+	CHECK(result->GetValue(0, 0).ToString() == "100");
+}
+
+// ---------------------------------------------------------------------------
+// Type inference
+// ---------------------------------------------------------------------------
+
+void TestTypesAreInferredFromTheFirstPage() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(
+	    "&lt;ROWSET&gt;&lt;ROW&gt;"
+	    "&lt;ID&gt;42&lt;/ID&gt;&lt;AMOUNT&gt;1.50&lt;/AMOUNT&gt;&lt;WHEN&gt;2024-01-31&lt;/WHEN&gt;"
+	    "&lt;BIG&gt;123456789012&lt;/BIG&gt;&lt;CODE&gt;00123&lt;/CODE&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;"
+	    "&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT … FROM T')");
+
+	CHECK(result->types[0] == duckdb::LogicalType::INTEGER);
+	CHECK(result->types[1].id() == duckdb::LogicalTypeId::DECIMAL);
+	CHECK(result->types[2] == duckdb::LogicalType::DATE);
+	CHECK(result->types[3] == duckdb::LogicalType::BIGINT);
+	// A leading zero means an identifier, not a number.
+	CHECK(result->types[4] == duckdb::LogicalType::VARCHAR);
+	CHECK(result->types[5] == duckdb::LogicalType::VARCHAR);
+
+	CHECK(result->GetValue(0, 0).ToString() == "42");
+	CHECK(result->GetValue(4, 0).ToString() == "00123");
+}
+
+void TestAllVarcharDisablesInference() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;ID&gt;42&lt;/ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result =
+	    RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT ID FROM T', all_varchar := true)");
+
+	CHECK(result->types[0] == duckdb::LogicalType::VARCHAR);
+}
+
+//! The type is a guess from a sample, so a later row can disagree. Such a value
+//! becomes NULL rather than failing the query: one odd row in a million should
+//! not cost the user the other 999,999.
+void TestValueThatContradictsTheInferredTypeBecomesNull() {
+	Script script;
+	std::string rowset = "&lt;ROWSET&gt;";
+	// The first 20 rows are what inference sees, and they are all integers.
+	for (int i = 0; i < 20; i++) {
+		rowset += "&lt;ROW&gt;&lt;ID&gt;" + std::to_string(i) + "&lt;/ID&gt;&lt;/ROW&gt;";
+	}
+	rowset += "&lt;ROW&gt;&lt;ID&gt;not a number&lt;/ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;";
+	script.response = MakeSoapResponse(MakeReportXML(rowset));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT ID FROM T')");
+
+	CHECK(result->types[0] == duckdb::LogicalType::INTEGER);
+	CHECK(result->RowCount() == 21);
+	CHECK(!result->GetValue(0, 19).IsNull());
+	CHECK(result->GetValue(0, 20).IsNull());
+}
+
+//! A typed column can still be NULL, and an empty element in a typed column is
+//! NULL too -- there is no integer spelled "".
+void TestNullsInTypedColumns() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;"
+	                  "&lt;ROW&gt;&lt;ID&gt;1&lt;/ID&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;ID&gt;&lt;/ID&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;OTHER&gt;x&lt;/OTHER&gt;&lt;/ROW&gt;"
+	                  "&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT ID, OTHER FROM T')");
+
+	CHECK(result->types[0] == duckdb::LogicalType::INTEGER);
+	CHECK(result->GetValue(0, 0).ToString() == "1");
+	CHECK(result->GetValue(0, 1).IsNull()); // present but empty
+	CHECK(result->GetValue(0, 2).IsNull()); // absent
+}
+
+//! The statement that reaches Fusion is normalised, so a hint written by the
+//! author still arrives -- it is lexically a comment, and a careless stripper
+//! would drop the plan it asks for.
+void TestHintSurvivesToTheWire() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;N&gt;1&lt;/N&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query("
+	                     "'SELECT /*+ FIRST_ROWS(1000) */ N FROM T /* dropped */', fetch_size := 0)");
+
+	CHECK(script.executed_sql.size() == 1);
+	CHECK(script.executed_sql[0].find("/*+ FIRST_ROWS(1000) */") != std::string::npos);
+	CHECK(script.executed_sql[0].find("dropped") == std::string::npos);
+}
+
 struct TestCase {
 	const char *name;
 	void (*run)();
@@ -408,6 +652,16 @@ const TestCase TESTS[] = {
     {"fetch size is validated", TestFetchSizeIsValidated},
     {"removed function explains migration", TestRemovedFunctionExplainsMigration},
     {"browser provider reports not implemented", TestBrowserProviderReportsNotImplemented},
+    {"paging fetches every row in exactly the right number of requests", TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests},
+    {"short first page costs one request", TestShortFirstPageCostsOneRequest},
+    {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},
+    {"paging can be disabled", TestPagingCanBeDisabled},
+    {"statement with its own limit is not rewritten", TestStatementWithItsOwnLimitIsNotRewritten},
+    {"types are inferred from the first page", TestTypesAreInferredFromTheFirstPage},
+    {"all_varchar disables inference", TestAllVarcharDisablesInference},
+    {"contradicting value becomes null", TestValueThatContradictsTheInferredTypeBecomesNull},
+    {"nulls in typed columns", TestNullsInTypedColumns},
+    {"hint survives to the wire", TestHintSurvivesToTheWire},
 };
 
 } // namespace

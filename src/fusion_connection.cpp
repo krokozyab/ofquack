@@ -93,6 +93,7 @@ void AddFusionNamedParameters(TableFunction &function) {
 	function.named_parameters["password"] = LogicalType::VARCHAR;
 	function.named_parameters["fetch_size"] = LogicalType::UBIGINT;
 	function.named_parameters["secured_views"] = LogicalType::BOOLEAN;
+	function.named_parameters["all_varchar"] = LogicalType::BOOLEAN;
 }
 
 ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_parameter_map_t &named_parameters,
@@ -170,6 +171,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 	const auto secured_views_override = NamedParameter(named_parameters, "secured_views");
 	if (!secured_views_override.IsNull()) {
 		options.secured_views = secured_views_override.GetValue<bool>();
+	}
+	const auto all_varchar_override = NamedParameter(named_parameters, "all_varchar");
+	if (!all_varchar_override.IsNull()) {
+		options.all_varchar = all_varchar_override.GetValue<bool>();
 	}
 
 	if (config.endpoint.empty()) {

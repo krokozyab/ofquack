@@ -7,8 +7,12 @@ namespace duckdb {
 
 //! Settings a scan needs beyond the connection itself.
 struct FusionScanOptions {
+	//! Rows per request. 0 disables paging: one request, whatever comes back.
 	idx_t fetch_size = 500;
 	bool secured_views = false;
+	//! Skips type inference and returns every column as VARCHAR, for when a
+	//! guess from the first page would be wrong for the rest of the data.
+	bool all_varchar = false;
 };
 
 //! Resolves the connection from a secret plus any overriding named parameters.

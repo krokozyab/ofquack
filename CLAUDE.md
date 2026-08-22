@@ -170,10 +170,31 @@ Two rules that are easy to break by accident:
 `ExecuteWithRetry` takes its sleep and its randomness as parameters, which is the only reason
 the loop is testable without waiting.
 
+## Paging and types
+
+Paging rewrites the statement — BI Publisher's own chunking (`sizeOfDataChunkDownload`) is not
+used, and the report exposes nothing else. `fetch_size` rows per request, default 500, `0` for a
+single request. A short page means the source is exhausted, so a result smaller than one page
+costs exactly one request; an exactly-full last page costs one extra.
+
+The rewrite is skipped, and the first page taken as the whole result, when the statement is not
+a SELECT, already carries `OFFSET`/`FETCH`, or uses `ROWNUM` (assigned before `ORDER BY`, so it
+does not compose with `OFFSET` — pairing them silently returns the wrong rows). Those keywords
+are found by `FindKeyword`, which lexes: `SELECT 'OFFSET' FROM t` is still pageable.
+
+`NormalizeSql` strips comments and collapses whitespace in one pass, **keeping `/*+ hints */`** —
+an Oracle hint is lexically a block comment, and dropping it discards the plan the author asked
+for. It also leaves string literals byte for byte intact; the naive `\s+` replacement rewrites
+`'a   b'`, which is data.
+
+Types are inferred from the first page (first `TYPE_SAMPLE_ROWS` values per column). One value
+that does not fit drops the whole column to VARCHAR. Leading zeros keep a column VARCHAR:
+`'00123'` is an account code. A later row that contradicts the inferred type becomes NULL rather
+than failing the query — `all_varchar := true` turns inference off entirely.
+
 ## Still outstanding
 
-- the whole result is materialised during bind: no paging, no streaming (`fetch_size` is
-  accepted and validated but not yet applied);
-- every column is VARCHAR — no type inference, no dictionary types;
 - `AUTH 'bearer'` and `PROVIDER browser` are registered but throw;
+- no dictionary types: inference is the only source of types;
+- `secured_views` is accepted but not applied;
 - no metadata functions, no ATTACH, no metadata cache.

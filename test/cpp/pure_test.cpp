@@ -11,6 +11,9 @@
 #include "ofquack/host_throttle.hpp"
 #include "ofquack/retry.hpp"
 #include "ofquack/soap_envelope.hpp"
+#include "ofquack/sql_rewrite.hpp"
+#include "ofquack/sql_text.hpp"
+#include "ofquack/type_inference.hpp"
 #include "ofquack/xml_report.hpp"
 
 #include <atomic>
@@ -399,6 +402,158 @@ void TestRetryLoopDoesNotRetryPermanentFailures() {
 }
 
 // ---------------------------------------------------------------------------
+// SQL normalisation
+// ---------------------------------------------------------------------------
+
+//! The reason this is a state machine and not a regular expression: a naive
+//! whitespace collapse rewrites the *data*.
+void TestNormalizePreservesLiterals() {
+	CHECK(ofquack::NormalizeSql("SELECT   a,   b   FROM t") == "SELECT a, b FROM t");
+	// Spaces inside a literal are part of the value.
+	CHECK(ofquack::NormalizeSql("SELECT 'a   b' FROM t") == "SELECT 'a   b' FROM t");
+	// A doubled quote is an escaped quote, not the end of the literal.
+	CHECK(ofquack::NormalizeSql("SELECT 'it''s   here' FROM t") == "SELECT 'it''s   here' FROM t");
+	// Quoted identifiers keep their exact spelling.
+	CHECK(ofquack::NormalizeSql("SELECT \"Odd  Name\" FROM t") == "SELECT \"Odd  Name\" FROM t");
+}
+
+void TestNormalizeStripsComments() {
+	CHECK(ofquack::NormalizeSql("SELECT a -- trailing\nFROM t") == "SELECT a FROM t");
+	CHECK(ofquack::NormalizeSql("SELECT a /* block */ FROM t") == "SELECT a FROM t");
+	// A comment separates tokens, so removing it must not join them.
+	CHECK(ofquack::NormalizeSql("SELECT a/**/FROM t") == "SELECT a FROM t");
+	// Comment markers inside a literal are data.
+	CHECK(ofquack::NormalizeSql("SELECT '-- not a comment' FROM t") == "SELECT '-- not a comment' FROM t");
+}
+
+//! An Oracle hint is lexically a block comment. Stripping it silently discards
+//! the plan the author asked for -- the JDBC driver has exactly this bug.
+void TestNormalizeKeepsOptimiserHints() {
+	CHECK(ofquack::NormalizeSql("SELECT /*+ FIRST_ROWS(1000) */ a FROM t") ==
+	      "SELECT /*+ FIRST_ROWS(1000) */ a FROM t");
+	CHECK(ofquack::NormalizeSql("SELECT /*+ PARALLEL(4) */ a /* dropped */ FROM t") ==
+	      "SELECT /*+ PARALLEL(4) */ a FROM t");
+}
+
+//! A keyword inside a literal is not a keyword, which is the distinction a
+//! plain substring search misses -- and getting it wrong means silently
+//! refusing to page a perfectly pageable query.
+void TestFindKeywordIgnoresLiteralsAndComments() {
+	CHECK(ofquack::FindKeyword("SELECT a FROM t OFFSET 5 ROWS", "OFFSET") != std::string::npos);
+	CHECK(ofquack::FindKeyword("SELECT 'OFFSET' FROM t", "OFFSET") == std::string::npos);
+	CHECK(ofquack::FindKeyword("SELECT a FROM t -- OFFSET\n", "OFFSET") == std::string::npos);
+	CHECK(ofquack::FindKeyword("SELECT \"OFFSET\" FROM t", "OFFSET") == std::string::npos);
+	// Case insensitive, and only on word boundaries.
+	CHECK(ofquack::FindKeyword("select a from t offset 5 rows", "OFFSET") != std::string::npos);
+	CHECK(ofquack::FindKeyword("SELECT offsets FROM t", "OFFSET") == std::string::npos);
+	CHECK(ofquack::FindKeyword("SELECT a FROM my_offset", "OFFSET") == std::string::npos);
+}
+
+void TestIsSelectStatement() {
+	CHECK(ofquack::IsSelectStatement("SELECT 1 FROM DUAL"));
+	CHECK(ofquack::IsSelectStatement("  \n  select 1 from dual"));
+	CHECK(ofquack::IsSelectStatement("/* lead */ SELECT 1 FROM DUAL"));
+	CHECK(ofquack::IsSelectStatement("WITH x AS (SELECT 1 FROM DUAL) SELECT * FROM x"));
+	CHECK(ofquack::IsSelectStatement("(SELECT 1 FROM DUAL)"));
+	CHECK(!ofquack::IsSelectStatement("BEGIN NULL; END;"));
+	CHECK(!ofquack::IsSelectStatement("UPDATE t SET a = 1"));
+	CHECK(!ofquack::IsSelectStatement("SELECTED FROM t"));
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+void TestPaginationClassification() {
+	using ofquack::ClassifyForPagination;
+	using ofquack::PaginationVerdict;
+
+	CHECK(ClassifyForPagination("SELECT a FROM t", 500) == PaginationVerdict::YES);
+	CHECK(ClassifyForPagination("SELECT a FROM t", 0) == PaginationVerdict::DISABLED);
+	CHECK(ClassifyForPagination("BEGIN NULL; END;", 500) == PaginationVerdict::NOT_A_SELECT);
+
+	// The author already limited the result; wrapping ours around theirs would
+	// change which rows come back, so their intent wins.
+	CHECK(ClassifyForPagination("SELECT a FROM t OFFSET 10 ROWS", 500) == PaginationVerdict::ALREADY_LIMITED);
+	CHECK(ClassifyForPagination("SELECT a FROM t FETCH FIRST 10 ROWS ONLY", 500) ==
+	      PaginationVerdict::ALREADY_LIMITED);
+
+	// ROWNUM is assigned before ORDER BY and does not compose with OFFSET.
+	CHECK(ClassifyForPagination("SELECT a FROM t WHERE ROWNUM < 10", 500) == PaginationVerdict::USES_ROWNUM);
+
+	// ...but only when they are really keywords.
+	CHECK(ClassifyForPagination("SELECT 'OFFSET' FROM t", 500) == PaginationVerdict::YES);
+	CHECK(ClassifyForPagination("SELECT a FROM t WHERE note = 'ROWNUM'", 500) == PaginationVerdict::YES);
+}
+
+void TestApplyPagination() {
+	CHECK(ofquack::ApplyPagination("SELECT a FROM t", 0, 500) ==
+	      "SELECT a FROM t OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY");
+	CHECK(ofquack::ApplyPagination("SELECT a FROM t", 1000, 500) ==
+	      "SELECT a FROM t OFFSET 1000 ROWS FETCH NEXT 500 ROWS ONLY");
+	// A trailing semicolon would land in the middle of the rewritten text.
+	CHECK(ofquack::ApplyPagination("SELECT a FROM t;", 0, 10) ==
+	      "SELECT a FROM t OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY");
+}
+
+// ---------------------------------------------------------------------------
+// Type inference
+// ---------------------------------------------------------------------------
+
+void TestTypeInference() {
+	using ofquack::InferColumnType;
+	using ofquack::InferredType;
+
+	CHECK(InferColumnType({"1", "2", "-3"}).type == InferredType::INTEGER);
+	CHECK(InferColumnType({"999999999"}).type == InferredType::INTEGER);   // 9 digits
+	CHECK(InferColumnType({"1000000000"}).type == InferredType::BIGINT);   // 10 digits
+	CHECK(InferColumnType({"123456789012345678"}).type == InferredType::BIGINT);
+	// Wider than BIGINT: falls back to DECIMAL rather than overflowing.
+	CHECK(InferColumnType({"1234567890123456789012"}).type == InferredType::DECIMAL);
+
+	const auto decimal = InferColumnType({"1.5", "2.25"});
+	CHECK(decimal.type == InferredType::DECIMAL);
+	CHECK(decimal.scale == 2); // widest scale seen
+
+	CHECK(InferColumnType({"2024-01-31"}).type == InferredType::DATE);
+	CHECK(InferColumnType({"2024-01-31 12:00:00"}).type == InferredType::TIMESTAMP);
+	CHECK(InferColumnType({"2024-01-31T12:00:00"}).type == InferredType::TIMESTAMP);
+	CHECK(InferColumnType({"2024-01-31T12:00:00.123"}).type == InferredType::TIMESTAMP);
+
+	CHECK(InferColumnType({"hello"}).type == InferredType::VARCHAR);
+	// One value that does not fit drops the whole column: half a column of
+	// NULLs is worse than a column of strings.
+	CHECK(InferColumnType({"1", "2", "not a number"}).type == InferredType::VARCHAR);
+	CHECK(InferColumnType({"2024-01-31", "31/01/2024"}).type == InferredType::VARCHAR);
+	// Mixed integers and decimals are all numbers.
+	CHECK(InferColumnType({"1", "2.5"}).type == InferredType::DECIMAL);
+}
+
+//! '00123' is an account code, and reading it as 123 loses information the
+//! user cannot get back.
+void TestTypeInferenceKeepsLeadingZeros() {
+	using ofquack::InferColumnType;
+	using ofquack::InferredType;
+
+	CHECK(InferColumnType({"00123"}).type == InferredType::VARCHAR);
+	CHECK(InferColumnType({"1", "2", "007"}).type == InferredType::VARCHAR);
+	// A plain zero is still a number.
+	CHECK(InferColumnType({"0", "1"}).type == InferredType::INTEGER);
+	CHECK(InferColumnType({"0.50"}).type == InferredType::DECIMAL);
+}
+
+void TestTypeInferenceWithEmptyValues() {
+	using ofquack::InferColumnType;
+	using ofquack::InferredType;
+
+	// Empty values fit any type and are skipped.
+	CHECK(InferColumnType({"", "42", ""}).type == InferredType::INTEGER);
+	// A column of nothing but empties has no evidence at all.
+	CHECK(InferColumnType({"", "", ""}).type == InferredType::VARCHAR);
+	CHECK(InferColumnType({}).type == InferredType::VARCHAR);
+}
+
+// ---------------------------------------------------------------------------
 // Circuit breaker
 // ---------------------------------------------------------------------------
 
@@ -556,6 +711,16 @@ const TestCase TESTS[] = {
     {"retry loop succeeds after transient failures", TestRetryLoopSucceedsAfterTransientFailures},
     {"retry loop gives up and says so", TestRetryLoopGivesUpAndSaysSo},
     {"retry loop does not retry permanent failures", TestRetryLoopDoesNotRetryPermanentFailures},
+    {"normalize preserves literals", TestNormalizePreservesLiterals},
+    {"normalize strips comments", TestNormalizeStripsComments},
+    {"normalize keeps optimiser hints", TestNormalizeKeepsOptimiserHints},
+    {"find keyword ignores literals and comments", TestFindKeywordIgnoresLiteralsAndComments},
+    {"is select statement", TestIsSelectStatement},
+    {"pagination classification", TestPaginationClassification},
+    {"apply pagination", TestApplyPagination},
+    {"type inference", TestTypeInference},
+    {"type inference keeps leading zeros", TestTypeInferenceKeepsLeadingZeros},
+    {"type inference with empty values", TestTypeInferenceWithEmptyValues},
     {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},
     {"breaker resets on success", TestBreakerResetsOnSuccess},
     {"breaker probes after recovery window", TestBreakerProbesAfterRecoveryWindow},

@@ -17,9 +17,13 @@ The **Ofquack** extension provides seamless integration between DuckDB and Oracl
 
 **Chunked Results:** Efficiently streams large result sets in vectorized chunks.
 
-**Uniform VARCHAR Output:** All columns are returned as VARCHAR. Any further type conversion (e.g., to INTEGER, DATE, DECIMAL) should be performed by the recipient SQL client or query after fetching the data.
+**Inferred Column Types:** Numbers, dates and timestamps come back as native DuckDB types, inferred from the data; `all_varchar := true` returns everything as VARCHAR instead.
+
+**Paging:** Large results are fetched a page at a time, so a wide table does not have to fit in one SOAP response.
 
 **Credentials in secrets:** The connection lives in a DuckDB secret, so passwords stay out of SQL text and query history.
+
+**Resilient:** Transient failures are retried with exponential backoff; a failing instance trips a circuit breaker instead of being hammered.
 
 Column order follows the SELECT list, and a column that Oracle returned as NULL arrives as SQL NULL rather than an empty string.
 
@@ -84,7 +88,31 @@ parameters override whatever the secret carries:
 | `report_path` | Absolute path of the report, e.g. `/Custom/Financials/RP_ARB.xdo`. |
 | `username`, `password` | Fusion credentials. |
 | `fetch_size` | Rows per request, 1–10000. `0` disables paging. |
+| `all_varchar` | Return every column as VARCHAR instead of inferring types. |
 | `secured_views` | Rewrite HR tables to their `*_SECURED_LIST_V` views. |
+
+### Paging
+
+Large results are fetched a page at a time by appending
+`OFFSET … ROWS FETCH NEXT … ROWS ONLY` to your statement — BI Publisher offers
+no other paging mechanism. The rewrite is skipped, and one request made, when
+the statement already carries `OFFSET`/`FETCH`, uses `ROWNUM`, or is not a
+SELECT. A keyword inside a string literal does not count, so
+`SELECT 'OFFSET' FROM t` is still paged.
+
+Oracle hints survive: `/*+ FIRST_ROWS(1000) */` reaches the server even though
+it is lexically a comment.
+
+### Column types
+
+Types are inferred from the first page — INTEGER, BIGINT, DECIMAL, DATE,
+TIMESTAMP or VARCHAR. A column keeps VARCHAR if any sampled value does not fit,
+and values with leading zeros keep it VARCHAR too: `'00123'` is an account
+code, not the number 123.
+
+Because the guess comes from a sample, a later row can contradict it; such a
+value is returned as NULL rather than failing the whole query. Pass
+`all_varchar := true` to switch inference off and get the raw text.
 
 If exactly one `oracle_fusion` secret exists it is used automatically. If
 several exist, pass `secret := '<name>'` — the extension will not pick one for

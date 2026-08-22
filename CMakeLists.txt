@@ -38,6 +38,9 @@ set(EXTENSION_SOURCES
         src/soap_envelope.cpp
         src/xml_report.cpp
         src/error_decoder.cpp
+        src/sql_text.cpp
+        src/sql_rewrite.cpp
+        src/type_inference.cpp
         src/retry.cpp
         src/circuit_breaker.cpp
         src/host_throttle.cpp
@@ -79,6 +82,9 @@ if(OFQUACK_BUILD_TESTS)
                  src/soap_envelope.cpp
                  src/xml_report.cpp
                  src/error_decoder.cpp
+                 src/sql_text.cpp
+                 src/sql_rewrite.cpp
+                 src/type_inference.cpp
                  src/retry.cpp
                  src/circuit_breaker.cpp
                  src/host_throttle.cpp
