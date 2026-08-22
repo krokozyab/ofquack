@@ -50,4 +50,16 @@ std::string AppendOrderByPositions(const std::string &sql, const std::vector<uin
 //! Used when the caller wrote the statement and we may not edit its select list.
 std::string WrapWithOrderBy(const std::string &normalized_sql, size_t column_count);
 
+//! The same wrapper over a chosen subset of 1-based positions, for when some
+//! columns must stay out of the order -- a CLOB cannot be sorted by.
+std::string WrapWithOrderByPositions(const std::string &normalized_sql, const std::vector<uint64_t> &positions);
+
+//! A statement that asks Oracle whether it will order `sql` by these 1-based
+//! positions, without making it do any work: the inner ROWNUM keeps it to one
+//! row, and the refusal -- ORA-00932 for a LOB, ORA-00997 for a LONG -- is
+//! raised at compile time regardless of data. There is no function in Oracle
+//! SQL that reports the type of a CLOB column (DUMP and VSIZE both reject
+//! it), so the refusal itself is the only probe there is.
+std::string OrderProbe(const std::string &normalized_sql, const std::vector<uint64_t> &positions);
+
 } // namespace ofquack

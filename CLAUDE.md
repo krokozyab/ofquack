@@ -213,7 +213,14 @@ cost a request:
   `oracle_fusion_query` has no dictionary to ask and wraps the statement
   (`SELECT * FROM (…) ORDER BY 1, 2, …`), which needs the column count and so costs one retake
   of the first page — and is expensive on a large unkeyed result, so a query over a big table
-  should carry its own `ORDER BY` on an indexed key. `stable_paging := false` (or
+  should carry its own `ORDER BY` on an indexed key. When Oracle refuses that order
+  (`ORA-00932` for a CLOB, `ORA-00997` for a LONG — `FND_VIEWS.TEXT`), the scan finds the
+  offending columns by halving: `OrderProbe` asks `SELECT * FROM (SELECT * FROM (…) WHERE ROWNUM
+  <= 1) ORDER BY <subset>` — one row, no sort, the refusal is compile-time — about 2k·log₂n
+  requests for k LOBs among n columns, then orders by the rest. **There is no single-request
+  way**: Oracle SQL has no function that reports the type of a CLOB column — `DUMP` and `VSIZE`
+  reject it with the same `ORA-00932`, verified live. The retried statement lives in the global
+  state, not the bind data, which is read-only by then. `stable_paging := false` (or
   `SET ofquack_stable_paging = false`) turns it off.
 
 A report that ignores the row-limiting clause would now never let a scan end, so a page whose

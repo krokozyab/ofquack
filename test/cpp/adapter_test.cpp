@@ -12,6 +12,7 @@
 
 #include "ofquack/metadata_cache.hpp"
 #include "ofquack/token_cache.hpp"
+#include "ofquack/errors.hpp"
 #include "ofquack/transport.hpp"
 #include "ofquack_extension.hpp"
 
@@ -659,6 +660,90 @@ void TestStatementWithItsOwnOrderIsNotWrapped() {
 	for (const auto &sql : script.executed_sql) {
 		CHECK(sql.find("SELECT * FROM (") == std::string::npos);
 	}
+}
+
+//! Serves a four-column result whose third column is a CLOB: any ORDER BY
+//! that names position 3 is refused with ORA-00932, exactly as Oracle does.
+//! Probes -- one row, an ORDER BY, no OFFSET -- are answered with a row.
+class ClobTransport : public FusionTransport {
+public:
+	explicit ClobTransport(Script &script_p) : script(script_p) {
+	}
+
+	std::string Execute(const std::string &sql, const RequestContext &) override {
+		script.executed_sql.push_back(sql);
+		if (sql.find("WHERE ROWNUM <= 1") != std::string::npos) {
+			probes++;
+		}
+		const auto order_at = sql.find(" ORDER BY ");
+		if (order_at != std::string::npos) {
+			// The positions between ORDER BY and whatever follows them.
+			auto list = sql.substr(order_at + 10);
+			list = list.substr(0, list.find(" OFFSET"));
+			for (size_t at = 0; at < list.size();) {
+				const auto comma = list.find(',', at);
+				const auto token = list.substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+				if (std::atoi(token.c_str()) == 3) {
+					throw ofquack::PermanentError("Oracle Fusion rejected the request: ORA-00932: inconsistent "
+					                              "datatypes: expected - got CLOB");
+				}
+				at = comma == std::string::npos ? list.size() : comma + 1;
+			}
+		}
+		if (sql.find("WHERE ROWNUM <= 1") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;ID&gt;0&lt;/ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+		int offset = 0;
+		const auto at = sql.find(" OFFSET ");
+		if (at != std::string::npos) {
+			offset = std::atoi(sql.c_str() + at + 8);
+		}
+		std::string rowset = "&lt;ROWSET&gt;";
+		for (int i = offset; i < std::min(offset + 10, 25); i++) {
+			rowset += "&lt;ROW&gt;&lt;ID&gt;" + std::to_string(i) +
+			          "&lt;/ID&gt;&lt;NAME&gt;n&lt;/NAME&gt;&lt;TEXT&gt;body&lt;/TEXT&gt;&lt;STATUS&gt;A&lt;/STATUS&gt;&lt;/ROW&gt;";
+		}
+		return MakeSoapResponse(MakeReportXML(rowset + "&lt;/ROWSET&gt;"));
+	}
+
+	int probes = 0;
+
+private:
+	Script &script;
+};
+
+//! FND_VIEWS has a CLOB, and "ORDER BY 1, 2, ..., 18" over it is ORA-00932.
+//! Oracle SQL has no function that will say which column is the CLOB (DUMP
+//! refuses it too), so the scan finds out by asking about halves of the
+//! column list, on one row each, and then orders by the rest.
+void TestOrderSkipsColumnsOracleRefusesToSort() {
+	Script script;
+	std::shared_ptr<ClobTransport> transport;
+	ScopedTransportFactory installed([&](const FusionConfig &) {
+		transport = std::make_shared<ClobTransport>(script);
+		return transport;
+	});
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(
+	    connection, "SELECT * FROM oracle_fusion_query('SELECT ID, NAME, TEXT, STATUS FROM V', fetch_size := 10)");
+
+	CHECK(result->RowCount() == 25);
+	// Halving over four columns: {1,2} passes, {3,4} fails, {3} fails, {4}
+	// passes -- four probes, each of one row.
+	CHECK(transport->probes == 4);
+	bool ordered_without_clob = false;
+	for (const auto &sql : script.executed_sql) {
+		if (sql.find("ORDER BY 1, 2, 4 OFFSET") != std::string::npos) {
+			ordered_without_clob = true;
+		}
+		if (sql.find("WHERE ROWNUM <= 1") != std::string::npos) {
+			CHECK(sql.find("OFFSET") == std::string::npos);
+		}
+	}
+	CHECK(ordered_without_clob);
 }
 
 void TestStablePagingCanBeTurnedOff() {
@@ -1968,6 +2053,7 @@ const TestCase TESTS[] = {
     {"a short first page is confirmed, not assumed", TestShortFirstPageIsConfirmed},
     {"a paged statement is ordered", TestPagedStatementIsOrdered},
     {"a statement with its own order is not wrapped", TestStatementWithItsOwnOrderIsNotWrapped},
+    {"order skips columns oracle refuses to sort", TestOrderSkipsColumnsOracleRefusesToSort},
     {"stable paging can be turned off", TestStablePagingCanBeTurnedOff},
     {"a repeated page is refused", TestARepeatedPageIsRefused},
     {"a truncated page is continued from", TestTruncatedPageIsContinuedFrom},

@@ -1,5 +1,7 @@
 #include "ofquack/fusion_query_function.hpp"
 
+#include <algorithm>
+
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "ofquack/error_decoder.hpp"
@@ -67,6 +69,10 @@ void RefuseARepeatedPage(const ofquack::ParsedReport &previous, const ofquack::P
 
 struct FusionQueryGlobalState : public GlobalTableFunctionState {
 	ofquack::ParsedReport page;
+	//! The statement pages are cut from. Starts as the bind's choice and is
+	//! replaced here if Oracle refuses that order, since bind data is shared
+	//! and read-only by the time a scan runs.
+	string paged_sql;
 	idx_t offset_in_page = 0;
 	//! Rows already handed to DuckDB, which is also the OFFSET of the next page.
 	idx_t rows_emitted = 0;
@@ -128,11 +134,79 @@ ofquack::ParsedReport FetchPageOf(ofquack::FusionTransport &transport, const Fus
 	return ParseResponseOrThrow(ExecuteOrThrow(transport, statement, context), statement);
 }
 
-//! Fetches one page of the statement the scan pages over, which is the user's
-//! own once it carries an ORDER BY and the ordered wrapper otherwise.
-ofquack::ParsedReport FetchPage(ofquack::FusionTransport &transport, const FusionQueryBindData &bind_data,
-                                ClientContext &context, idx_t offset) {
-	return FetchPageOf(transport, bind_data, bind_data.paged_sql, context, offset);
+//! True when Oracle refused a statement because of what it was asked to order
+//! by: ORA-00932 for a LOB, ORA-00997 for a LONG.
+bool RefusedTheOrder(const std::exception &error) {
+	const std::string message = error.what();
+	return message.find("ORA-00932") != std::string::npos || message.find("ORA-00997") != std::string::npos;
+}
+
+//! Whether Oracle will order the statement by these positions. One row, no
+//! sort: the refusal is a compile-time one. Any other failure is the caller's
+//! problem and propagates.
+bool OracleRefusesToOrderBy(const FusionQueryBindData &bind_data, ClientContext &context,
+                            const std::vector<uint64_t> &positions) {
+	const auto probe = ofquack::OrderProbe(bind_data.sql, positions);
+	try {
+		// Parsed as well as executed: a refusal can arrive as an HTTP error or
+		// as a fault inside a successful response, and both have to count.
+		ParseResponseOrThrow(ExecuteOrThrow(*bind_data.transport, probe, context), probe);
+		return false;
+	} catch (const IOException &error) {
+		if (RefusedTheOrder(error)) {
+			return true;
+		}
+		throw;
+	}
+}
+
+//! Finds the columns Oracle will not order by, by halving: a set that is
+//! refused is split and each half asked again, down to single columns. For k
+//! such columns among n this is about 2k*log2(n) requests, each of one row.
+//! There is no cheaper way -- Oracle SQL has no function that reports the
+//! type of a CLOB column, DUMP and VSIZE included -- and it is paid once, and
+//! only by statements with a LOB among their columns.
+void CollectUnsortable(const FusionQueryBindData &bind_data, ClientContext &context,
+                       const std::vector<uint64_t> &subset, std::vector<uint64_t> &unsortable) {
+	if (subset.size() == 1) {
+		unsortable.push_back(subset.front());
+		return;
+	}
+	const auto middle = subset.begin() + static_cast<std::ptrdiff_t>(subset.size() / 2);
+	for (const auto &half :
+	     {std::vector<uint64_t>(subset.begin(), middle), std::vector<uint64_t>(middle, subset.end())}) {
+		if (OracleRefusesToOrderBy(bind_data, context, half)) {
+			CollectUnsortable(bind_data, context, half, unsortable);
+		}
+	}
+}
+
+//! Builds the ordered wrapper over the columns Oracle agrees to order by.
+//! Called only after it refused the order over every column, which is what a
+//! CLOB or LONG in the select list does.
+string WrapperWithoutUnsortableColumns(const FusionQueryBindData &bind_data, ClientContext &context) {
+	std::vector<uint64_t> all;
+	for (idx_t i = 0; i < bind_data.columns.size(); i++) {
+		all.push_back(static_cast<uint64_t>(i) + 1);
+	}
+	// The whole set is already known to be refused; the search starts from
+	// its halves.
+	std::vector<uint64_t> unsortable;
+	CollectUnsortable(bind_data, context, all, unsortable);
+
+	std::vector<uint64_t> positions;
+	for (const auto position : all) {
+		if (std::find(unsortable.begin(), unsortable.end(), position) == unsortable.end()) {
+			positions.push_back(position);
+		}
+	}
+	if (positions.empty()) {
+		throw IOException("Every column of the statement is a LOB or LONG, which Oracle cannot order by, so its "
+		                  "pages cannot be kept consistent.\nGive the statement an ORDER BY of its own, or pass "
+		                  "stable_paging := false.\nSQL: %s",
+		                  bind_data.sql);
+	}
+	return ofquack::WrapWithOrderByPositions(bind_data.sql, positions);
 }
 
 LogicalType ToLogicalType(const ofquack::InferredColumn &inferred) {
@@ -258,6 +332,7 @@ unique_ptr<GlobalTableFunctionState> FusionQueryInitGlobal(ClientContext &contex
 	auto &bind_data = input.bind_data->Cast<FusionQueryBindData>();
 	auto state = make_uniq<FusionQueryGlobalState>();
 	state->page = bind_data.first_page;
+	state->paged_sql = bind_data.paged_sql;
 	if (!bind_data.paginate) {
 		return std::move(state);
 	}
@@ -288,7 +363,17 @@ unique_ptr<GlobalTableFunctionState> FusionQueryInitGlobal(ClientContext &contex
 		// rather than sample it -- including the first, which was fetched
 		// before the ordering was known. Nothing has been emitted yet, so
 		// replacing it is free apart from the request.
-		state->page = FetchPage(*bind_data.transport, bind_data, context, 0);
+		try {
+			state->page = FetchPageOf(*bind_data.transport, bind_data, state->paged_sql, context, 0);
+		} catch (const IOException &error) {
+			if (!RefusedTheOrder(error)) {
+				throw;
+			}
+			// A CLOB or LONG among the columns: Oracle will not order by it.
+			// Find out which and order by the rest.
+			state->paged_sql = WrapperWithoutUnsortableColumns(bind_data, context);
+			state->page = FetchPageOf(*bind_data.transport, bind_data, state->paged_sql, context, 0);
+		}
 	}
 	state->more_pages = !state->page.rows.empty();
 	return std::move(state);
@@ -347,7 +432,7 @@ void FusionQueryScan(ClientContext &context, TableFunctionInput &data, DataChunk
 			output.SetCardinality(0);
 			return;
 		}
-		auto fetched = FetchPage(*bind_data.transport, bind_data, context, state.rows_emitted);
+		auto fetched = FetchPageOf(*bind_data.transport, bind_data, state.paged_sql, context, state.rows_emitted);
 		RefuseARepeatedPage(state.page, fetched, state.rows_emitted);
 		state.page = std::move(fetched);
 		state.offset_in_page = 0;

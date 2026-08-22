@@ -657,6 +657,15 @@ void TestOrderingRewrites() {
 	CHECK(WrapWithOrderBy("SELECT a, b, c FROM t", 3) == "SELECT * FROM (SELECT a, b, c FROM t) ORDER BY 1, 2, 3");
 }
 
+//! The probe that asks whether Oracle will order by a set of columns must
+//! not make it do any work: one row, taken before the ORDER BY applies.
+void TestOrderProbe() {
+	CHECK(ofquack::OrderProbe("SELECT a, doc, b FROM t", {1, 3}) ==
+	      "SELECT * FROM (SELECT * FROM (SELECT a, doc, b FROM t) WHERE ROWNUM <= 1) ORDER BY 1, 3");
+	CHECK(ofquack::WrapWithOrderByPositions("SELECT a, doc, b FROM t", {1, 3}) ==
+	      "SELECT * FROM (SELECT a, doc, b FROM t) ORDER BY 1, 3");
+}
+
 //! Sorting by a LOB is ORA-00932, so those columns have to stay out of an
 //! ordering that exists only to make paging deterministic.
 void TestSortableOracleTypes() {
@@ -1355,6 +1364,7 @@ const TestCase TESTS[] = {
     {"breaker error is informative", TestBreakerErrorIsInformative},
     {"order by detection", TestOrderByDetection},
     {"ordering rewrites", TestOrderingRewrites},
+    {"order probe", TestOrderProbe},
     {"sortable oracle types", TestSortableOracleTypes},
     {"host of", TestHostOf},
     {"throttle serialises concurrent callers", TestThrottleSerialisesConcurrentCallers},

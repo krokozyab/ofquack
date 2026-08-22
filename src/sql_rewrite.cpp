@@ -87,4 +87,13 @@ std::string WrapWithOrderBy(const std::string &normalized_sql, size_t column_cou
 	return AppendOrderByPositions("SELECT * FROM (" + Trimmed(normalized_sql) + ")", positions);
 }
 
+std::string WrapWithOrderByPositions(const std::string &normalized_sql, const std::vector<uint64_t> &positions) {
+	return AppendOrderByPositions("SELECT * FROM (" + Trimmed(normalized_sql) + ")", positions);
+}
+
+std::string OrderProbe(const std::string &normalized_sql, const std::vector<uint64_t> &positions) {
+	return AppendOrderByPositions("SELECT * FROM (SELECT * FROM (" + Trimmed(normalized_sql) + ") WHERE ROWNUM <= 1)",
+	                              positions);
+}
+
 } // namespace ofquack
