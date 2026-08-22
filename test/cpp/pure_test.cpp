@@ -10,6 +10,9 @@
 #include "ofquack/errors.hpp"
 #include "ofquack/host_throttle.hpp"
 #include "ofquack/retry.hpp"
+#include "ofquack/metadata_queries.hpp"
+#include "ofquack/oracle_type_map.hpp"
+#include "ofquack/secured_views.hpp"
 #include "ofquack/soap_envelope.hpp"
 #include "ofquack/sql_rewrite.hpp"
 #include "ofquack/sql_text.hpp"
@@ -554,6 +557,129 @@ void TestTypeInferenceWithEmptyValues() {
 }
 
 // ---------------------------------------------------------------------------
+// Secured views
+// ---------------------------------------------------------------------------
+
+//! The JDBC driver lists twelve pairs but only eleven take effect, because
+//! HR_ALL_ORGANIZATION_UNITS_F appears twice and its map keeps the last. That
+//! resolution is pinned here rather than left to map ordering, which C++ does
+//! not guarantee -- otherwise the same query could hit different views on
+//! different platforms.
+void TestSecuredViewMappings() {
+	const auto &mappings = ofquack::SecuredViewMappings();
+	CHECK(mappings.size() == 11);
+
+	bool found_org_units = false;
+	for (const auto &mapping : mappings) {
+		if (mapping.first == "HR_ALL_ORGANIZATION_UNITS_F") {
+			CHECK(!found_org_units); // exactly once
+			found_org_units = true;
+			CHECK(mapping.second == "PER_LEGAL_EMPL_SECURED_LIST_V");
+		}
+	}
+	CHECK(found_org_units);
+}
+
+void TestApplySecuredViews() {
+	CHECK(ofquack::ApplySecuredViews("SELECT * FROM PER_ALL_PEOPLE_F") ==
+	      "SELECT * FROM PER_PERSON_SECURED_LIST_V");
+	// Case insensitive.
+	CHECK(ofquack::ApplySecuredViews("select * from per_all_people_f") ==
+	      "select * from PER_PERSON_SECURED_LIST_V");
+	// Untouched when nothing matches.
+	CHECK(ofquack::ApplySecuredViews("SELECT * FROM GL_JE_HEADERS") == "SELECT * FROM GL_JE_HEADERS");
+	// Word boundaries: a longer name that merely contains one is not a match.
+	CHECK(ofquack::ApplySecuredViews("SELECT * FROM PER_LOCATIONS_X") == "SELECT * FROM PER_LOCATIONS_X");
+	// A value that happens to spell a table name is data, not a table.
+	CHECK(ofquack::ApplySecuredViews("SELECT * FROM t WHERE note = 'PER_PERSONS'") ==
+	      "SELECT * FROM t WHERE note = 'PER_PERSONS'");
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary queries and type mapping
+// ---------------------------------------------------------------------------
+
+void TestMetadataQueriesUseFusionDictionary() {
+	const auto tables = ofquack::metadata::TablesByTypes({"TABLE", "VIEW"});
+	// FND_VIEWS and FND_TABLES, not ALL_TABLES: only Fusion's own dictionary
+	// carries TABLE_ID, and TABLE_ID is how columns are found.
+	CHECK(Contains(tables, "FROM FND_VIEWS"));
+	CHECK(Contains(tables, "FROM FND_TABLES"));
+	CHECK(Contains(tables, "t.table_id AS TABLE_ID"));
+	CHECK(Contains(tables, "'TABLE','VIEW'"));
+
+	const auto columns = ofquack::metadata::ColumnsByTableIds({"101", "102"});
+	CHECK(Contains(columns, "FROM FND_COLUMNS c"));
+	CHECK(Contains(columns, "JOIN FND_TABLES t ON c.table_id = t.table_id"));
+	CHECK(Contains(columns, "IN (101,102)"));
+
+	// Views are not in FND_COLUMNS at all.
+	CHECK(Contains(ofquack::metadata::ColumnsOfViews("GL_%_V"), "FROM all_tab_columns"));
+	CHECK(Contains(ofquack::metadata::PrimaryKeys("T"), "constraint_type = 'P'"));
+	CHECK(Contains(ofquack::metadata::ForeignKeys("T"), "constraint_type = 'R'"));
+	// The predicate, not the CASE in the select list, which is always there.
+	CHECK(Contains(ofquack::metadata::Indexes("T", true), "AND idx.uniqueness = 'UNIQUE'"));
+	CHECK(!Contains(ofquack::metadata::Indexes("T", false), "AND idx.uniqueness = 'UNIQUE'"));
+}
+
+//! These statements are built by concatenation, and the JDBC driver interpolates
+//! names into them raw -- so an apostrophe in a name breaks the statement, and
+//! could carry more than a name.
+void TestMetadataQueriesEscapeLiterals() {
+	CHECK(ofquack::metadata::QuoteLiteral("O'Brien") == "O''Brien");
+	const auto sql = ofquack::metadata::PrimaryKeys("T' OR '1'='1");
+	CHECK(Contains(sql, "T'' OR ''1''=''1"));
+
+	// A non-numeric TABLE_ID never reaches the statement.
+	const auto columns = ofquack::metadata::ColumnsByTableIds({"1", "2); DROP TABLE x--", "3"});
+	CHECK(Contains(columns, "IN (1,3)"));
+	CHECK(!Contains(columns, "DROP TABLE"));
+}
+
+void TestRownumPagination() {
+	const auto paged = ofquack::metadata::PaginateByRownum("SELECT a FROM t", 0, 2000);
+	CHECK(Contains(paged, "ROWNUM <= 2000"));
+	CHECK(Contains(paged, "rn > 0"));
+
+	const auto second = ofquack::metadata::PaginateByRownum("SELECT a FROM t", 2000, 2000);
+	CHECK(Contains(second, "ROWNUM <= 4000"));
+	CHECK(Contains(second, "rn > 2000"));
+}
+
+//! The dictionary aliases are shifted by one: the column labelled
+//! DECIMAL_DIGITS carries the precision. The fetcher un-shifts them, so this
+//! mapper takes precision and scale in their true meaning.
+void TestOracleTypeMapping() {
+	using ofquack::InferredType;
+	using ofquack::MapOracleType;
+
+	CHECK(MapOracleType("VARCHAR2", 0, 0).type == InferredType::VARCHAR);
+	CHECK(MapOracleType("CLOB", 0, 0).type == InferredType::VARCHAR);
+	// FND's single-letter domain codes.
+	CHECK(MapOracleType("V", 0, 0).type == InferredType::VARCHAR);
+
+	CHECK(MapOracleType("NUMBER", 9, 0).type == InferredType::INTEGER);
+	CHECK(MapOracleType("NUMBER", 10, 0).type == InferredType::BIGINT);
+	CHECK(MapOracleType("NUMBER", 18, 0).type == InferredType::BIGINT);
+	// Too wide for BIGINT, or fractional.
+	CHECK(MapOracleType("NUMBER", 19, 0).type == InferredType::DECIMAL);
+	const auto money = MapOracleType("NUMBER", 12, 2);
+	CHECK(money.type == InferredType::DECIMAL);
+	CHECK(money.scale == 2);
+	// NUMBER with nothing declared: the widest thing it could be.
+	CHECK(MapOracleType("NUMBER", 0, 0).type == InferredType::DECIMAL);
+
+	// Oracle's DATE carries a time of day, so DATE would truncate it.
+	CHECK(MapOracleType("DATE", 0, 0).type == InferredType::TIMESTAMP);
+	CHECK(MapOracleType("TIMESTAMP(6)", 0, 0).type == InferredType::TIMESTAMP);
+
+	// Unrecognised: the caller falls back to inference rather than guessing.
+	CHECK(!MapOracleType("RAW", 0, 0).known);
+	CHECK(!MapOracleType("BLOB", 0, 0).known);
+	CHECK(!MapOracleType("", 0, 0).known);
+}
+
+// ---------------------------------------------------------------------------
 // Circuit breaker
 // ---------------------------------------------------------------------------
 
@@ -721,6 +847,12 @@ const TestCase TESTS[] = {
     {"type inference", TestTypeInference},
     {"type inference keeps leading zeros", TestTypeInferenceKeepsLeadingZeros},
     {"type inference with empty values", TestTypeInferenceWithEmptyValues},
+    {"secured view mappings", TestSecuredViewMappings},
+    {"apply secured views", TestApplySecuredViews},
+    {"metadata queries use fusion dictionary", TestMetadataQueriesUseFusionDictionary},
+    {"metadata queries escape literals", TestMetadataQueriesEscapeLiterals},
+    {"rownum pagination", TestRownumPagination},
+    {"oracle type mapping", TestOracleTypeMapping},
     {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},
     {"breaker resets on success", TestBreakerResetsOnSuccess},
     {"breaker probes after recovery window", TestBreakerProbesAfterRecoveryWindow},

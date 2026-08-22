@@ -6,6 +6,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "ofquack/fusion_query_function.hpp"
 #include "ofquack/fusion_secret.hpp"
+#include "ofquack/metadata_functions.hpp"
 
 #include <curl/curl.h>
 #include <mutex>
@@ -31,6 +32,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	RegisterFusionSecrets(loader);
 	RegisterFusionQueryFunction(loader);
+	RegisterFusionMetadataFunctions(loader);
 }
 
 void OfquackExtension::Load(ExtensionLoader &loader) {

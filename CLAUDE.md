@@ -192,9 +192,46 @@ that does not fit drops the whole column to VARCHAR. Leading zeros keep a column
 `'00123'` is an account code. A later row that contradicts the inferred type becomes NULL rather
 than failing the query — `all_varchar := true` turns inference off entirely.
 
+## Metadata and its cache
+
+`oracle_fusion_tables()` and `oracle_fusion_columns(name)` read Fusion's dictionary through the
+same report as everything else, so **every metadata question costs a SOAP call measured in
+seconds**. That is the constraint the whole design answers: results are cached in a DuckDB
+database of its own at `~/.ofquack/metadata.duckdb`, keyed by endpoint + report path so a
+development and a production instance never share rows, with a one-week TTL.
+
+The cache is a separate database rather than tables in the user's: it has to work for an
+in-memory session, must not appear in the user's catalog, and is shared between connections.
+A cache error is always a miss, never an error the user sees — `Open()` falls back read-write →
+read-only → memory, and `ofquack_cache_status()` reports which. (The read-only rung is
+untested in practice: DuckDB v1.5.5 on macOS did not take an exclusive lock when a second
+process held the file, so the downgrade never triggered. It stays as insurance.)
+
+Freshness is compared against an epoch integer computed in C++, **not** against SQL `now()`:
+`now()` carries a time zone and the stored value does not, so a cache written in UTC and read
+back anywhere else looked stale and every lookup missed.
+
+Dictionary SQL lives in `metadata_queries.cpp`, ported from the JDBC driver. Two things there
+must not be "tidied":
+
+- tables come from `FND_VIEWS`/`FND_TABLES`, not `ALL_TABLES`, because only Fusion's own
+  dictionary carries `TABLE_ID` — and `TABLE_ID` is how columns are looked up. Views are not in
+  `FND_COLUMNS` at all and come from `ALL_TAB_COLUMNS`;
+- the column queries alias `data_precision` as `DECIMAL_DIGITS` and `data_scale` as
+  `NUM_PREC_RADIX` — shifted by one from what the names say. `metadata_fetch.cpp` un-shifts them
+  once; correcting one end without the other turns `NUMBER(10,0)` into `DECIMAL(0,10)`.
+
+Paging here uses an outer `ROWNUM` wrapper, not `OFFSET/FETCH`, because these statements are
+built by concatenation and may already end in `ORDER BY`. Columns are fetched ten tables at a
+time: the report truncates a response past roughly 500 rows.
+
+Unlike the JDBC driver, names are escaped before interpolation (`QuoteLiteral`) and non-numeric
+`TABLE_ID`s are dropped rather than concatenated.
+
 ## Still outstanding
 
 - `AUTH 'bearer'` and `PROVIDER browser` are registered but throw;
-- no dictionary types: inference is the only source of types;
-- `secured_views` is accepted but not applied;
-- no metadata functions, no ATTACH, no metadata cache.
+- no ATTACH: the catalog does not exist yet, so tables are reached through
+  `oracle_fusion_query` rather than by name;
+- dictionary types are reported by `oracle_fusion_columns` but not yet used to type a scan —
+  inference from the data is still what `oracle_fusion_query` uses.

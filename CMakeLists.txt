@@ -35,12 +35,18 @@ set(EXTENSION_SOURCES
         src/fusion_secret.cpp
         src/fusion_connection.cpp
         src/fusion_query_function.cpp
+        src/metadata_functions.cpp
         src/soap_envelope.cpp
         src/xml_report.cpp
         src/error_decoder.cpp
         src/sql_text.cpp
         src/sql_rewrite.cpp
         src/type_inference.cpp
+        src/oracle_type_map.cpp
+        src/secured_views.cpp
+        src/metadata_queries.cpp
+        src/metadata_fetch.cpp
+        src/metadata_cache.cpp
         src/retry.cpp
         src/circuit_breaker.cpp
         src/host_throttle.cpp
@@ -85,6 +91,9 @@ if(OFQUACK_BUILD_TESTS)
                  src/sql_text.cpp
                  src/sql_rewrite.cpp
                  src/type_inference.cpp
+                 src/oracle_type_map.cpp
+                 src/secured_views.cpp
+                 src/metadata_queries.cpp
                  src/retry.cpp
                  src/circuit_breaker.cpp
                  src/host_throttle.cpp

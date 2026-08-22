@@ -10,6 +10,7 @@
 #define NOMINMAX
 #endif
 
+#include "ofquack/metadata_cache.hpp"
 #include "ofquack/transport.hpp"
 #include "ofquack_extension.hpp"
 
@@ -629,6 +630,260 @@ void TestHintSurvivesToTheWire() {
 	CHECK(script.executed_sql[0].find("dropped") == std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// Metadata and its cache
+// ---------------------------------------------------------------------------
+
+//! Answers dictionary queries by recognising which one it was asked.
+class DictionaryTransport : public FusionTransport {
+public:
+	explicit DictionaryTransport(Script &script_p) : script(script_p) {
+	}
+
+	std::string Execute(const std::string &sql, const RequestContext &) override {
+		script.executed_sql.push_back(sql);
+
+		if (sql.find("FND_VIEWS") != std::string::npos) {
+			// The outer ROWNUM wrapper means the driver asked for a page; one
+			// short page ends the loop.
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;"
+			    "&lt;TABLE_ID&gt;101&lt;/TABLE_ID&gt;&lt;/ROW&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_BALANCES_V&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;VIEW&lt;/TABLE_TYPE&gt;"
+			    "&lt;TABLE_ID&gt;102&lt;/TABLE_ID&gt;&lt;/ROW&gt;"
+			    "&lt;/ROWSET&gt;"));
+		}
+		if (sql.find("FND_COLUMNS") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;JE_HEADER_ID"
+			    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;NUMBER&lt;/TYPE_NAME&gt;&lt;DECIMAL_DIGITS&gt;18"
+			    "&lt;/DECIMAL_DIGITS&gt;&lt;NUM_PREC_RADIX&gt;0&lt;/NUM_PREC_RADIX&gt;&lt;ORDINAL_POSITION&gt;1"
+			    "&lt;/ORDINAL_POSITION&gt;&lt;NULLABLE&gt;0&lt;/NULLABLE&gt;&lt;/ROW&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;NAME"
+			    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;&lt;ORDINAL_POSITION&gt;2"
+			    "&lt;/ORDINAL_POSITION&gt;&lt;NULLABLE&gt;1&lt;/NULLABLE&gt;&lt;/ROW&gt;"
+			    "&lt;/ROWSET&gt;"));
+		}
+		if (sql.find("all_tab_columns") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_BALANCES_V&lt;/TABLE_NAME&gt;"
+			    "&lt;COLUMN_NAME&gt;PERIOD_NAME&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;"
+			    "&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+		return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+	}
+
+private:
+	Script &script;
+};
+
+ScopedTransportFactory InstallDictionary(Script &script) {
+	return ScopedTransportFactory(
+	    [&script](const FusionConfig &) { return std::make_shared<DictionaryTransport>(script); });
+}
+
+//! Each metadata test starts from an empty in-memory cache, so one test's
+//! writes cannot make another's cache-miss assertions pass.
+void ResetCache() {
+	duckdb::MetadataCache::ResetForTesting("");
+}
+
+void TestListTables() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT table_name, table_type FROM oracle_fusion_tables() ORDER BY table_name");
+
+	CHECK(result->RowCount() == 2);
+	CHECK(result->GetValue(0, 0).ToString() == "GL_BALANCES_V");
+	CHECK(result->GetValue(1, 0).ToString() == "VIEW");
+	CHECK(result->GetValue(0, 1).ToString() == "GL_JE_HEADERS");
+
+	// The dictionary query is paged by an outer ROWNUM wrapper, not OFFSET.
+	CHECK(script.executed_sql.size() == 1);
+	CHECK(script.executed_sql[0].find("ROWNUM") != std::string::npos);
+}
+
+//! The whole reason the cache exists: every metadata question costs a BI
+//! Publisher call measured in seconds.
+void TestSecondListingCostsNothing() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	const auto after_first = script.executed_sql.size();
+
+	// A separate connection, to prove the cache is not per-connection state.
+	Connection second(db);
+	CreateSecret(second, "fusion2");
+	auto result = RunQuery(second, "SELECT * FROM oracle_fusion_tables(secret := 'fusion')");
+
+	CHECK(result->RowCount() == 2);
+	CHECK(script.executed_sql.size() == after_first);
+}
+
+void TestRefreshBypassesTheCache() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	const auto after_first = script.executed_sql.size();
+
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables(refresh := true)");
+	CHECK(script.executed_sql.size() > after_first);
+}
+
+void TestInvalidateForcesARefetch() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	const auto after_first = script.executed_sql.size();
+
+	auto removed = RunQuery(connection, "SELECT tables_removed FROM ofquack_cache_invalidate()");
+	CHECK(removed->GetValue(0, 0).GetValue<int64_t>() == 2);
+
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	CHECK(script.executed_sql.size() > after_first);
+}
+
+//! Columns of a table come from FND_COLUMNS by TABLE_ID; columns of a view are
+//! not there at all and come from ALL_TAB_COLUMNS.
+void TestColumnsOfTableAndView() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto table_columns =
+	    RunQuery(connection, "SELECT column_name, oracle_type, duckdb_type FROM oracle_fusion_columns('GL_JE_HEADERS')");
+	CHECK(table_columns->RowCount() == 2);
+	CHECK(table_columns->GetValue(0, 0).ToString() == "JE_HEADER_ID");
+	// NUMBER(18,0) from the dictionary maps to BIGINT. Note the source aliases
+	// are shifted: DECIMAL_DIGITS carried the precision.
+	CHECK(table_columns->GetValue(2, 0).ToString() == "BIGINT");
+	CHECK(table_columns->GetValue(2, 1).ToString() == "VARCHAR");
+
+	bool asked_fnd_columns = false;
+	for (const auto &sql : script.executed_sql) {
+		asked_fnd_columns = asked_fnd_columns || sql.find("FND_COLUMNS") != std::string::npos;
+	}
+	CHECK(asked_fnd_columns);
+
+	auto view_columns = RunQuery(connection, "SELECT column_name FROM oracle_fusion_columns('GL_BALANCES_V')");
+	CHECK(view_columns->RowCount() == 1);
+	CHECK(view_columns->GetValue(0, 0).ToString() == "PERIOD_NAME");
+
+	bool asked_all_tab_columns = false;
+	for (const auto &sql : script.executed_sql) {
+		asked_all_tab_columns = asked_all_tab_columns || sql.find("all_tab_columns") != std::string::npos;
+	}
+	CHECK(asked_all_tab_columns);
+}
+
+void TestUnknownTableIsReported() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query("SELECT * FROM oracle_fusion_columns('NO_SUCH_TABLE')");
+
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("NO_SUCH_TABLE") != std::string::npos);
+}
+
+void TestCacheStatusReportsMode() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+
+	auto status = RunQuery(connection, "SELECT mode, cached_tables FROM ofquack_cache_status()");
+	CHECK(status->RowCount() == 1);
+	// ResetForTesting("") opens the cache in memory.
+	CHECK(status->GetValue(0, 0).ToString() == "memory");
+	CHECK(status->GetValue(1, 0).GetValue<int64_t>() == 2);
+}
+
+//! Two instances must not share cached metadata: a table that exists on
+//! development need not exist on production.
+void TestCacheIsKeyedByEndpoint() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	const auto after_first = script.executed_sql.size();
+
+	// Same report, different host.
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables(endpoint := 'https://other.example.com/x?WSDL')");
+	CHECK(script.executed_sql.size() > after_first);
+}
+
+//! Querying the base HR table returns rows the caller may not be entitled to
+//! see; the secured view applies Fusion's row-level security.
+void TestSecuredViewsRewriteIsApplied() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;N&gt;1&lt;/N&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM PER_ALL_PEOPLE_F', "
+	                     "secured_views := true, fetch_size := 0)");
+
+	CHECK(script.executed_sql.size() == 1);
+	CHECK(script.executed_sql[0].find("PER_PERSON_SECURED_LIST_V") != std::string::npos);
+	CHECK(script.executed_sql[0].find("PER_ALL_PEOPLE_F") == std::string::npos);
+}
+
+void TestSecuredViewsIsOffByDefault() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;N&gt;1&lt;/N&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM PER_ALL_PEOPLE_F', fetch_size := 0)");
+
+	CHECK(script.executed_sql[0].find("PER_ALL_PEOPLE_F") != std::string::npos);
+}
+
 struct TestCase {
 	const char *name;
 	void (*run)();
@@ -662,6 +917,16 @@ const TestCase TESTS[] = {
     {"contradicting value becomes null", TestValueThatContradictsTheInferredTypeBecomesNull},
     {"nulls in typed columns", TestNullsInTypedColumns},
     {"hint survives to the wire", TestHintSurvivesToTheWire},
+    {"list tables", TestListTables},
+    {"second listing costs nothing", TestSecondListingCostsNothing},
+    {"refresh bypasses the cache", TestRefreshBypassesTheCache},
+    {"invalidate forces a refetch", TestInvalidateForcesARefetch},
+    {"columns of table and view", TestColumnsOfTableAndView},
+    {"unknown table is reported", TestUnknownTableIsReported},
+    {"cache status reports mode", TestCacheStatusReportsMode},
+    {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
+    {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},
+    {"secured views is off by default", TestSecuredViewsIsOffByDefault},
 };
 
 } // namespace

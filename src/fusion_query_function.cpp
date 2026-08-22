@@ -5,6 +5,7 @@
 #include "ofquack/error_decoder.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
+#include "ofquack/secured_views.hpp"
 #include "ofquack/sql_rewrite.hpp"
 #include "ofquack/sql_text.hpp"
 #include "ofquack/transport.hpp"
@@ -154,6 +155,10 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 		throw BinderException("oracle_fusion_query requires a SQL statement");
 	}
 	bind_data->config = ResolveFusionConfig(context, input.named_parameters, bind_data->options);
+	if (bind_data->options.secured_views) {
+		// Applied before paging, so the rewritten name is what gets limited.
+		bind_data->sql = ofquack::ApplySecuredViews(bind_data->sql);
+	}
 	bind_data->paginate =
 	    ofquack::ClassifyForPagination(bind_data->sql, bind_data->options.fetch_size) == ofquack::PaginationVerdict::YES;
 

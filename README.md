@@ -134,6 +134,39 @@ SELECT * FROM oracle_fusion_query(sql);
 Calling the old name reports this migration rather than "function does not
 exist". That stub will be removed in a later release.
 
+## Browsing the dictionary
+
+```sql
+SELECT * FROM oracle_fusion_tables();               -- tables and views
+SELECT * FROM oracle_fusion_columns('GL_JE_HEADERS');
+```
+
+`oracle_fusion_columns` reports each column's Oracle type alongside the DuckDB
+type it maps to, its precision, scale and nullability.
+
+Reading Fusion's dictionary is slow — it goes through the same report as
+everything else — so results are cached on disk at `~/.ofquack/metadata.duckdb`
+for a week, keyed by endpoint and report path. A development and a production
+instance never share cached rows.
+
+```sql
+SELECT * FROM ofquack_cache_status();               -- where the cache is, what it holds
+SELECT * FROM oracle_fusion_tables(refresh := true);        -- bypass it once
+SELECT * FROM ofquack_cache_invalidate();                   -- drop it for this endpoint
+SELECT * FROM ofquack_cache_invalidate(table := 'GL_JE_HEADERS');
+```
+
+If the cache file cannot be opened it degrades to read-only and then to
+memory — you may wait longer, but nothing fails. `ofquack_cache_status()` says
+which mode is in effect.
+
+### Secured HR views
+
+Passing `secured_views := true` rewrites eleven HR tables to their
+`*_SECURED_LIST_V` counterparts, so Fusion's row-level security applies.
+Querying the base tables directly can return rows the caller is not entitled to
+see. The rewrite is whole-word and ignores string literals.
+
 ### Errors
 
 A SOAP fault, a permissions problem or a bad table name now raise an error
