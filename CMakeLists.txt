@@ -65,6 +65,21 @@ set(EXTENSION_SOURCES
         src/base64.cpp
 )
 
+# ofquack_version() embeds __DATE__ and __TIME__, which are fixed when *that*
+# file is compiled -- so editing any other source left the reported timestamp
+# unchanged, and the function meant to prove a binary is fresh instead argued
+# that it was stale. Rebuilding it whenever any source changes makes the stamp
+# mean what it claims.
+# Absolute paths: OBJECT_DEPENDS resolves a relative one against the build
+# directory, where these do not exist.
+set(OFQUACK_STAMP_DEPENDS "")
+foreach(ofquack_source ${EXTENSION_SOURCES})
+  if(NOT ofquack_source STREQUAL "src/ofquack_extension.cpp")
+    list(APPEND OFQUACK_STAMP_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${ofquack_source}")
+  endif()
+endforeach()
+set_property(SOURCE src/ofquack_extension.cpp APPEND PROPERTY OBJECT_DEPENDS ${OFQUACK_STAMP_DEPENDS})
+
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 

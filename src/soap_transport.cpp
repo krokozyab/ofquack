@@ -88,6 +88,55 @@ void SleepRespectingCancellation(uint64_t delay_ms, const RequestContext &contex
 	throw PermanentError(message);
 }
 
+//! True when a redirect target looks like an authentication step rather than a
+//! page of the application.
+bool LooksLikeSignIn(const std::string &location) {
+	static const char *const MARKERS[] = {"/oam/",     "/oamsso", "login",  "signin",
+	                                      "sign-in",   "/sso",    "/adfs/", "/saml"};
+	auto lowered = location;
+	std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	for (const auto *marker : MARKERS) {
+		if (lowered.find(marker) != std::string::npos) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Explains a redirect, which is never a route to the answer.
+//!
+//! The two shapes mean different things and must not be reported alike. A
+//! redirect to a sign-in page is an authentication failure. A redirect to a
+//! page of the application -- Fusion's home page, typically -- means the
+//! request was accepted as browser navigation rather than as a SOAP call, and
+//! points at the endpoint or at the account's access to BI Publisher, not at
+//! the credentials.
+[[noreturn]] void RedirectedAway(const HttpResponse &response, const std::string &endpoint, AuthMode auth) {
+	const auto target = response.location.empty() ? std::string("an unnamed page") : response.location;
+
+	if (!response.location.empty() && !LooksLikeSignIn(response.location)) {
+		throw PermanentError(
+		    "Oracle Fusion redirected the SOAP request to " + target +
+		    ", which is a page of the application rather than a sign-in page.\n"
+		    "The request reached the server but was not treated as a web service call. Check that ENDPOINT "
+		    "points at the BI Publisher service -- it should end in "
+		    "/xmlpserver/services/ExternalReportWSSService?WSDL -- and that the account has the Access SOAP "
+		    "privilege and can open BI Publisher.\nEndpoint used: " +
+		    endpoint);
+	}
+
+	if (auth == AuthMode::BEARER) {
+		throw TokenExpiredError("Oracle Fusion redirected the request to a sign-in page (" + target +
+		                        "), so the token was not accepted. Sign in again with "
+		                        "SELECT * FROM ofquack_sso_login(force := true)");
+	}
+	throw AuthenticationError(
+	    "Oracle Fusion redirected the request to a sign-in page (" + target +
+	    ").\nThe credentials were not accepted, or this instance uses single sign-on -- in which case the "
+	    "secret needs PROVIDER browser and SELECT * FROM ofquack_sso_login().");
+}
+
 class SoapTransport : public FusionTransport {
 public:
 	explicit SoapTransport(FusionConfig config_p)
@@ -168,15 +217,7 @@ private:
 		// which is how this used to surface as "Missing SOAP Envelope",
 		// several layers away from the actual problem.
 		if (response.status_code >= 300 && response.status_code < 400) {
-			const auto target = response.location.empty() ? std::string() : " (to " + response.location + ")";
-			if (config.auth == AuthMode::BEARER) {
-				throw TokenExpiredError("Oracle Fusion redirected the request to a sign-in page" + target +
-				                        ", which means the token was not accepted");
-			}
-			throw AuthenticationError(
-			    "Oracle Fusion redirected the request to a sign-in page" + target +
-			    ".\nThe credentials were not accepted, or this instance uses single sign-on -- in which case "
-			    "the secret needs PROVIDER browser and SELECT * FROM ofquack_sso_login().");
+			RedirectedAway(response, config.endpoint, config.auth);
 		}
 
 		if (response.status_code >= 400) {
