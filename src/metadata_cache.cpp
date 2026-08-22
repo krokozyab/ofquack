@@ -9,7 +9,11 @@ namespace duckdb {
 
 namespace {
 
-constexpr const char *SCHEMA_VERSION = "1";
+//! Bumped to 2: caches written before the dictionary listing was fixed hold a
+//! silently truncated table list and no expected count, so nothing marks them
+//! as partial. Dropping them is cheaper than explaining to every user why a
+//! refresh is needed.
+constexpr const char *SCHEMA_VERSION = "2";
 
 //! Bumping this is how an incompatible layout change is handled: the old tables
 //! are dropped rather than migrated, since everything in them can be refetched.
