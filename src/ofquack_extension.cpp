@@ -1,10 +1,11 @@
 #define DUCKDB_EXTENSION_MAIN
 #include <stdexcept>
 #include <iostream>
+#include <mutex>
 #include "ofquack_extension.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
 #include <curl/curl.h>
@@ -161,7 +162,11 @@ static std::string ExtractReportXML(const std::string &soap_xml) {
     }
     //std::cerr << "[DEBUG] ExtractReportXML: found reportBytes length=" << strlen(rb->GetText()) << std::endl;
     // Decode Base64 content
-    return base64_decode(rb->GetText());
+    // The explicit std::string is load-bearing: base64.h only declares its
+    // string_view overloads under C++17, so a bare const char* became ambiguous
+    // once this target moved off C++11. std::string is the overload that was
+    // selected before, so this keeps the decoding behaviour identical.
+    return base64_decode(std::string(rb->GetText()));
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -352,11 +357,21 @@ void fuse_func(ClientContext &ctx, TableFunctionInput &data, DataChunk &out) {
 //--------------------------------------------------------------------------------------------------
 namespace duckdb {
 
-void OfquackExtension::Load(DuckDB &db) {
-    auto &inst = *db.instance;
+//! libcurl требует однократной глобальной инициализации до создания easy-handle.
+//! Парного curl_global_cleanup() намеренно нет: точки выхода расширения
+//! (прежний ofquack_shutdown) в новом ABI не существует, а вызов из деструктора
+//! статического объекта гонялся бы с фоновыми потоками libcurl.
+static void EnsureCurlInitialized() {
+    static std::once_flag curl_init_flag;
+    std::call_once(curl_init_flag, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
+static void LoadInternal(ExtensionLoader &loader) {
+    EnsureCurlInitialized();
+    loader.SetDescription("Query Oracle Fusion via BI Publisher SOAP calls");
+
     TableFunctionSet tf("oracle_fusion_wsdl_query");
     tf.AddFunction(TableFunction(
-        //"oracle_fusion_wsdl_query",
         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
          LogicalType::VARCHAR, LogicalType::VARCHAR},
         fuse_func,
@@ -364,28 +379,29 @@ void OfquackExtension::Load(DuckDB &db) {
         nullptr,         // no init_global
         fuse_init_local  // local state for offset
     ));
-    ExtensionUtil::RegisterFunction(inst, tf);
+    loader.RegisterFunction(tf);
+}
+
+void OfquackExtension::Load(ExtensionLoader &loader) {
+    LoadInternal(loader);
 }
 
 std::string OfquackExtension::Name()    { return "ofquack"; }
-std::string OfquackExtension::Version() const { return ""; }
+
+std::string OfquackExtension::Version() const {
+#ifdef EXT_VERSION_OFQUACK
+    return EXT_VERSION_OFQUACK;
+#else
+    return "";
+#endif
+}
 
 } // namespace duckdb
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void ofquack_init(DatabaseInstance &db) {
-    // Initialize libcurl globally
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-    DuckDB d(db);
-    d.LoadExtension<OfquackExtension>();
-}
-DUCKDB_EXTENSION_API const char *ofquack_version() {
-    return DuckDB::LibraryVersion();
-}
-
-DUCKDB_EXTENSION_API void ofquack_shutdown() {
-    curl_global_cleanup();
+DUCKDB_CPP_EXTENSION_ENTRY(ofquack, loader) {
+    duckdb::LoadInternal(loader);
 }
 
 } // extern "C"

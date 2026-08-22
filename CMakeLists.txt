@@ -16,6 +16,18 @@ set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
+
+# The C++ standard is set per target, with target_compile_features below, and
+# deliberately not here. CMAKE_CXX_STANDARD is a cache variable DuckDB owns and
+# sets to 11; raising it from an extension raises it for DuckDB's own targets
+# too, and only for those configured after this point. That produces a build
+# where some translation units are C++11 and some are C++17, which is not a
+# style question: `static constexpr` members are implicitly inline from C++17,
+# so the two halves emit a strong and a weak definition of the same symbol and
+# the link fails on ELF with "multiple definition of
+# duckdb::BufferedFileWriter::DEFAULT_OPEN_FLAGS". macOS links it anyway, so
+# this only ever shows up on Linux CI.
+
 include_directories(src/include)
 
 set(EXTENSION_SOURCES src/ofquack_extension.cpp
@@ -24,6 +36,11 @@ set(EXTENSION_SOURCES src/ofquack_extension.cpp
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+# PRIVATE, so the requirement does not propagate to DuckDB's own targets. See
+# the comment above project() for why CMAKE_CXX_STANDARD must not be used here.
+target_compile_features(${EXTENSION_NAME} PRIVATE cxx_std_17)
+target_compile_features(${LOADABLE_EXTENSION_NAME} PRIVATE cxx_std_17)
 
 # Link OpenSSL in both the static library as the loadable extension
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)

@@ -4,7 +4,14 @@
   "dependencies": [
     "curl",
     "openssl",
-    "cpp-base64",
     "tinyxml2"
-  ]
+  ],
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./extension-ci-tools/vcpkg_ports"
+    ],
+    "overlay-triplets": [
+      "./extension-ci-tools/toolchains"
+    ]
+  }
 }
