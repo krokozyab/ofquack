@@ -28,9 +28,30 @@ void EnsureCurlInitialized() {
 
 } // namespace
 
+//! Reports the version *and* when this binary was compiled.
+//!
+//! DuckDB keeps a loaded extension for the life of the process, so a client
+//! that holds a connection open -- a JDBC pool, DBeaver -- goes on using the
+//! copy it loaded first, and a rebuilt file changes nothing until the client
+//! restarts. Without a way to see which binary is in memory, that looks like a
+//! fix that did not work.
+void OfquackVersion(DataChunk &args, ExpressionState &, Vector &result) {
+	const std::string version =
+#ifdef EXT_VERSION_OFQUACK
+	    EXT_VERSION_OFQUACK
+#else
+	    "dev"
+#endif
+	    " (built " __DATE__ " " __TIME__ ")";
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	ConstantVector::GetData<string_t>(result)[0] = StringVector::AddString(result, version);
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	EnsureCurlInitialized();
 	loader.SetDescription("Query Oracle Fusion via BI Publisher SOAP calls");
+
+	loader.RegisterFunction(ScalarFunction("ofquack_version", {}, LogicalType::VARCHAR, OfquackVersion));
 
 	RegisterFusionSecrets(loader);
 	RegisterFusionQueryFunction(loader);
