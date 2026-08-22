@@ -3,6 +3,8 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "ofquack/host_throttle.hpp"
+#include "ofquack/token_cache.hpp"
 
 #include <algorithm>
 
@@ -96,6 +98,27 @@ void AddFusionNamedParameters(TableFunction &function) {
 	function.named_parameters["all_varchar"] = LogicalType::BOOLEAN;
 }
 
+void RequireUsableCredentials(const ofquack::FusionConfig &config) {
+	// Checked before anything is sent, so a query that cannot possibly
+	// authenticate fails immediately and says what to do about it.
+	//
+	// Not folded into ResolveFusionConfig, because the SSO functions resolve
+	// the same configuration precisely in order to report on, or fix, the
+	// missing token -- for them this is not an error.
+	if (config.auth != ofquack::AuthMode::BEARER || !config.token.empty()) {
+		return;
+	}
+	const auto host = ofquack::HostOf(config.endpoint);
+	if (ofquack::TokenCache::Get().Lookup(host).Valid()) {
+		return;
+	}
+	// Deliberately does not sign in here: a SELECT must never open a browser
+	// window on its own.
+	throw InvalidInputException("Not signed in to %s. Run:\n  SELECT * FROM ofquack_sso_login();\n"
+	                            "or set TOKEN on the secret if you obtained one another way.",
+	                            host);
+}
+
 ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_parameter_map_t &named_parameters,
                                           FusionScanOptions &options) {
 	const auto secret_name = NamedString(named_parameters, "secret");
@@ -120,13 +143,32 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 		config.username = SecretString(secret, "username");
 		config.password = SecretString(secret, "password");
 
-		const auto auth = StringUtil::Lower(SecretString(secret, "auth"));
-		if (auth == "browser" || auth == "bearer") {
-			throw NotImplementedException("AUTH '%s' is not implemented yet; use AUTH 'basic'", auth);
+		config.token = SecretString(secret, "token");
+		// A secret created by the browser provider carries no password, so the
+		// mode follows from what it holds when AUTH is not spelled out.
+		auto auth = StringUtil::Lower(SecretString(secret, "auth"));
+		if (auth.empty()) {
+			auth = entry->secret->GetProvider() == "browser" || !config.token.empty() ? "bearer" : "basic";
 		}
-		if (!auth.empty() && auth != "basic") {
-			throw BinderException("Unknown AUTH '%s' in secret '%s'; expected 'basic'", auth,
+		if (auth == "bearer" || auth == "browser") {
+			config.auth = ofquack::AuthMode::BEARER;
+		} else if (auth == "basic") {
+			config.auth = ofquack::AuthMode::BASIC;
+		} else {
+			throw BinderException("Unknown AUTH '%s' in secret '%s'; expected 'basic', 'bearer' or 'browser'", auth,
 			                      entry->secret->GetName());
+		}
+
+		options.sso.login_url = SecretString(secret, "sso_login_url");
+		options.sso.chrome_path = SecretString(secret, "chrome_path");
+		options.sso.profile_dir = SecretString(secret, "chrome_profile_dir");
+		const auto use_temp_profile = secret.TryGetValue("use_temp_profile");
+		if (!use_temp_profile.IsNull()) {
+			options.sso.use_temp_profile = use_temp_profile.GetValue<bool>();
+		}
+		const auto sso_timeout = secret.TryGetValue("sso_timeout_seconds");
+		if (!sso_timeout.IsNull()) {
+			options.sso.timeout_seconds = sso_timeout.GetValue<int64_t>();
 		}
 
 		const auto connect_timeout = secret.TryGetValue("connect_timeout");
@@ -185,6 +227,7 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 		throw BinderException("No REPORT_PATH: set it on the secret or pass "
 		                      "report_path := '/Custom/Financials/RP_ARB.xdo'");
 	}
+
 	// fetch_size 0 means "one request, no paging", so only the upper bound and
 	// the non-zero lower bound are checked.
 	if (options.fetch_size != 0 && (options.fetch_size < MIN_FETCH_SIZE || options.fetch_size > MAX_FETCH_SIZE)) {

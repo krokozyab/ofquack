@@ -8,6 +8,7 @@
 #include "ofquack/http_curl.hpp"
 #include "ofquack/retry.hpp"
 #include "ofquack/soap_envelope.hpp"
+#include "ofquack/token_cache.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -113,13 +114,33 @@ public:
 	}
 
 private:
+	//! Builds the Authorization header for this attempt.
+	//!
+	//! For bearer auth the live token is read fresh each time rather than being
+	//! captured once: a long scan can outlive the token it started with, and
+	//! the cache may have been refreshed by another query in the meantime.
+	std::string AuthorizationHeader() {
+		if (config.auth == AuthMode::BEARER) {
+			auto cached = TokenCache::Get().Lookup(host);
+			const auto token = cached.Valid() ? cached.access_token : config.token;
+			if (token.empty()) {
+				throw AuthenticationError(
+				    "No Oracle Fusion token is available for " + host +
+				    ". Run SELECT * FROM ofquack_sso_login() to sign in, or set TOKEN on the secret");
+			}
+			return "Authorization: Bearer " + token;
+		}
+		const std::string credentials = config.username + ":" + config.password;
+		return "Authorization: Basic " +
+		       base64_encode(reinterpret_cast<const unsigned char *>(credentials.c_str()), credentials.size());
+	}
+
 	std::string Attempt(const std::string &sql, const RequestContext &context) {
 		breaker->RequireClosed(host);
 		// Held for the whole request: the point is to bound how many BI
 		// Publisher sessions exist at once, not how many we start per second.
 		HostThrottle::Slot slot(*throttle);
 
-		const std::string credentials = config.username + ":" + config.password;
 		HttpRequest request;
 		request.url = config.endpoint;
 		request.body = BuildEnvelope(sql, config.report_path);
@@ -130,8 +151,7 @@ private:
 		    "Content-Type: application/soap+xml;charset=UTF-8",
 		    "SOAPAction: #POST",
 		    "User-Agent: ofquack",
-		    "Authorization: Basic " +
-		        base64_encode(reinterpret_cast<const unsigned char *>(credentials.c_str()), credentials.size()),
+		    AuthorizationHeader(),
 		};
 
 		HttpResponse response;

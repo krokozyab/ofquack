@@ -38,6 +38,13 @@ set(EXTENSION_SOURCES
         src/metadata_functions.cpp
         src/fusion_catalog.cpp
         src/fusion_filter.cpp
+        src/proc.cpp
+        src/jwt.cpp
+        src/token_cache.cpp
+        src/websocket.cpp
+        src/json_util.cpp
+        src/browser_auth.cpp
+        src/sso_functions.cpp
         src/soap_envelope.cpp
         src/xml_report.cpp
         src/error_decoder.cpp
@@ -96,11 +103,18 @@ if(OFQUACK_BUILD_TESTS)
                  src/oracle_type_map.cpp
                  src/secured_views.cpp
                  src/metadata_queries.cpp
+                 src/jwt.cpp
+                 src/token_cache.cpp
+                 src/json_util.cpp
+                 src/websocket.cpp
+                 src/browser_auth.cpp
+                 src/proc.cpp
+                 src/http_curl.cpp
                  src/retry.cpp
                  src/circuit_breaker.cpp
                  src/host_throttle.cpp
                  src/base64.cpp)
-  target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2)
+  target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2 OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
   target_include_directories(ofquack_pure_test PRIVATE src src/include)
   target_compile_features(ofquack_pure_test PRIVATE cxx_std_17)
   add_test(NAME ofquack_pure_test COMMAND ofquack_pure_test)

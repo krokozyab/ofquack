@@ -134,6 +134,49 @@ SELECT * FROM oracle_fusion_query(sql);
 Calling the old name reports this migration rather than "function does not
 exist". That stub will be removed in a later release.
 
+## Signing in with SSO
+
+If your Fusion instance is behind corporate single sign-on, you do not need a
+password in a secret at all:
+
+```sql
+CREATE SECRET fusion (
+    TYPE oracle_fusion,
+    PROVIDER browser,
+    ENDPOINT 'https://<host>/xmlpserver/services/ExternalReportWSSService?WSDL',
+    REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
+    SSO_LOGIN_URL 'https://<host>'
+);
+
+SELECT * FROM ofquack_sso_login();
+```
+
+A browser window opens on your Fusion instance. Sign in the way you normally
+do — Okta, Entra, a second factor, whatever your organisation uses — and the
+extension collects the token Fusion issues to your signed-in session. There is
+no client secret, no registered application, and your password never reaches
+this process.
+
+```sql
+SELECT * FROM ofquack_sso_status();   -- signed in? until when?
+SELECT * FROM ofquack_sso_logout();   -- discard the token
+```
+
+The token is kept in memory only and is never written to disk. What does
+persist is the browser profile under `~/.ofquack/chrome-profile`, so the next
+sign-in is usually a click rather than a password.
+
+Notes:
+
+- **A query never opens a browser by itself.** If you are not signed in, the
+  query fails and tells you to run `ofquack_sso_login()`. Sign-in is
+  interactive, and an ordinary `SELECT` should not be.
+- `CREATE SECRET` does not open a browser either, so it is safe in a script.
+- Chrome, Chromium or Edge is required. Set `OFQUACK_CHROME_PATH` or
+  `CHROME_PATH` on the secret if it is somewhere unusual.
+- On a machine with no browser — a server, CI — obtain a token another way and
+  use `AUTH 'bearer', TOKEN '…'` instead.
+
 ## Attaching Fusion as a database
 
 ```sql

@@ -99,6 +99,7 @@ unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInp
                                     vector<LogicalType> &return_types, vector<string> &names) {
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
+	RequireUsableCredentials(config);
 	const auto endpoint_key = EndpointKey(config.endpoint, config.report_path);
 
 	std::vector<ofquack::TableInfo> tables;
@@ -157,6 +158,7 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 	}
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
+	RequireUsableCredentials(config);
 	const auto endpoint_key = EndpointKey(config.endpoint, config.report_path);
 
 	auto &cache = MetadataCache::Get();

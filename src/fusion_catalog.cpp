@@ -524,6 +524,7 @@ unique_ptr<Catalog> FusionAttach(optional_ptr<StorageExtensionInfo>, ClientConte
 	}
 
 	state->config = ResolveFusionConfig(context, parameters, state->options);
+	RequireUsableCredentials(state->config);
 	state->endpoint_key = EndpointKey(state->config.endpoint, state->config.report_path);
 	state->transport = ofquack::CreateTransport(state->config);
 

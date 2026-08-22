@@ -11,6 +11,7 @@
 #endif
 
 #include "ofquack/metadata_cache.hpp"
+#include "ofquack/token_cache.hpp"
 #include "ofquack/transport.hpp"
 #include "ofquack_extension.hpp"
 
@@ -378,16 +379,22 @@ void TestRemovedFunctionExplainsMigration() {
 	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
 }
 
-//! The browser provider is registered so the error names the missing feature
-//! instead of reading like a typo in the provider name.
-void TestBrowserProviderReportsNotImplemented() {
+//! An unknown AUTH is a typo worth reporting, and the message names what is
+//! actually accepted.
+void TestUnknownAuthModeIsReported() {
+	Script script;
+	auto installed = InstallFake(script);
+
 	DuckDB db(nullptr);
 	Connection connection(db);
+	auto created = connection.Query("CREATE SECRET odd_auth (TYPE oracle_fusion, ENDPOINT 'https://h/x?WSDL', "
+	                                "REPORT_PATH '/r.xdo', AUTH 'kerberos')");
+	CHECK(!created->HasError());
 
-	auto result = connection.Query("CREATE SECRET sso (TYPE oracle_fusion, PROVIDER browser, "
-	                               "ENDPOINT 'https://h/x?WSDL', REPORT_PATH '/r.xdo')");
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', secret := 'odd_auth')");
 	CHECK(result->HasError());
-	CHECK(result->GetError().find("not implemented yet") != std::string::npos);
+	CHECK(result->GetError().find("kerberos") != std::string::npos);
+	CHECK(result->GetError().find("basic") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1138,158 @@ void TestShowTablesListsCachedNamesOnly() {
 	CHECK(warm->GetValue(0, 0).ToString() == "GL_JE_HEADERS");
 }
 
+// ---------------------------------------------------------------------------
+// SSO
+// ---------------------------------------------------------------------------
+
+void CreateBrowserSecret(Connection &connection, const char *name = "sso") {
+	auto result = connection.Query(std::string("CREATE SECRET ") + name +
+	                               " (TYPE oracle_fusion, PROVIDER browser, "
+	                               "ENDPOINT 'https://sso.example.com/xmlpserver/services/"
+	                               "ExternalReportWSSService?WSDL', "
+	                               "REPORT_PATH '/Custom/Financials/RP_ARB.xdo', "
+	                               "SSO_LOGIN_URL 'https://sso.example.com')");
+	if (result->HasError()) {
+		std::cerr << "CREATE SECRET failed: " << result->GetError() << std::endl;
+		std::abort();
+	}
+}
+
+//! Creating the secret must not open a browser: CREATE SECRET is routinely run
+//! from a script, and an interactive step there would hang it.
+void TestBrowserSecretIsCreatedWithoutSigningIn() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT provider FROM duckdb_secrets() WHERE name = 'sso'");
+	CHECK(result->RowCount() == 1);
+	CHECK(result->GetValue(0, 0).ToString() == "browser");
+}
+
+//! A browser secret holds no credential at all -- that is the point of it.
+void TestBrowserSecretHoldsNoCredential() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT secret_string FROM duckdb_secrets() WHERE name = 'sso'");
+	const auto rendered = result->GetValue(0, 0).ToString();
+	CHECK(rendered.find("password") == std::string::npos);
+	CHECK(rendered.find("sso.example.com") != std::string::npos);
+}
+
+void TestSsoStatusWithoutToken() {
+	ofquack::TokenCache::Get().Clear();
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT host, have_token, subject FROM ofquack_sso_status()");
+	CHECK(result->RowCount() == 1);
+	CHECK(result->GetValue(0, 0).ToString() == "sso.example.com");
+	CHECK(!result->GetValue(1, 0).GetValue<bool>());
+	CHECK(result->GetValue(2, 0).IsNull());
+}
+
+//! A query on a browser secret with no token says how to sign in rather than
+//! opening a window by itself: a SELECT must never become interactive.
+void TestBearerQueryWithoutTokenExplainsHowToSignIn() {
+	ofquack::TokenCache::Get().Clear();
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT NAME FROM T', secret := 'sso')");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("ofquack_sso_login") != std::string::npos);
+	// Nothing was sent: the request never got as far as the transport.
+	CHECK(script.executed_sql.empty());
+}
+
+//! A token obtained elsewhere works without any browser involvement, which is
+//! also the escape hatch when the browser flow cannot run.
+void TestBearerTokenFromSecretIsUsed() {
+	ofquack::TokenCache::Get().Clear();
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	auto created = connection.Query("CREATE SECRET bearer_secret (TYPE oracle_fusion, "
+	                                "ENDPOINT 'https://bearer.example.com/x?WSDL', REPORT_PATH '/r.xdo', "
+	                                "AUTH 'bearer', TOKEN 'header.payload.signature')");
+	CHECK(!created->HasError());
+
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM T', "
+	                                   "secret := 'bearer_secret')");
+	CHECK(result->RowCount() == 2);
+	CHECK(script.configs.size() == 1);
+	CHECK(script.configs[0].auth == ofquack::AuthMode::BEARER);
+	CHECK(script.configs[0].token == "header.payload.signature");
+}
+
+//! The token is never printed. It is a live credential, and a status view that
+//! echoed it would put it into scrollback and query history.
+void TestSsoStatusNeverPrintsTheToken() {
+	ofquack::TokenCache::Get().Clear();
+	ofquack::TokenCache::Get().Store("sso.example.com", "aaa.bbb.ccc", "refresh-token", 3600);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT * FROM ofquack_sso_status()");
+	CHECK(result->GetValue(1, 0).GetValue<bool>()); // have_token
+	for (duckdb::idx_t column = 0; column < result->ColumnCount(); column++) {
+		const auto rendered = result->GetValue(column, 0).ToString();
+		CHECK(rendered.find("aaa.bbb.ccc") == std::string::npos);
+		CHECK(rendered.find("refresh-token") == std::string::npos);
+	}
+	ofquack::TokenCache::Get().Clear();
+}
+
+void TestSsoLogoutDiscardsTheToken() {
+	ofquack::TokenCache::Get().Clear();
+	ofquack::TokenCache::Get().Store("sso.example.com", "aaa.bbb.ccc", "", 3600);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT token_discarded FROM ofquack_sso_logout()");
+	CHECK(result->GetValue(0, 0).GetValue<bool>());
+
+	auto status = RunQuery(connection, "SELECT have_token FROM ofquack_sso_status()");
+	CHECK(!status->GetValue(0, 0).GetValue<bool>());
+}
+
+//! A cached token is used without a browser, which is what makes the flow
+//! bearable: signing in once covers every later query.
+void TestCachedTokenIsUsedForQueries() {
+	ofquack::TokenCache::Get().Clear();
+	ofquack::TokenCache::Get().Store("sso.example.com", "aaa.bbb.ccc", "", 3600);
+
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM T', "
+	                                   "secret := 'sso')");
+	CHECK(result->RowCount() == 2);
+	CHECK(script.configs[0].auth == ofquack::AuthMode::BEARER);
+	ofquack::TokenCache::Get().Clear();
+}
+
 struct TestCase {
 	const char *name;
 	void (*run)();
@@ -1153,7 +1312,7 @@ const TestCase TESTS[] = {
     {"unknown secret is reported", TestUnknownSecretIsReported},
     {"fetch size is validated", TestFetchSizeIsValidated},
     {"removed function explains migration", TestRemovedFunctionExplainsMigration},
-    {"browser provider reports not implemented", TestBrowserProviderReportsNotImplemented},
+    {"unknown auth mode is reported", TestUnknownAuthModeIsReported},
     {"paging fetches every row in exactly the right number of requests", TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests},
     {"short first page costs one request", TestShortFirstPageCostsOneRequest},
     {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},
@@ -1184,6 +1343,14 @@ const TestCase TESTS[] = {
     {"attached catalog is read-only", TestAttachedCatalogIsReadOnly},
     {"unknown table in attached catalog", TestUnknownTableInAttachedCatalog},
     {"show tables lists cached names only", TestShowTablesListsCachedNamesOnly},
+    {"browser secret is created without signing in", TestBrowserSecretIsCreatedWithoutSigningIn},
+    {"browser secret holds no credential", TestBrowserSecretHoldsNoCredential},
+    {"sso status without token", TestSsoStatusWithoutToken},
+    {"bearer query without token explains how to sign in", TestBearerQueryWithoutTokenExplainsHowToSignIn},
+    {"bearer token from secret is used", TestBearerTokenFromSecretIsUsed},
+    {"sso status never prints the token", TestSsoStatusNeverPrintsTheToken},
+    {"sso logout discards the token", TestSsoLogoutDiscardsTheToken},
+    {"cached token is used for queries", TestCachedTokenIsUsedForQueries},
 };
 
 } // namespace

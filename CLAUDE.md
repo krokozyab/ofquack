@@ -270,9 +270,52 @@ approximated. Refused on purpose: ordered comparison on text (depends on `NLS_SO
 string (Oracle stores `''` as NULL), bare date literals (`NLS_DATE_FORMAT`), `IN` past 1000,
 and any column whose type was inferred rather than read from the dictionary.
 
+## SSO
+
+```sql
+CREATE SECRET fusion (TYPE oracle_fusion, PROVIDER browser, ENDPOINT …, REPORT_PATH …,
+                      SSO_LOGIN_URL 'https://<host>');
+SELECT * FROM ofquack_sso_login();     -- opens a browser, waits for a person
+```
+
+No client secret, no registered application, no password in this process. The browser performs
+whatever the organisation requires, and Fusion hands its own signed-in session a token through
+`/fscmRestApi/tokenrelay` (guarded by `/fscmRestApi/anticsrf`, which is what stops another site
+doing the same). The flow is ported from the JDBC driver.
+
+Load-bearing decisions:
+
+- **A `SELECT` never opens a browser.** Sign-in is its own function; a query with no token
+  fails and names it. `RequireUsableCredentials` enforces that at bind time, before anything is
+  sent — and is deliberately *not* inside `ResolveFusionConfig`, because the SSO functions
+  resolve the same configuration precisely in order to report on the missing token.
+- **`CREATE SECRET` is not interactive either** — it is routinely run from scripts.
+- Tokens live in memory only (`TokenCache`, keyed by host, process-wide, never per connection:
+  otherwise every connection would open its own window). Persistence comes from the browser
+  profile at `~/.ofquack/chrome-profile`, which holds the cookie that gets a new token without
+  a new login.
+- The JWT signature is **not** verified, on purpose: Fusion authenticates the token when it is
+  used, and all this needs from it is `exp`. The expiry margin is capped at half the token's
+  life, or a short-lived token would be discarded on arrival.
+- `ofquack_sso_status()` never prints the token: it is a live credential and would land in
+  scrollback and query history.
+- If the browser exits without opening a debugging port, it handed the URL to an instance
+  already running under that profile; the retry uses a throwaway profile.
+
+The WebSocket client is ours (`websocket.cpp`) rather than libcurl's, whose WS API is
+experimental in every released 8.x and needs a specific build. It only ever speaks to
+`ws://127.0.0.1:<port>` — no TLS, no proxy, no permessage-deflate — so it is deliberately
+minimal. Do not reuse it for anything else.
+
+**Verified live** up to and including `Runtime.evaluate`: Chrome launches, the port opens,
+`/json/list` answers, the handshake completes, the collection script runs and reports `waiting`,
+the timeout fires with a usable message, and the process is cleaned up. **Not** verified:
+collecting a real token, which needs a real Fusion instance.
+
 ## Still outstanding
 
-- `AUTH 'bearer'` and `PROVIDER browser` are registered but throw — SSO is the next stage;
 - `ofquack_cache_warm()` does not exist; warm the catalog with `oracle_fusion_tables()`;
 - primary keys and foreign keys are fetched by `metadata_fetch` but not surfaced as constraints
-  on an attached table.
+  on an attached table;
+- the token is never refreshed automatically mid-query: a `TokenExpiredError` surfaces as an
+  error telling the user to sign in again, rather than re-running the browser flow.

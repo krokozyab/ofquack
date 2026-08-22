@@ -7,6 +7,11 @@
 
 namespace ofquack {
 
+enum class AuthMode {
+	BASIC,  //!< username and password
+	BEARER, //!< a token, from the cache or supplied directly
+};
+
 //! Everything needed to reach one Fusion instance's BI Publisher report.
 //!
 //! The resilience defaults match the JDBC driver's, so both clients put the
@@ -16,6 +21,11 @@ struct FusionConfig {
 	std::string username;
 	std::string password;
 	std::string report_path; //!< absolute path of the .xdo report, e.g. /Custom/Financials/RP_ARB.xdo
+
+	AuthMode auth = AuthMode::BASIC;
+	//! Seed token for AuthMode::BEARER. The token cache takes over once it
+	//! holds anything fresher, so this is a starting point, not the truth.
+	std::string token;
 
 	uint64_t connect_timeout_seconds = 30;
 	uint64_t read_timeout_seconds = 120;

@@ -89,7 +89,15 @@ HttpClient::HttpClient() : impl(new Impl()) {
 
 HttpClient::~HttpClient() = default;
 
+HttpResponse HttpClient::Get(const HttpRequest &request) {
+	return Perform(request, false);
+}
+
 HttpResponse HttpClient::Post(const HttpRequest &request) {
+	return Perform(request, true);
+}
+
+HttpResponse HttpClient::Perform(const HttpRequest &request, bool post) {
 	auto *handle = impl->handle;
 	curl_easy_reset(handle);
 	// Reset clears the transfer options but keeps the cookie jar with the handle.
@@ -104,9 +112,13 @@ HttpResponse HttpClient::Post(const HttpRequest &request) {
 	HttpResponse response;
 	curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
 	curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers.list);
-	curl_easy_setopt(handle, CURLOPT_POST, 1L);
-	curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.c_str());
-	curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+	if (post) {
+		curl_easy_setopt(handle, CURLOPT_POST, 1L);
+		curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.c_str());
+		curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+	} else {
+		curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
+	}
 	curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, AppendToString);
 	curl_easy_setopt(handle, CURLOPT_WRITEDATA, &response.body);
 	curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, CollectHeader);

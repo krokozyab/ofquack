@@ -155,6 +155,7 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 		throw BinderException("oracle_fusion_query requires a SQL statement");
 	}
 	bind_data->config = ResolveFusionConfig(context, input.named_parameters, bind_data->options);
+	RequireUsableCredentials(bind_data->config);
 	if (bind_data->options.secured_views) {
 		// Applied before paging, so the rewritten name is what gets limited.
 		bind_data->sql = ofquack::ApplySecuredViews(bind_data->sql);

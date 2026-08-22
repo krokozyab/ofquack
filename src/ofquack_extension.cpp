@@ -8,6 +8,7 @@
 #include "ofquack/fusion_secret.hpp"
 #include "ofquack/fusion_catalog.hpp"
 #include "ofquack/metadata_functions.hpp"
+#include "ofquack/sso_functions.hpp"
 
 #include <curl/curl.h>
 #include <mutex>
@@ -35,6 +36,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterFusionQueryFunction(loader);
 	RegisterFusionMetadataFunctions(loader);
 	RegisterFusionCatalog(loader);
+	RegisterFusionSsoFunctions(loader);
 }
 
 void OfquackExtension::Load(ExtensionLoader &loader) {

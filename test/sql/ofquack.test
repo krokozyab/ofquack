@@ -44,12 +44,29 @@ SELECT secret_string LIKE '%redacted%' FROM duckdb_secrets() WHERE name = 'fusio
 ----
 true
 
-# The browser provider is registered, so the error names the missing feature
-# rather than reading like a typo in the provider name.
-statement error
-CREATE SECRET sso (TYPE oracle_fusion, PROVIDER browser, ENDPOINT 'https://h/x?WSDL', REPORT_PATH '/r.xdo');
+# Creating a browser secret must not open a browser: CREATE SECRET is routinely
+# run from a script, and an interactive step there would hang it.
+statement ok
+CREATE SECRET sso (TYPE oracle_fusion, PROVIDER browser, ENDPOINT 'https://sso.example.com/x?WSDL',
+                   REPORT_PATH '/r.xdo', SSO_LOGIN_URL 'https://sso.example.com');
+
+# It also holds no credential at all -- that is the point of it.
+query I
+SELECT secret_string LIKE '%password%' FROM duckdb_secrets() WHERE name = 'sso';
 ----
-not implemented yet
+false
+
+# Not signed in yet, and asking does not sign in.
+query II
+SELECT host, have_token FROM ofquack_sso_status(secret := 'sso');
+----
+sso.example.com	false
+
+# A query on it says how to sign in rather than opening a window by itself.
+statement error
+SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', secret := 'sso');
+----
+ofquack_sso_login
 
 # ---------------------------------------------------------------------------
 # Binder errors: everything here fails before any network access

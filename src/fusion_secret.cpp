@@ -26,10 +26,22 @@ unique_ptr<BaseSecret> CreateFusionSecretFromConfig(ClientContext &, CreateSecre
 	return std::move(secret);
 }
 
-unique_ptr<BaseSecret> CreateFusionSecretFromBrowser(ClientContext &, CreateSecretInput &) {
-	throw NotImplementedException(
-	    "PROVIDER browser is not implemented yet. Use PROVIDER config with AUTH 'basic' and a "
-	    "username and password, or AUTH 'bearer' with a token you obtained separately");
+//! A browser secret holds only where to sign in, never a credential.
+//!
+//! Creating it does not open a browser: that would make CREATE SECRET
+//! interactive, and it is often run from a script. The sign-in happens when
+//! ofquack_sso_login() is called, and the token lives in memory only.
+unique_ptr<BaseSecret> CreateFusionSecretFromBrowser(ClientContext &, CreateSecretInput &input) {
+	auto secret = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+	for (const auto &key : SECRET_KEYS) {
+		secret->TrySetValue(key, input);
+	}
+	for (const auto &key : {"sso_login_url", "chrome_path", "chrome_profile_dir", "use_temp_profile",
+	                        "sso_timeout_seconds"}) {
+		secret->TrySetValue(key, input);
+	}
+	secret->redact_keys = {"password", "token"};
+	return std::move(secret);
 }
 
 void AddCommonParameters(CreateSecretFunction &function) {

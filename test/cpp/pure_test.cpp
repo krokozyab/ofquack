@@ -10,13 +10,18 @@
 #include "ofquack/errors.hpp"
 #include "ofquack/host_throttle.hpp"
 #include "ofquack/retry.hpp"
+#include "ofquack/browser_auth.hpp"
+#include "ofquack/json_util.hpp"
+#include "ofquack/jwt.hpp"
 #include "ofquack/metadata_queries.hpp"
 #include "ofquack/oracle_type_map.hpp"
 #include "ofquack/secured_views.hpp"
 #include "ofquack/soap_envelope.hpp"
 #include "ofquack/sql_rewrite.hpp"
 #include "ofquack/sql_text.hpp"
+#include "ofquack/token_cache.hpp"
 #include "ofquack/type_inference.hpp"
+#include "ofquack/websocket.hpp"
 #include "ofquack/xml_report.hpp"
 
 #include <atomic>
@@ -680,6 +685,186 @@ void TestOracleTypeMapping() {
 }
 
 // ---------------------------------------------------------------------------
+// SSO: JWT, token cache, WebSocket framing, JSON
+// ---------------------------------------------------------------------------
+
+//! Builds a JWT with the given payload. The signature is nonsense on purpose:
+//! nothing here verifies it, and nothing should -- Fusion authenticates the
+//! token when it is used, and this only wants to know when to ask for another.
+std::string MakeJwt(const std::string &payload_json) {
+	const auto encode = [](const std::string &text) {
+		auto encoded = base64_encode(reinterpret_cast<const unsigned char *>(text.c_str()), text.size(), true);
+		while (!encoded.empty() && encoded.back() == '=') {
+			encoded.pop_back();
+		}
+		return encoded;
+	};
+	return encode("{\"alg\":\"RS256\"}") + "." + encode(payload_json) + ".not-a-real-signature";
+}
+
+void TestJwtClaims() {
+	const auto claims = ofquack::ParseJwtClaims(MakeJwt("{\"sub\":\"analyst@example.com\",\"exp\":1893456000}"));
+	CHECK(claims.parsed);
+	CHECK(claims.expires_at_epoch == 1893456000);
+	CHECK(claims.subject == "analyst@example.com");
+
+	// A token without exp still parses; the cache falls back to a fixed life.
+	const auto no_expiry = ofquack::ParseJwtClaims(MakeJwt("{\"sub\":\"x\"}"));
+	CHECK(no_expiry.parsed);
+	CHECK(no_expiry.expires_at_epoch == 0);
+
+	// Not a JWT at all.
+	CHECK(!ofquack::ParseJwtClaims("").parsed);
+	CHECK(!ofquack::ParseJwtClaims("not.a.jwt").parsed);
+	CHECK(!ofquack::ParseJwtClaims("onlyonepart").parsed);
+}
+
+void TestBase64UrlDecoding() {
+	// base64url swaps two characters and drops the padding.
+	CHECK(ofquack::DecodeBase64Url("YQ") == "a");
+	CHECK(ofquack::DecodeBase64Url("YWJj") == "abc");
+	// '-' and '_' stand in for '+' and '/'.
+	CHECK(ofquack::DecodeBase64Url("--__").size() == 3);
+}
+
+void TestTokenCacheExpiryAndRefresh() {
+	int64_t now = 1000000;
+	ofquack::TokenCache::SetClockForTesting([&now]() { return now; });
+	ofquack::TokenCache::Get().Clear();
+	auto &cache = ofquack::TokenCache::Get();
+
+	// exp one hour out; the cache holds it back by the safety buffer.
+	cache.Store("host", MakeJwt("{\"sub\":\"a\",\"exp\":" + std::to_string(now + 3600) + "}"), "refresh", 0);
+	auto token = cache.Lookup("host");
+	CHECK(token.Valid());
+	CHECK(token.subject == "a");
+	CHECK(token.expires_at_epoch == now + 3600 - ofquack::TOKEN_EXPIRY_BUFFER_SECONDS);
+
+	// Fresh: no reason to refresh yet.
+	CHECK(!cache.ShouldRefresh("host"));
+
+	// Past 80% of its life, a refresh is due -- between queries, rather than in
+	// the middle of one.
+	now += static_cast<int64_t>((3600 - ofquack::TOKEN_EXPIRY_BUFFER_SECONDS) * 0.85);
+	CHECK(cache.ShouldRefresh("host"));
+
+	// Past the (buffered) expiry it is gone entirely.
+	now += 3600;
+	CHECK(!cache.Lookup("host").Valid());
+
+	ofquack::TokenCache::Get().Clear();
+	ofquack::TokenCache::SetClockForTesting(nullptr);
+}
+
+void TestTokenCacheFallbackLifetime() {
+	int64_t now = 500000;
+	ofquack::TokenCache::SetClockForTesting([&now]() { return now; });
+	ofquack::TokenCache::Get().Clear();
+	auto &cache = ofquack::TokenCache::Get();
+
+	// No exp and no expires_in: a fixed lifetime rather than treating it as
+	// eternal, which would mean discovering the expiry as a failed query.
+	cache.Store("host", "not-a-jwt", "", 0);
+	auto token = cache.Lookup("host");
+	CHECK(token.Valid());
+	CHECK(token.expires_at_epoch ==
+	      now + ofquack::FALLBACK_TOKEN_LIFETIME_SECONDS - ofquack::TOKEN_EXPIRY_BUFFER_SECONDS);
+
+	// expires_in is used when the token says nothing itself. Note the safety
+	// margin is capped at half the life: a two-minute token would otherwise be
+	// discarded on arrival, since the full margin exceeds it.
+	cache.Store("other", "not-a-jwt", "", 120);
+	auto short_token = cache.Lookup("other");
+	CHECK(short_token.Valid());
+	CHECK(short_token.expires_at_epoch == now + 60);
+
+	// Tokens are per host: signing in to one instance is not signing in to another.
+	CHECK(!cache.Lookup("third").Valid());
+
+	ofquack::TokenCache::Get().Clear();
+	ofquack::TokenCache::SetClockForTesting(nullptr);
+}
+
+void TestWebSocketUrlParsing() {
+	std::string host;
+	uint16_t port = 0;
+	std::string path;
+
+	CHECK(ofquack::ParseWebSocketUrl("ws://127.0.0.1:9222/devtools/page/ABC", host, port, path));
+	CHECK(host == "127.0.0.1");
+	CHECK(port == 9222);
+	CHECK(path == "/devtools/page/ABC");
+
+	CHECK(ofquack::ParseWebSocketUrl("ws://127.0.0.1/x", host, port, path));
+	CHECK(port == 80);
+
+	// Only ws:// -- the debugging port is plain HTTP on loopback.
+	CHECK(!ofquack::ParseWebSocketUrl("wss://example.com/x", host, port, path));
+	CHECK(!ofquack::ParseWebSocketUrl("http://127.0.0.1:9222/x", host, port, path));
+}
+
+//! The handshake value from RFC 6455's own example, so this checks the SHA-1
+//! and base64 wiring against a published vector rather than against itself.
+void TestWebSocketAcceptKey() {
+	CHECK(ofquack::ComputeWebSocketAccept("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+}
+
+void TestJsonFieldReading() {
+	const std::string document = R"({"id":7,"result":{"value":{"status":"success","token":"abc.def","expiresIn":3600}}})";
+
+	CHECK(ofquack::json::StringField(document, "status") == "success");
+	CHECK(ofquack::json::StringField(document, "token") == "abc.def");
+	CHECK(ofquack::json::IntegerField(document, "expiresIn") == 3600);
+	CHECK(ofquack::json::IntegerField(document, "id") == 7);
+	CHECK(ofquack::json::StringField(document, "missing").empty());
+	// A number is not a string, and vice versa.
+	CHECK(ofquack::json::StringField(document, "expiresIn").empty());
+	CHECK(ofquack::json::IntegerField(document, "status") == 0);
+
+	// Escapes are undone.
+	CHECK(ofquack::json::StringField(R"({"a":"line\nbreak"})", "a") == "line\nbreak");
+	CHECK(ofquack::json::StringField(R"({"a":"quote\"inside"})", "a") == "quote\"inside");
+}
+
+void TestJsonArraySplitting() {
+	const std::string targets = R"([{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/a"},)"
+	                            R"({"type":"background_page","webSocketDebuggerUrl":"ws://127.0.0.1:9222/b"}])";
+	const auto elements = ofquack::json::ParseArray(targets);
+	CHECK(elements.size() == 2);
+	CHECK(ofquack::json::StringField(elements[0], "type") == "page");
+	CHECK(ofquack::json::StringField(elements[1], "type") == "background_page");
+
+	CHECK(ofquack::json::ParseArray("[]").empty());
+	CHECK(ofquack::json::ParseArray("not json").empty());
+}
+
+void TestJsonQuoting() {
+	CHECK(ofquack::json::QuoteString("plain") == "\"plain\"");
+	CHECK(ofquack::json::QuoteString("say \"hi\"") == "\"say \\\"hi\\\"\"");
+	CHECK(ofquack::json::QuoteString("a\nb") == "\"a\\nb\"");
+	CHECK(ofquack::json::QuoteString("back\\slash") == "\"back\\\\slash\"");
+}
+
+//! The script is what actually collects the token, so the endpoints it calls
+//! are worth pinning: they are the whole integration contract with Fusion.
+void TestTokenCollectionScript() {
+	const std::string script = ofquack::TokenCollectionScript();
+	CHECK(Contains(script, "/fscmRestApi/anticsrf"));
+	CHECK(Contains(script, "/fscmRestApi/tokenrelay"));
+	// tokenrelay refuses a request without the anti-CSRF header, which is what
+	// stops another site from collecting a token this way.
+	CHECK(Contains(script, "X-XSRF-TOKEN"));
+	CHECK(Contains(script, "same-origin"));
+	// It reports rather than throws while the user is still signing in.
+	CHECK(Contains(script, "waiting"));
+
+	// It must survive being embedded in a JSON message to Chrome.
+	const auto quoted = ofquack::json::QuoteString(script);
+	CHECK(quoted.front() == '"');
+	CHECK(quoted.back() == '"');
+}
+
+// ---------------------------------------------------------------------------
 // Circuit breaker
 // ---------------------------------------------------------------------------
 
@@ -853,6 +1038,16 @@ const TestCase TESTS[] = {
     {"metadata queries escape literals", TestMetadataQueriesEscapeLiterals},
     {"rownum pagination", TestRownumPagination},
     {"oracle type mapping", TestOracleTypeMapping},
+    {"jwt claims", TestJwtClaims},
+    {"base64url decoding", TestBase64UrlDecoding},
+    {"token cache expiry and refresh", TestTokenCacheExpiryAndRefresh},
+    {"token cache fallback lifetime", TestTokenCacheFallbackLifetime},
+    {"websocket url parsing", TestWebSocketUrlParsing},
+    {"websocket accept key", TestWebSocketAcceptKey},
+    {"json field reading", TestJsonFieldReading},
+    {"json array splitting", TestJsonArraySplitting},
+    {"json quoting", TestJsonQuoting},
+    {"token collection script", TestTokenCollectionScript},
     {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},
     {"breaker resets on success", TestBreakerResetsOnSuccess},
     {"breaker probes after recovery window", TestBreakerProbesAfterRecoveryWindow},

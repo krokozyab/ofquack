@@ -44,7 +44,13 @@ public:
 	//! caller can classify it against the response body.
 	HttpResponse Post(const HttpRequest &request);
 
+	//! Performs one GET. Used for the browser's debugging endpoint, which is
+	//! plain HTTP on loopback.
+	HttpResponse Get(const HttpRequest &request);
+
 private:
+	HttpResponse Perform(const HttpRequest &request, bool post);
+
 	struct Impl;
 	std::unique_ptr<Impl> impl;
 };
