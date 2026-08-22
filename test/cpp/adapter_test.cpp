@@ -1185,6 +1185,38 @@ void TestAttachedCatalogIsReadOnly() {
 	CHECK(after->GetValue(0, 0).GetValue<int64_t>() == 2);
 }
 
+//! A table Fusion lists but cannot describe must say so. Reporting it as
+//! non-existent sends the user looking for a typo in a name that is correct.
+void TestListedButUndescribableTableIsExplained() {
+	ResetCache();
+	struct NoColumnsTransport : FusionTransport {
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("FND_VIEWS") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;XLA_AE_LINES&lt;/TABLE_NAME&gt;"
+				    "&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;77&lt;/TABLE_ID&gt;&lt;/ROW&gt;"
+				    "&lt;/ROWSET&gt;"));
+			}
+			// The dictionary knows the table but has no columns for it.
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
+	};
+	ScopedTransportFactory installed([](const FusionConfig &) { return std::make_shared<NoColumnsTransport>(); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	auto result = connection.Query("SELECT * FROM fus.main.XLA_AE_LINES");
+	CHECK(result->HasError());
+	const auto message = result->GetError();
+	CHECK(message.find("XLA_AE_LINES") != std::string::npos);
+	// Not "does not exist", and it points at a way to get the data anyway.
+	CHECK(message.find("no column information") != std::string::npos);
+	CHECK(message.find("oracle_fusion_query") != std::string::npos);
+}
+
 //! A name that belongs to no attached catalog must come back as "not found",
 //! not as an error from ours: DuckDB asks every catalog about every name.
 void TestUnknownTableInAttachedCatalog() {
@@ -1491,6 +1523,7 @@ const TestCase TESTS[] = {
     {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},
     {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},
     {"attached catalog is read-only", TestAttachedCatalogIsReadOnly},
+    {"listed but undescribable table is explained", TestListedButUndescribableTableIsExplained},
     {"unknown table in attached catalog", TestUnknownTableInAttachedCatalog},
     {"show tables lists only describable tables", TestShowTablesListsOnlyDescribableTables},
     {"cache warm", TestCacheWarm},

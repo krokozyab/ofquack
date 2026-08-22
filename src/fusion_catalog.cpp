@@ -315,11 +315,21 @@ public:
 		std::lock_guard<std::mutex> guard(state->metadata_lock);
 		auto table = state->FindTable(context, object_name);
 		if (!table) {
+			// Not ours. DuckDB asks every attached catalog about every name,
+			// including its own system tables, so this is the normal answer.
 			return nullptr;
 		}
 		const auto &columns = state->Columns(context, *table);
 		if (columns.empty()) {
-			return nullptr;
+			// The name *is* in Fusion's dictionary, so reporting that it does
+			// not exist would be a lie that sends the user looking for a typo.
+			// FND_TABLES lists objects with no rows in FND_COLUMNS at all.
+			throw BinderException(
+			    "Oracle Fusion lists \"%s\" but returned no column information for it, so it cannot be "
+			    "queried through the catalog.\nSELECT * FROM oracle_fusion_columns('%s') shows what the "
+			    "dictionary says. Querying it directly still works:\n"
+			    "  SELECT * FROM oracle_fusion_query('SELECT * FROM %s WHERE ROWNUM <= 100');",
+			    table->name, table->name, table->name);
 		}
 
 		auto info = make_uniq<CreateTableInfo>();
