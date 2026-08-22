@@ -42,8 +42,19 @@ public:
 	idx_t CountTables(const std::string &endpoint_key);
 	idx_t CountColumns(const std::string &endpoint_key);
 
-	//! Returns false when nothing is cached for this endpoint, or when what is
-	//! cached is older than `ttl_seconds` (0 disables expiry).
+	//! How many tables the instance said it has when the list was cached, or
+	//! -1 if that was never established.
+	int64_t ExpectedTables(const std::string &endpoint_key);
+	void SetExpectedTables(const std::string &endpoint_key, int64_t expected);
+
+	//! Returns false when nothing is cached for this endpoint, when what is
+	//! cached is older than `ttl_seconds` (0 disables expiry), or when it holds
+	//! fewer tables than the instance said it has.
+	//!
+	//! That last case is the important one: a listing cut short by a truncated
+	//! response leaves a cache that looks perfectly good and is quietly missing
+	//! whole stretches of the dictionary. Treating it as a miss makes the next
+	//! call repair it instead of serving the gap for a week.
 	bool TryGetTables(const std::string &endpoint_key, int64_t ttl_seconds, std::vector<ofquack::TableInfo> &tables);
 	bool TryGetColumns(const std::string &endpoint_key, const std::string &table_name, int64_t ttl_seconds,
 	                   std::vector<ofquack::ColumnInfo> &columns);

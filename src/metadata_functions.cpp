@@ -112,9 +112,25 @@ unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInp
 		// Listing the dictionary is one of the most expensive calls there is,
 		// so the result is written back before it is returned.
 		auto transport = ofquack::CreateTransport(config);
+		const auto request_context = ContextFor(context);
+
+		// Asked for first, and recorded, so that a listing which comes back
+		// short is recognised as short -- by this call and by every later one
+		// that reads the cache.
+		const auto expected = WithTranslatedErrors(
+		    [&]() { return ofquack::FetchTableCount(*transport, request_context, {"TABLE", "VIEW"}); });
 		tables = WithTranslatedErrors(
-		    [&]() { return ofquack::FetchTables(*transport, ContextFor(context), {"TABLE", "VIEW"}); });
+		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}); });
+
+		if (expected >= 0 && static_cast<int64_t>(tables.size()) < expected) {
+			throw IOException(
+			    "Oracle Fusion says its dictionary holds %lld tables and views but the listing returned only "
+			    "%lld.\nThe response was truncated somewhere, so the list is incomplete and has not been "
+			    "cached. Retry, or lower the page size if this persists.",
+			    static_cast<long long>(expected), static_cast<long long>(tables.size()));
+		}
 		cache.PutTables(endpoint_key, tables);
+		cache.SetExpectedTables(endpoint_key, expected);
 	}
 
 	auto bind_data = make_uniq<MaterialisedBindData>();
@@ -396,16 +412,23 @@ unique_ptr<FunctionData> CacheStatusBind(ClientContext &context, TableFunctionBi
 		endpoint_key.clear();
 	}
 
+	const auto cached_tables = static_cast<int64_t>(cache.CountTables(endpoint_key));
+	const auto expected = endpoint_key.empty() ? -1 : cache.ExpectedTables(endpoint_key);
+
 	auto bind_data = make_uniq<MaterialisedBindData>();
 	bind_data->rows.push_back({Value(ModeName(cache.Mode())),
 	                           cache.Path().empty() ? Value(LogicalType::VARCHAR) : Value(cache.Path()),
 	                           endpoint_key.empty() ? Value(LogicalType::VARCHAR) : Value(endpoint_key),
-	                           Value::BIGINT(static_cast<int64_t>(cache.CountTables(endpoint_key))),
+	                           Value::BIGINT(cached_tables),
+	                           // -1 means the instance was never asked; that is
+	                           // unknown, not zero, and NULL says so.
+	                           expected < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(expected),
+	                           Value::BOOLEAN(expected < 0 || cached_tables >= expected),
 	                           Value::BIGINT(static_cast<int64_t>(cache.CountColumns(endpoint_key)))});
 
-	names = {"mode", "path", "endpoint", "cached_tables", "cached_columns"};
+	names = {"mode", "path", "endpoint", "cached_tables", "dictionary_tables", "complete", "cached_columns"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
-	                LogicalType::BIGINT};
+	                LogicalType::BIGINT,  LogicalType::BOOLEAN, LogicalType::BIGINT};
 	return std::move(bind_data);
 }
 

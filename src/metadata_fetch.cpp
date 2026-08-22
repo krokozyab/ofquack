@@ -183,6 +183,21 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 	return tables;
 }
 
+int64_t FetchTableCount(FusionTransport &transport, const RequestContext &context,
+                        const std::vector<std::string> &types) {
+	try {
+		const auto rows = Query(transport, context, metadata::TableCount(types));
+		if (rows.empty()) {
+			return -1;
+		}
+		return IntField(rows.front(), "TABLE_COUNT", -1);
+	} catch (const FusionError &) {
+		// A count is a convenience, not a requirement: an instance that will
+		// not answer it must not stop the listing that follows.
+		return -1;
+	}
+}
+
 std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const RequestContext &context,
                                              const std::vector<TableInfo> &tables) {
 	// Maps the FND id back to the name, so a batched response can be split up.

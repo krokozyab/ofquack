@@ -94,6 +94,17 @@ std::string TablesByTypes(const std::vector<std::string> &types) {
 	return oss.str();
 }
 
+std::string TableCount(const std::vector<std::string> &types) {
+	const auto type_list = types.empty() ? std::string("'TABLE','VIEW'") : JoinQuoted(types);
+	std::ostringstream oss;
+	oss << "SELECT COUNT(*) AS TABLE_COUNT FROM ("
+	    << "SELECT view_name AS table_name, 'VIEW' AS table_type FROM FND_VIEWS"
+	    << " UNION ALL"
+	    << " SELECT table_name, 'TABLE' AS table_type FROM FND_TABLES) t"
+	    << " WHERE t.table_type IN (" << type_list << ")";
+	return oss.str();
+}
+
 std::string ColumnsByTableIds(const std::vector<std::string> &table_ids) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS TABLE_CAT,"

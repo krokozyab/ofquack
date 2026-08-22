@@ -751,9 +751,13 @@ public:
 			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
 		}
 
+		if (sql.find("COUNT(*)") != std::string::npos) {
+			// The listing asks how many rows to expect, so that a truncated
+			// response is recognisable as truncated.
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;2&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
 		if (sql.find("FND_VIEWS") != std::string::npos) {
-			// The outer ROWNUM wrapper means the driver asked for a page; one
-			// short page ends the loop.
 			return MakeSoapResponse(MakeReportXML(
 			    "&lt;ROWSET&gt;"
 			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;"
@@ -813,11 +817,12 @@ void TestListTables() {
 	CHECK(result->GetValue(1, 0).ToString() == "VIEW");
 	CHECK(result->GetValue(0, 1).ToString() == "GL_JE_HEADERS");
 
-	// Paged by an outer ROWNUM wrapper, not OFFSET. Two requests: the rows,
-	// then the empty page that ends the listing -- a short page cannot end it,
-	// because BI Publisher truncates without saying so.
-	CHECK(script.executed_sql.size() == 2);
-	CHECK(script.executed_sql[0].find("ROWNUM") != std::string::npos);
+	// Three requests: the count, the rows, and the empty page that ends the
+	// listing. A short page cannot end it, because BI Publisher truncates
+	// without saying so -- which is what the count is there to catch.
+	CHECK(script.executed_sql.size() == 3);
+	CHECK(script.executed_sql[0].find("COUNT(*)") != std::string::npos);
+	CHECK(script.executed_sql[1].find("ROWNUM") != std::string::npos);
 }
 
 //! BI Publisher truncates a response without saying so, and a truncated page
@@ -832,6 +837,12 @@ void TestTruncatedPageDoesNotEndTheListing() {
 
 		std::string Execute(const std::string &sql, const RequestContext &) override {
 			executed.push_back(sql);
+			if (sql.find("COUNT(*)") != std::string::npos) {
+				// Two rows exist; the pages below deliver them one at a time,
+				// which is exactly the truncation this test is about.
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;2&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
 			// Three pages: two short ones the server chose to cut, then empty.
 			// A page size of one row is enough to make the point.
 			if (pages++ >= 2) {
@@ -856,10 +867,50 @@ void TestTruncatedPageDoesNotEndTheListing() {
 	CHECK(result->RowCount() == 2);
 	CHECK(result->GetValue(0, 0).ToString() == "AAA_FIRST");
 	CHECK(result->GetValue(0, 1).ToString() == "XLA_AE_LINES");
-	// Three requests: two with rows and the empty one that ends it.
-	CHECK(transport->executed.size() == 3);
+	// Four requests: the count, two with rows, and the empty one that ends it.
+	CHECK(transport->executed.size() == 4);
 	// The offset advances by what actually arrived, not by the page size asked for.
-	CHECK(transport->executed[1].find("rn > 1") != std::string::npos);
+	CHECK(transport->executed[2].find("rn > 1") != std::string::npos);
+}
+
+//! A listing that comes back short of what the instance says it has is
+//! reported and not cached.
+//!
+//! This is the failure that started all of it: a truncated response produced a
+//! partial dictionary, which then looked authoritative for a week, and the
+//! tables it omitted appeared not to exist. Asking the instance for a count
+//! first is what makes "short" detectable at all.
+void TestShortListingIsReportedRatherThanCached() {
+	ResetCache();
+	struct ShortListingTransport : FusionTransport {
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("COUNT(*)") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;9000&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			// One row, where nine thousand were promised.
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;AAA_ONLY&lt;/TABLE_NAME&gt;"
+			    "&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	ScopedTransportFactory installed([](const FusionConfig &) { return std::make_shared<ShortListingTransport>(); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto result = connection.Query("SELECT * FROM oracle_fusion_tables()");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("9000") != std::string::npos);
+	CHECK(result->GetError().find("incomplete") != std::string::npos);
+
+	// And nothing was written, so the next attempt is not served a gap.
+	auto status = RunQuery(connection, "SELECT cached_tables FROM ofquack_cache_status()");
+	CHECK(status->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
 //! The whole reason the cache exists: every metadata question costs a BI
@@ -1568,6 +1619,7 @@ const TestCase TESTS[] = {
     {"hint survives to the wire", TestHintSurvivesToTheWire},
     {"list tables", TestListTables},
     {"truncated page does not end the listing", TestTruncatedPageDoesNotEndTheListing},
+    {"short listing is reported rather than cached", TestShortListingIsReportedRatherThanCached},
     {"second listing costs nothing", TestSecondListingCostsNothing},
     {"refresh bypasses the cache", TestRefreshBypassesTheCache},
     {"invalidate forces a refetch", TestInvalidateForcesARefetch},

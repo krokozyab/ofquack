@@ -45,6 +45,13 @@ std::string PaginateByRownum(const std::string &base_sql, uint64_t offset, uint6
 //! Tables and views. `types` is a list such as {"TABLE", "VIEW"}.
 std::string TablesByTypes(const std::vector<std::string> &types);
 
+//! How many tables and views the dictionary holds.
+//!
+//! One row, so it cannot be truncated, and it is what makes a partial listing
+//! detectable: without it, a listing that stopped early is indistinguishable
+//! from an instance that simply has fewer tables.
+std::string TableCount(const std::vector<std::string> &types);
+
 //! Columns of the given tables, looked up by the TABLE_ID that TablesByTypes
 //! returned.
 std::string ColumnsByTableIds(const std::vector<std::string> &table_ids);

@@ -219,8 +219,38 @@ idx_t MetadataCache::CountColumns(const std::string &endpoint_key) {
 	return result->GetValue(0, 0).GetValue<idx_t>();
 }
 
+int64_t MetadataCache::ExpectedTables(const std::string &endpoint_key) {
+	std::lock_guard<std::mutex> guard(lock);
+	if (!connection) {
+		return -1;
+	}
+	auto result = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'tables_expected:" +
+	                                Escape(endpoint_key) + "'");
+	if (!result || result->HasError() || result->RowCount() != 1) {
+		return -1;
+	}
+	try {
+		return std::stoll(result->GetValue(0, 0).ToString());
+	} catch (const std::exception &) {
+		return -1;
+	}
+}
+
+void MetadataCache::SetExpectedTables(const std::string &endpoint_key, int64_t expected) {
+	std::lock_guard<std::mutex> guard(lock);
+	if (!connection || mode == CacheMode::READ_ONLY || expected < 0) {
+		return;
+	}
+	const auto key = "tables_expected:" + Escape(endpoint_key);
+	connection->Query("DELETE FROM CACHE_META WHERE KEY = '" + key + "'");
+	connection->Query("INSERT INTO CACHE_META VALUES ('" + key + "', '" + std::to_string(expected) + "')");
+	connection->Query("CHECKPOINT");
+}
+
 bool MetadataCache::TryGetTables(const std::string &endpoint_key, int64_t ttl_seconds,
                                  std::vector<ofquack::TableInfo> &tables) {
+	const auto expected = ExpectedTables(endpoint_key);
+
 	std::lock_guard<std::mutex> guard(lock);
 	if (!connection) {
 		return false;
@@ -231,6 +261,11 @@ bool MetadataCache::TryGetTables(const std::string &endpoint_key, int64_t ttl_se
 		                                Escape(endpoint_key) + "'" + FreshnessPredicate(ttl_seconds) +
 		                                " ORDER BY TABLE_NAME");
 		if (!result || result->HasError() || result->RowCount() == 0) {
+			return false;
+		}
+		if (expected >= 0 && static_cast<int64_t>(result->RowCount()) < expected) {
+			// Fewer than the instance said it has: this list was cut short.
+			// Serving it would hide part of the dictionary for a week.
 			return false;
 		}
 		for (idx_t row = 0; row < result->RowCount(); row++) {
