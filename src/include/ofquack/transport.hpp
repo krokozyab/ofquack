@@ -8,11 +8,25 @@
 namespace ofquack {
 
 //! Everything needed to reach one Fusion instance's BI Publisher report.
+//!
+//! The resilience defaults match the JDBC driver's, so both clients put the
+//! same load on an instance.
 struct FusionConfig {
 	std::string endpoint;    //!< ExternalReportWSSService WSDL URL
 	std::string username;
 	std::string password;
 	std::string report_path; //!< absolute path of the .xdo report, e.g. /Custom/Financials/RP_ARB.xdo
+
+	uint64_t connect_timeout_seconds = 30;
+	uint64_t read_timeout_seconds = 120;
+	uint32_t max_attempts = 3;
+	uint64_t retry_base_ms = 1000;
+	uint64_t retry_max_ms = 30000;
+	uint32_t breaker_threshold = 5;
+	uint64_t breaker_recovery_ms = 60000;
+	//! One at a time by default: each request opens a BI Publisher session that
+	//! the server holds on to.
+	uint32_t max_concurrent_requests = 1;
 };
 
 //! Per-request cancellation and deadline. Both are optional.

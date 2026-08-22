@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,16 +12,41 @@ struct HttpRequest {
 	std::string url;
 	std::string body;
 	std::vector<std::string> headers; //!< each entry is a full "Name: value" line
+	uint64_t connect_timeout_seconds = 30;
+	uint64_t read_timeout_seconds = 120;
+	//! Polled while the transfer runs; returning true aborts it. May be empty.
+	std::function<bool()> is_cancelled;
 };
 
 struct HttpResponse {
 	long status_code = 0;
 	std::string body;
+	//! Value of WWW-Authenticate, when the server sent one. Used to tell a
+	//! rejected password from an expired token.
+	std::string www_authenticate;
 };
 
-//! Performs one HTTP POST and returns the response. Throws std::runtime_error
-//! if the request could not be completed at all; an HTTP error *status* is
-//! reported in the response rather than thrown, so callers can classify it.
-HttpResponse HttpPost(const HttpRequest &request);
+//! Holds one libcurl handle plus its cookie jar.
+//!
+//! Reusing the handle across requests keeps the BI Publisher session cookie, so
+//! consecutive pages of one result do not each pay for a fresh server-side
+//! session. Not thread safe: callers hold a HostThrottle slot, which serialises
+//! use anyway.
+class HttpClient {
+public:
+	HttpClient();
+	~HttpClient();
+	HttpClient(const HttpClient &) = delete;
+	HttpClient &operator=(const HttpClient &) = delete;
+
+	//! Performs one POST. Throws RetryableError or PermanentError for transport
+	//! failures; an HTTP error *status* is returned rather than thrown, so the
+	//! caller can classify it against the response body.
+	HttpResponse Post(const HttpRequest &request);
+
+private:
+	struct Impl;
+	std::unique_ptr<Impl> impl;
+};
 
 } // namespace ofquack

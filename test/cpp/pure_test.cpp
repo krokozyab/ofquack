@@ -5,13 +5,21 @@
 // about a second and can be run on every push.
 
 #include "base64.h"
+#include "ofquack/circuit_breaker.hpp"
 #include "ofquack/error_decoder.hpp"
+#include "ofquack/errors.hpp"
+#include "ofquack/host_throttle.hpp"
+#include "ofquack/retry.hpp"
 #include "ofquack/soap_envelope.hpp"
 #include "ofquack/xml_report.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // A release build defines NDEBUG, and assert() then removes not just the check
@@ -33,6 +41,7 @@ using ofquack::BuildEnvelope;
 using ofquack::DescribeFailure;
 using ofquack::EscapeCdata;
 using ofquack::ExtractOracleErrors;
+using ofquack::ComputeBackoffDelay;
 using ofquack::ExtractReportXML;
 using ofquack::ParseRows;
 
@@ -259,6 +268,267 @@ void TestDescribeFailureTruncatesRunawayMessages() {
 	CHECK(described.size() <= ofquack::MAX_REPORTED_ERROR_LENGTH + 32);
 }
 
+// ---------------------------------------------------------------------------
+// Retry policy
+// ---------------------------------------------------------------------------
+
+//! With the jitter dial at zero the delays are exactly the exponential series,
+//! which is the part worth asserting; the random part is checked separately.
+void TestBackoffGrowsExponentiallyAndIsCapped() {
+	ofquack::RetryPolicy policy;
+	policy.base_delay_ms = 1000;
+	policy.multiplier = 2.0;
+	policy.max_delay_ms = 30000;
+	policy.jitter = 0.0;
+	const auto no_jitter = []() { return 0.5; };
+
+	CHECK(ComputeBackoffDelay(policy, 0, no_jitter) == 1000);
+	CHECK(ComputeBackoffDelay(policy, 1, no_jitter) == 2000);
+	CHECK(ComputeBackoffDelay(policy, 2, no_jitter) == 4000);
+	// Capped, and the cap holds however far the attempt counter runs.
+	CHECK(ComputeBackoffDelay(policy, 20, no_jitter) == 30000);
+}
+
+//! Jitter spreads the delay either way, so a set of clients that failed
+//! together does not retry in lockstep forever.
+void TestBackoffAppliesJitterBothWays() {
+	ofquack::RetryPolicy policy;
+	policy.base_delay_ms = 1000;
+	policy.jitter = 0.2;
+
+	CHECK(ComputeBackoffDelay(policy, 0, []() { return 0.5; }) == 1000); // centre
+	CHECK(ComputeBackoffDelay(policy, 0, []() { return 0.0; }) == 800);  // -20%
+	CHECK(ComputeBackoffDelay(policy, 0, []() { return 1.0; }) == 1200); // +20%
+}
+
+void TestRetryableClassification() {
+	// Transient server-side failures and rate limiting are worth another go.
+	CHECK(ofquack::IsRetryableStatus(500));
+	CHECK(ofquack::IsRetryableStatus(503));
+	CHECK(ofquack::IsRetryableStatus(429));
+	CHECK(ofquack::IsRetryableStatus(408));
+	// A refusal is not.
+	CHECK(!ofquack::IsRetryableStatus(200));
+	CHECK(!ofquack::IsRetryableStatus(401));
+	CHECK(!ofquack::IsRetryableStatus(404));
+
+	CHECK(ofquack::IsRetryableCurlError(28)); // CURLE_OPERATION_TIMEDOUT
+	CHECK(ofquack::IsRetryableCurlError(7));  // CURLE_COULDNT_CONNECT
+	// An unresolvable host is a configuration mistake, not a blip.
+	CHECK(!ofquack::IsRetryableCurlError(6)); // CURLE_COULDNT_RESOLVE_HOST
+	CHECK(!ofquack::IsRetryableCurlError(60)); // CURLE_PEER_FAILED_VERIFICATION
+}
+
+//! Retrying a statement Oracle already refused just makes the user wait three
+//! times as long for the same error -- and repeating a bad password can lock
+//! the account.
+void TestPermanentFailuresAreNotRetried() {
+	CHECK(ofquack::DescribesPermanentFailure("ORA-00942: table or view does not exist"));
+	CHECK(ofquack::DescribesPermanentFailure("Authentication Failed"));
+	CHECK(ofquack::DescribesPermanentFailure("invalid username or password"));
+	CHECK(!ofquack::DescribesPermanentFailure("Service temporarily unavailable"));
+	CHECK(!ofquack::DescribesPermanentFailure(""));
+}
+
+//! The retry loop is a free function precisely so it can be exercised here,
+//! with no network and no waiting: the sleep is a parameter.
+void TestRetryLoopSucceedsAfterTransientFailures() {
+	ofquack::RetryPolicy policy;
+	policy.max_attempts = 3;
+	int calls = 0;
+	std::vector<uint64_t> slept;
+
+	const auto result = ofquack::ExecuteWithRetry(
+	    policy,
+	    [&]() -> std::string {
+		    if (++calls < 3) {
+			    throw ofquack::RetryableError("503 Service Unavailable");
+		    }
+		    return "ok";
+	    },
+	    [&](uint64_t delay) { slept.push_back(delay); }, []() { return 0.5; });
+
+	CHECK(result == "ok");
+	CHECK(calls == 3);
+	// Two failures, so two waits -- and no wait before the first attempt.
+	CHECK(slept.size() == 2);
+	CHECK(slept[0] == 1000);
+	CHECK(slept[1] == 2000);
+}
+
+void TestRetryLoopGivesUpAndSaysSo() {
+	ofquack::RetryPolicy policy;
+	policy.max_attempts = 3;
+	int calls = 0;
+
+	try {
+		ofquack::ExecuteWithRetry(
+		    policy,
+		    [&]() -> std::string {
+			    calls++;
+			    throw ofquack::RetryableError("503 Service Unavailable");
+		    },
+		    [](uint64_t) {}, []() { return 0.5; });
+		CHECK(false);
+	} catch (const ofquack::RetryableError &error) {
+		CHECK(calls == 3);
+		const std::string message = error.what();
+		CHECK(message.find("gave up after 3 attempts") != std::string::npos);
+		// The original failure is still named, not replaced by the summary.
+		CHECK(message.find("503") != std::string::npos);
+	}
+}
+
+//! A statement Oracle refused, or a password it rejected, must fail on the
+//! first attempt: retrying wastes time and can lock the account.
+void TestRetryLoopDoesNotRetryPermanentFailures() {
+	ofquack::RetryPolicy policy;
+	policy.max_attempts = 5;
+	int calls = 0;
+
+	CHECK(Throws([&]() {
+		ofquack::ExecuteWithRetry(
+		    policy,
+		    [&]() -> std::string {
+			    calls++;
+			    throw ofquack::AuthenticationError("wrong password");
+		    },
+		    [](uint64_t) {}, []() { return 0.5; });
+	}));
+	CHECK(calls == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+
+//! A fake clock, so the suite can cross the recovery window without sleeping.
+struct TestClock {
+	std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+
+	std::function<std::chrono::steady_clock::time_point()> Fn() {
+		return [this]() { return now; };
+	}
+	void Advance(int64_t ms) {
+		now += std::chrono::milliseconds(ms);
+	}
+};
+
+void TestBreakerOpensAfterConsecutiveFailures() {
+	ofquack::CircuitBreaker breaker(ofquack::CircuitBreakerSettings {3, 60000});
+	TestClock clock;
+	breaker.SetClockForTesting(clock.Fn());
+
+	breaker.RequireClosed("host"); // fine while closed
+	breaker.RecordFailure();
+	breaker.RecordFailure();
+	breaker.RequireClosed("host"); // still under the threshold
+	breaker.RecordFailure();
+
+	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::OPEN);
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+}
+
+//! One success is enough to forget the earlier failures: they have to be
+//! consecutive, otherwise a long-lived connection trips on unrelated blips.
+void TestBreakerResetsOnSuccess() {
+	ofquack::CircuitBreaker breaker(ofquack::CircuitBreakerSettings {3, 60000});
+	TestClock clock;
+	breaker.SetClockForTesting(clock.Fn());
+
+	breaker.RecordFailure();
+	breaker.RecordFailure();
+	breaker.RecordSuccess();
+	breaker.RecordFailure();
+	breaker.RecordFailure();
+
+	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::CLOSED);
+}
+
+void TestBreakerProbesAfterRecoveryWindow() {
+	ofquack::CircuitBreaker breaker(ofquack::CircuitBreakerSettings {1, 60000});
+	TestClock clock;
+	breaker.SetClockForTesting(clock.Fn());
+
+	breaker.RecordFailure();
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+
+	clock.Advance(59000);
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+
+	// Window passed: one probe is let through.
+	clock.Advance(2000);
+	breaker.RequireClosed("host");
+	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::HALF_OPEN);
+
+	// The probe failed, so the wait starts again rather than admitting a flood.
+	breaker.RecordFailure();
+	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::OPEN);
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+
+	// A successful probe closes it.
+	clock.Advance(61000);
+	breaker.RequireClosed("host");
+	breaker.RecordSuccess();
+	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::CLOSED);
+}
+
+//! The error names the host and says how long the wait is, since "circuit open"
+//! on its own tells an analyst nothing actionable.
+void TestBreakerErrorIsInformative() {
+	ofquack::CircuitBreaker breaker(ofquack::CircuitBreakerSettings {1, 60000});
+	breaker.RecordFailure();
+	try {
+		breaker.RequireClosed("fusion.example.com");
+		CHECK(false);
+	} catch (const ofquack::CircuitOpenError &error) {
+		const std::string message = error.what();
+		CHECK(message.find("fusion.example.com") != std::string::npos);
+		CHECK(message.find("not attempted") != std::string::npos);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Host keys
+// ---------------------------------------------------------------------------
+
+//! Two spellings of one instance must map to one throttle, or the limit that
+//! protects the server silently doubles.
+void TestHostOf() {
+	CHECK(ofquack::HostOf("https://fusion.example.com/xmlpserver/services/X?WSDL") == "fusion.example.com");
+	CHECK(ofquack::HostOf("http://fusion.example.com") == "fusion.example.com");
+	CHECK(ofquack::HostOf("https://fusion.example.com:443/path") == "fusion.example.com:443");
+	// Credentials in the authority would otherwise leak into error messages.
+	CHECK(ofquack::HostOf("https://user:pass@fusion.example.com/x") == "fusion.example.com");
+}
+
+//! The throttle bounds concurrency rather than rate: the slot is held for the
+//! whole request, so a second caller waits for the first to finish.
+void TestThrottleSerialisesConcurrentCallers() {
+	ofquack::ResetHostStateForTesting();
+	auto throttle = ofquack::ThrottleForHost("host", 1);
+
+	std::atomic<int> concurrent {0};
+	std::atomic<int> peak {0};
+	std::vector<std::thread> workers;
+	for (int i = 0; i < 4; i++) {
+		workers.emplace_back([&]() {
+			ofquack::HostThrottle::Slot slot(*throttle);
+			const int now = ++concurrent;
+			int seen = peak.load();
+			while (now > seen && !peak.compare_exchange_weak(seen, now)) {
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			--concurrent;
+		});
+	}
+	for (auto &worker : workers) {
+		worker.join();
+	}
+	CHECK(peak.load() == 1);
+	ofquack::ResetHostStateForTesting();
+}
+
 struct TestCase {
 	const char *name;
 	void (*run)();
@@ -279,6 +549,19 @@ const TestCase TESTS[] = {
     {"extract oracle errors", TestExtractOracleErrors},
     {"describe failure", TestDescribeFailure},
     {"describe failure truncates runaway messages", TestDescribeFailureTruncatesRunawayMessages},
+    {"backoff grows exponentially and is capped", TestBackoffGrowsExponentiallyAndIsCapped},
+    {"backoff applies jitter both ways", TestBackoffAppliesJitterBothWays},
+    {"retryable classification", TestRetryableClassification},
+    {"permanent failures are not retried", TestPermanentFailuresAreNotRetried},
+    {"retry loop succeeds after transient failures", TestRetryLoopSucceedsAfterTransientFailures},
+    {"retry loop gives up and says so", TestRetryLoopGivesUpAndSaysSo},
+    {"retry loop does not retry permanent failures", TestRetryLoopDoesNotRetryPermanentFailures},
+    {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},
+    {"breaker resets on success", TestBreakerResetsOnSuccess},
+    {"breaker probes after recovery window", TestBreakerProbesAfterRecoveryWindow},
+    {"breaker error is informative", TestBreakerErrorIsInformative},
+    {"host of", TestHostOf},
+    {"throttle serialises concurrent callers", TestThrottleSerialisesConcurrentCallers},
 };
 
 } // namespace

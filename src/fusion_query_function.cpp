@@ -3,6 +3,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "ofquack/error_decoder.hpp"
+#include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
 #include "ofquack/transport.hpp"
 #include "ofquack/xml_report.hpp"
@@ -36,6 +37,29 @@ struct FusionQueryGlobalState : public GlobalTableFunctionState {
 	}
 };
 
+//! Runs one statement, translating the transport's exceptions into DuckDB's.
+//!
+//! Without this every failure surfaced as a bare "Invalid Error", which tells
+//! the user nothing about whether to fix their query, their credentials or
+//! their network. Cancellation is wired to the same flag Ctrl-C sets, so a
+//! query stuck on a slow report can be interrupted.
+std::string ExecuteOrThrow(ofquack::FusionTransport &transport, const std::string &sql, ClientContext &context) {
+	ofquack::RequestContext request_context;
+	request_context.is_cancelled = [&context]() { return context.interrupted.load(); };
+
+	try {
+		return transport.Execute(sql, request_context);
+	} catch (const ofquack::CancelledError &) {
+		throw InterruptException();
+	} catch (const ofquack::AuthenticationError &auth_error) {
+		throw InvalidInputException("%s", auth_error.what());
+	} catch (const ofquack::CircuitOpenError &circuit_error) {
+		throw IOException("%s", circuit_error.what());
+	} catch (const ofquack::FusionError &fusion_error) {
+		throw IOException("%s\nSQL: %s", fusion_error.what(), sql);
+	}
+}
+
 //! Turns a SOAP response into rows, reporting a fault as an error rather than
 //! as an empty result. Silently returning no rows is how a permissions problem
 //! or a bad table name used to look exactly like a query that matched nothing.
@@ -63,7 +87,7 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 	// The schema lives in the data, so the first page is fetched here and kept
 	// for the scan rather than being requested twice.
 	auto transport = ofquack::CreateTransport(bind_data->config);
-	const auto response = transport->Execute(bind_data->sql, ofquack::RequestContext::None());
+	const auto response = ExecuteOrThrow(*transport, bind_data->sql, context);
 	bind_data->first_page = ParseResponseOrThrow(response, bind_data->sql);
 	// duckdb::vector is its own type, not an alias for std::vector.
 	bind_data->columns.assign(bind_data->first_page.columns.begin(), bind_data->first_page.columns.end());

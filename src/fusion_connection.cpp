@@ -128,6 +128,15 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 			                      entry->secret->GetName());
 		}
 
+		const auto connect_timeout = secret.TryGetValue("connect_timeout");
+		if (!connect_timeout.IsNull()) {
+			config.connect_timeout_seconds = connect_timeout.GetValue<uint64_t>();
+		}
+		const auto read_timeout = secret.TryGetValue("read_timeout");
+		if (!read_timeout.IsNull()) {
+			config.read_timeout_seconds = read_timeout.GetValue<uint64_t>();
+		}
+
 		const auto secret_fetch_size = secret.TryGetValue("fetch_size");
 		if (!secret_fetch_size.IsNull()) {
 			options.fetch_size = secret_fetch_size.GetValue<idx_t>();

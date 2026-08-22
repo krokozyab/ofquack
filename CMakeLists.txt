@@ -38,6 +38,9 @@ set(EXTENSION_SOURCES
         src/soap_envelope.cpp
         src/xml_report.cpp
         src/error_decoder.cpp
+        src/retry.cpp
+        src/circuit_breaker.cpp
+        src/host_throttle.cpp
         src/transport.cpp
         src/soap_transport.cpp
         src/http_curl.cpp
@@ -76,6 +79,9 @@ if(OFQUACK_BUILD_TESTS)
                  src/soap_envelope.cpp
                  src/xml_report.cpp
                  src/error_decoder.cpp
+                 src/retry.cpp
+                 src/circuit_breaker.cpp
+                 src/host_throttle.cpp
                  src/base64.cpp)
   target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2)
   target_include_directories(ofquack_pure_test PRIVATE src src/include)

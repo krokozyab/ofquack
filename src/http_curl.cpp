@@ -1,7 +1,11 @@
 #include "ofquack/http_curl.hpp"
 
+#include "ofquack/errors.hpp"
+#include "ofquack/retry.hpp"
+
+#include <algorithm>
+#include <cctype>
 #include <curl/curl.h>
-#include <stdexcept>
 
 namespace ofquack {
 
@@ -14,7 +18,35 @@ size_t AppendToString(void *contents, size_t size, size_t nmemb, void *userp) {
 	return byte_count;
 }
 
-//! Frees the header list even when the body of HttpPost throws.
+//! Captures WWW-Authenticate, which is what separates "wrong password" from
+//! "expired token" on a 401.
+size_t CollectHeader(char *buffer, size_t size, size_t nitems, void *userp) {
+	auto &response = *static_cast<HttpResponse *>(userp);
+	const size_t byte_count = size * nitems;
+	const std::string line(buffer, byte_count);
+
+	static const std::string NAME = "www-authenticate:";
+	if (line.size() > NAME.size()) {
+		std::string lowered = line.substr(0, NAME.size());
+		std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+		               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (lowered == NAME) {
+			auto value = line.substr(NAME.size());
+			const auto first = value.find_first_not_of(" \t");
+			const auto last = value.find_last_not_of(" \t\r\n");
+			response.www_authenticate =
+			    first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+		}
+	}
+	return byte_count;
+}
+
+int ReportProgress(void *userp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+	const auto &is_cancelled = *static_cast<const std::function<bool()> *>(userp);
+	// A non-zero return aborts the transfer with CURLE_ABORTED_BY_CALLBACK.
+	return is_cancelled && is_cancelled() ? 1 : 0;
+}
+
 struct HeaderList {
 	curl_slist *list = nullptr;
 
@@ -26,23 +58,43 @@ struct HeaderList {
 	}
 };
 
-struct EasyHandle {
-	CURL *handle = curl_easy_init();
+} // namespace
 
-	~EasyHandle() {
+struct HttpClient::Impl {
+	CURL *handle = nullptr;
+
+	Impl() {
+		handle = curl_easy_init();
+		if (!handle) {
+			throw PermanentError("Failed to initialise libcurl");
+		}
+		// An empty cookie file enables the in-memory cookie engine: nothing is
+		// read from or written to disk, but cookies set by the server are kept
+		// for the life of this handle. That is what preserves the BI Publisher
+		// session between the pages of one result.
+		curl_easy_setopt(handle, CURLOPT_COOKIEFILE, "");
+		// libcurl advertises what it can decode and inflates the body itself.
+		curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
+	}
+
+	~Impl() {
 		if (handle) {
 			curl_easy_cleanup(handle);
 		}
 	}
 };
 
-} // namespace
+HttpClient::HttpClient() : impl(new Impl()) {
+}
 
-HttpResponse HttpPost(const HttpRequest &request) {
-	EasyHandle curl;
-	if (!curl.handle) {
-		throw std::runtime_error("Failed to init CURL");
-	}
+HttpClient::~HttpClient() = default;
+
+HttpResponse HttpClient::Post(const HttpRequest &request) {
+	auto *handle = impl->handle;
+	curl_easy_reset(handle);
+	// Reset clears the transfer options but keeps the cookie jar with the handle.
+	curl_easy_setopt(handle, CURLOPT_COOKIEFILE, "");
+	curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "");
 
 	HeaderList headers;
 	for (const auto &header : request.headers) {
@@ -50,17 +102,38 @@ HttpResponse HttpPost(const HttpRequest &request) {
 	}
 
 	HttpResponse response;
-	curl_easy_setopt(curl.handle, CURLOPT_URL, request.url.c_str());
-	curl_easy_setopt(curl.handle, CURLOPT_HTTPHEADER, headers.list);
-	curl_easy_setopt(curl.handle, CURLOPT_POSTFIELDS, request.body.c_str());
-	curl_easy_setopt(curl.handle, CURLOPT_WRITEFUNCTION, AppendToString);
-	curl_easy_setopt(curl.handle, CURLOPT_WRITEDATA, &response.body);
+	curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
+	curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers.list);
+	curl_easy_setopt(handle, CURLOPT_POST, 1L);
+	curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.c_str());
+	curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(request.body.size()));
+	curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, AppendToString);
+	curl_easy_setopt(handle, CURLOPT_WRITEDATA, &response.body);
+	curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, CollectHeader);
+	curl_easy_setopt(handle, CURLOPT_HEADERDATA, &response);
+	curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, static_cast<long>(request.connect_timeout_seconds));
+	curl_easy_setopt(handle, CURLOPT_TIMEOUT, static_cast<long>(request.read_timeout_seconds));
+	curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L);
 
-	const CURLcode code = curl_easy_perform(curl.handle);
-	if (code != CURLE_OK) {
-		throw std::runtime_error(std::string("SOAP request failed: ") + curl_easy_strerror(code));
+	if (request.is_cancelled) {
+		curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, ReportProgress);
+		curl_easy_setopt(handle, CURLOPT_XFERINFODATA, &request.is_cancelled);
 	}
-	curl_easy_getinfo(curl.handle, CURLINFO_RESPONSE_CODE, &response.status_code);
+
+	const CURLcode code = curl_easy_perform(handle);
+	if (code == CURLE_ABORTED_BY_CALLBACK) {
+		throw CancelledError("The Oracle Fusion request was cancelled");
+	}
+	if (code != CURLE_OK) {
+		const std::string message =
+		    std::string("Oracle Fusion request failed: ") + curl_easy_strerror(code) + " (" + request.url + ")";
+		if (IsRetryableCurlError(static_cast<int>(code))) {
+			throw RetryableError(message);
+		}
+		throw PermanentError(message);
+	}
+	curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response.status_code);
 	return response;
 }
 

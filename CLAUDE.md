@@ -151,11 +151,29 @@ secret. Several secrets and no name is an error, not a guess.
 `oracle_fusion_wsdl_query` still exists as a stub whose bind throws a migration message. Remove
 it a release after `0.1.0`.
 
+## Resilience
+
+Defaults match the JDBC driver's, so both clients load an instance the same way: 3 attempts,
+1s base delay, ×2, capped at 30s, ±20% jitter; connect 30s / read 120s; breaker opens after 5
+consecutive failures and probes once after 60s.
+
+Two rules that are easy to break by accident:
+
+- **One request at a time per host** (`HostThrottle`, default 1). Not about our resources —
+  every `runReport` opens a BI Publisher session the server holds on to, and a few parallel
+  scans leave hundreds behind. The slot is held for the whole request, so this bounds
+  concurrency, not rate. Throttle and breaker are keyed by host and shared process-wide.
+- **A refusal is not a failure.** `PermanentError` (bad SQL, missing table, rejected password)
+  is never retried and does not trip the breaker: it says nothing about the instance's health,
+  and tripping on it would block every other query. Only `RetryableError` counts.
+
+`ExecuteWithRetry` takes its sleep and its randomness as parameters, which is the only reason
+the loop is testable without waiting.
+
 ## Still outstanding
 
 - the whole result is materialised during bind: no paging, no streaming (`fetch_size` is
   accepted and validated but not yet applied);
-- no retries, no backoff, no circuit breaker, no per-host throttle;
 - every column is VARCHAR — no type inference, no dictionary types;
 - `AUTH 'bearer'` and `PROVIDER browser` are registered but throw;
-- transport errors surface as `Invalid Error` rather than a typed IO error.
+- no metadata functions, no ATTACH, no metadata cache.
