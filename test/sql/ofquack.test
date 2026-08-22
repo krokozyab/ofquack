@@ -1,9 +1,103 @@
 # name: test/sql/ofquack.test
-# description: test ofquack extension
+# description: ofquack registration, secrets and binder errors
 # group: [ofquack]
 
-# Confirm the extension works
+require ofquack
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
 query I
-SELECT 1;
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'oracle_fusion_query';
 ----
 1
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SECRET fusion (
+    TYPE oracle_fusion,
+    ENDPOINT 'https://fusion.example.com/xmlpserver/services/ExternalReportWSSService?WSDL',
+    REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
+    USERNAME 'analyst',
+    PASSWORD 'hunter2'
+);
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'fusion' AND type = 'oracle_fusion';
+----
+1
+
+# The password must not be readable through the catalog view. This hides it
+# from the view only -- a PERSISTENT secret is still written to disk in the
+# clear, which is documented rather than enforced.
+query I
+SELECT secret_string LIKE '%hunter2%' FROM duckdb_secrets() WHERE name = 'fusion';
+----
+false
+
+query I
+SELECT secret_string LIKE '%redacted%' FROM duckdb_secrets() WHERE name = 'fusion';
+----
+true
+
+# The browser provider is registered, so the error names the missing feature
+# rather than reading like a typo in the provider name.
+statement error
+CREATE SECRET sso (TYPE oracle_fusion, PROVIDER browser, ENDPOINT 'https://h/x?WSDL', REPORT_PATH '/r.xdo');
+----
+not implemented yet
+
+# ---------------------------------------------------------------------------
+# Binder errors: everything here fails before any network access
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', secret := 'does_not_exist');
+----
+does_not_exist
+
+statement error
+SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', fetch_size := 999999);
+----
+fetch_size
+
+statement error
+SELECT * FROM oracle_fusion_query('');
+----
+requires a SQL statement
+
+statement error
+SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', no_such_parameter := 'x');
+----
+no_such_parameter
+
+# The removed positional function explains the migration instead of reporting
+# that it does not exist, which would read as a broken install.
+statement error
+SELECT * FROM oracle_fusion_wsdl_query('https://h/x?WSDL', 'u', 'p', '/r.xdo', 'SELECT 1 FROM DUAL');
+----
+oracle_fusion_query
+
+# ---------------------------------------------------------------------------
+# Secret selection
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SECRET fusion_prod (
+    TYPE oracle_fusion,
+    ENDPOINT 'https://prod.example.com/xmlpserver/services/ExternalReportWSSService?WSDL',
+    REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
+    USERNAME 'analyst',
+    PASSWORD 'hunter2'
+);
+
+# With more than one secret and none named, picking one by chance would send
+# credentials to whichever instance sorted first.
+statement error
+SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL');
+----
+secret :=

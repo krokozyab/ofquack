@@ -11,13 +11,17 @@ The **Ofquack** extension provides seamless integration between DuckDB and Oracl
 
 **Dynamic Schema Inference:** Automatically parses XML report output, inferring column names at runtime (all columns returned as VARCHAR).
 
-**Table Function Interface:** Exposes a simple table function oracle_fusion_wsdl_query(...) in DuckDB CLI and clients.
+**Table Function Interface:** Exposes a simple table function oracle_fusion_query(...) in DuckDB CLI and clients.
 
 **Credential Handling: Securely** sends Basic‑auth credentials over SOAP.
 
 **Chunked Results:** Efficiently streams large result sets in vectorized chunks.
 
 **Uniform VARCHAR Output:** All columns are returned as VARCHAR. Any further type conversion (e.g., to INTEGER, DATE, DECIMAL) should be performed by the recipient SQL client or query after fetching the data.
+
+**Credentials in secrets:** The connection lives in a DuckDB secret, so passwords stay out of SQL text and query history.
+
+Column order follows the SELECT list, and a column that Oracle returned as NULL arrives as SQL NULL rather than an empty string.
 
 ---
 
@@ -36,35 +40,81 @@ LOAD ofquack
 ---
 
 ## Usage
-Call the table function:
-```
+
+Store the connection once, as a DuckDB secret, then query:
+
+```sql
+CREATE SECRET fusion (
+    TYPE oracle_fusion,
+    ENDPOINT 'https://<your-host>/xmlpserver/services/ExternalReportWSSService?WSDL',
+    REPORT_PATH '/Custom/Financials/RP_ARB.xdo',
+    USERNAME '<username>',
+    PASSWORD '<password>'
+);
+
 SELECT *
-FROM oracle_fusion_wsdl_query(
-    'https://<your‑host>/xmlpserver/services/ExternalReportWSSService?WSDL',
-    '<username>',
-    '<password>',
-    '/Custom/Financials/RP_ARB.xdo',
-    'SELECT currency_code, name, description FROM FND_CURRENCIES_TL WHERE rownum<10'
+FROM oracle_fusion_query(
+    'SELECT currency_code, name, description FROM FND_CURRENCIES_TL WHERE rownum < 10'
 );
 ```
 
-## Function Signature
+Keeping the credentials in a secret is the point: passed as function arguments
+they end up in the SQL text, in `duckdb_queries()` and in your shell history.
+`duckdb_secrets()` shows the secret with its password redacted.
+
+> **`CREATE PERSISTENT SECRET` writes `~/.duckdb/stored_secrets` unencrypted.**
+> Redaction hides the password from the catalog view, not from the disk. Use a
+> temporary secret (the default) if that matters, and rely on the file
+> permissions of your home directory otherwise.
+
+## Function signature
+
 ```
-oracle_fusion_wsdl_query(
-    endpoint VARCHAR,  -- WSDL URL
-    username VARCHAR,  -- Oracle Fusion user
-    password VARCHAR,  -- Oracle Fusion password
-    report_path VARCHAR, -- Report absolute path
-    sql VARCHAR        -- SQL to embed in the report
-) RETURNS TABLE(<dynamic_columns> VARCHAR...)
+oracle_fusion_query(sql VARCHAR, <named parameters…>)
+    RETURNS TABLE(<dynamic_columns> VARCHAR…)
 ```
-**endpoint:** Full WSDL endpoint URL for Oracle Fusion PublicReportService.
 
-**username/password:** Credentials e.g. user@example.com / MySecretPass123.
+The single positional argument is the SQL to run inside the report. Named
+parameters override whatever the secret carries:
 
-**report_path:** Oracle report path (e.g. /Custom/Financials/RP_ARB.xdo).
+| Parameter | Meaning |
+|---|---|
+| `secret` | Name of the secret to use. Needed only when several are defined. |
+| `endpoint` | WSDL endpoint URL. |
+| `report_path` | Absolute path of the report, e.g. `/Custom/Financials/RP_ARB.xdo`. |
+| `username`, `password` | Fusion credentials. |
+| `fetch_size` | Rows per request, 1–10000. `0` disables paging. |
+| `secured_views` | Rewrite HR tables to their `*_SECURED_LIST_V` views. |
 
-**sql:** The inner SQL query to run.
+If exactly one `oracle_fusion` secret exists it is used automatically. If
+several exist, pass `secret := '<name>'` — the extension will not pick one for
+you, since guessing would send your credentials to whichever instance happened
+to sort first.
+
+### Migrating from `oracle_fusion_wsdl_query`
+
+The old positional form is gone:
+
+```sql
+-- before
+SELECT * FROM oracle_fusion_wsdl_query(endpoint, user, password, report_path, sql);
+-- after
+CREATE SECRET fusion (TYPE oracle_fusion, ENDPOINT …, REPORT_PATH …, USERNAME …, PASSWORD …);
+SELECT * FROM oracle_fusion_query(sql);
+```
+
+Calling the old name reports this migration rather than "function does not
+exist". That stub will be removed in a later release.
+
+### Errors
+
+A SOAP fault, a permissions problem or a bad table name now raise an error
+carrying the `ORA-` code, instead of quietly returning zero rows — previously
+a typo in a table name was indistinguishable from a query that matched nothing.
+
+A query that returns no rows is also an error: the result carries no columns,
+so its schema is unknown. Add a predicate that matches at least one row, or
+wrap the query so that it always returns one.
 
 ## Building
 ### Managing dependencies

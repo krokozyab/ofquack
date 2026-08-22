@@ -32,8 +32,12 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
         src/ofquack_extension.cpp
+        src/fusion_secret.cpp
+        src/fusion_connection.cpp
+        src/fusion_query_function.cpp
         src/soap_envelope.cpp
         src/xml_report.cpp
+        src/error_decoder.cpp
         src/transport.cpp
         src/soap_transport.cpp
         src/http_curl.cpp
@@ -71,6 +75,7 @@ if(OFQUACK_BUILD_TESTS)
                  test/cpp/pure_test.cpp
                  src/soap_envelope.cpp
                  src/xml_report.cpp
+                 src/error_decoder.cpp
                  src/base64.cpp)
   target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2)
   target_include_directories(ofquack_pure_test PRIVATE src src/include)

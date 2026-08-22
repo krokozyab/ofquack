@@ -60,7 +60,6 @@ std::string MakeReportXML(const std::string &escaped_rowset) {
 //! Records what the adapter asked for and replays a canned answer.
 struct Script {
 	std::string response;
-	//! Populated by the transport so assertions can inspect the request.
 	std::vector<std::string> executed_sql;
 	std::vector<FusionConfig> configs;
 };
@@ -85,6 +84,20 @@ ScopedTransportFactory InstallFake(Script &script) {
 	    [&script](const FusionConfig &config) { return std::make_shared<FakeTransport>(script, config); });
 }
 
+//! A database with one usable secret, which is what most tests want.
+void CreateSecret(Connection &connection, const char *name = "fusion") {
+	auto result = connection.Query(std::string("CREATE SECRET ") + name +
+	                               " (TYPE oracle_fusion, "
+	                               "ENDPOINT 'https://fusion.example.com/xmlpserver/services/"
+	                               "ExternalReportWSSService?WSDL', "
+	                               "REPORT_PATH '/Custom/Financials/RP_ARB.xdo', "
+	                               "USERNAME 'analyst', PASSWORD 'hunter2')");
+	if (result->HasError()) {
+		std::cerr << "CREATE SECRET failed: " << result->GetError() << std::endl;
+		std::abort();
+	}
+}
+
 std::unique_ptr<duckdb::MaterializedQueryResult> RunQuery(Connection &connection, const std::string &sql) {
 	auto result = connection.Query(sql);
 	if (result->HasError()) {
@@ -94,118 +107,162 @@ std::unique_ptr<duckdb::MaterializedQueryResult> RunQuery(Connection &connection
 	return result;
 }
 
-const char *const QUERY = "SELECT * FROM oracle_fusion_wsdl_query('https://fusion.example.com/x?WSDL', 'user', "
-                          "'secret', '/Custom/Financials/RP_ARB.xdo', 'SELECT NAME, CODE FROM FND_CURRENCIES_TL')";
+const char *const QUERY = "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM FND_CURRENCIES_TL')";
 
-void TestScanReturnsRows() {
+const char *const TWO_ROWS = "&lt;ROWSET&gt;"
+                             "&lt;ROW&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;CODE&gt;A&lt;/CODE&gt;&lt;/ROW&gt;"
+                             "&lt;ROW&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;CODE&gt;B&lt;/CODE&gt;&lt;/ROW&gt;"
+                             "&lt;/ROWSET&gt;";
+
+void TestScanReturnsRowsInSelectOrder() {
 	Script script;
-	script.response = MakeSoapResponse(
-	    MakeReportXML("&lt;ROWSET&gt;"
-	                  "&lt;ROW&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;CODE&gt;A&lt;/CODE&gt;&lt;/ROW&gt;"
-	                  "&lt;ROW&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;CODE&gt;B&lt;/CODE&gt;&lt;/ROW&gt;"
-	                  "&lt;/ROWSET&gt;"));
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
 	auto installed = InstallFake(script);
 
 	DuckDB db(nullptr);
 	Connection connection(db);
+	CreateSecret(connection);
 	auto result = RunQuery(connection, QUERY);
 
 	CHECK(result->RowCount() == 2);
 	CHECK(result->ColumnCount() == 2);
-	// Alphabetical, not SELECT order: today's behaviour, pinned so the coming fix is visible.
-	CHECK(result->names[0] == "CODE");
-	CHECK(result->names[1] == "NAME");
-	CHECK(result->types[0] == duckdb::LogicalType::VARCHAR);
-	CHECK(result->GetValue(1, 0).ToString() == "Alpha");
-	CHECK(result->GetValue(0, 1).ToString() == "B");
+	// Document order, i.e. SELECT order. This used to come back alphabetical.
+	CHECK(result->names[0] == "NAME");
+	CHECK(result->names[1] == "CODE");
+	CHECK(result->GetValue(0, 0).ToString() == "Alpha");
+	CHECK(result->GetValue(1, 1).ToString() == "B");
 }
 
-void TestCredentialsAndSqlReachTheTransport() {
+void TestSecretSuppliesTheConnection() {
 	Script script;
-	script.response = MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
 	auto installed = InstallFake(script);
 
 	DuckDB db(nullptr);
 	Connection connection(db);
+	CreateSecret(connection);
 	RunQuery(connection, QUERY);
 
 	CHECK(script.configs.size() == 1);
-	CHECK(script.configs[0].endpoint == "https://fusion.example.com/x?WSDL");
-	CHECK(script.configs[0].username == "user");
-	CHECK(script.configs[0].password == "secret");
+	CHECK(script.configs[0].endpoint ==
+	      "https://fusion.example.com/xmlpserver/services/ExternalReportWSSService?WSDL");
+	CHECK(script.configs[0].username == "analyst");
+	CHECK(script.configs[0].password == "hunter2");
 	CHECK(script.configs[0].report_path == "/Custom/Financials/RP_ARB.xdo");
 	CHECK(script.executed_sql.size() == 1);
 	CHECK(script.executed_sql[0] == "SELECT NAME, CODE FROM FND_CURRENCIES_TL");
 }
 
-//! An empty report carries no schema, so the column list is guessed from the
-//! SQL text. Pinned because the guess is naive and is scheduled for removal.
-void TestEmptyResultDerivesColumnsFromSql() {
+//! The password must not be readable through duckdb_secrets(). Note this hides
+//! it from the view only: a PERSISTENT secret is still written to disk in the
+//! clear, which is a documentation matter rather than something to assert here.
+void TestSecretRedactsCredentials() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT secret_string FROM duckdb_secrets() WHERE name = 'fusion'");
+	CHECK(result->RowCount() == 1);
+	const auto rendered = result->GetValue(0, 0).ToString();
+	CHECK(rendered.find("hunter2") == std::string::npos);
+	CHECK(rendered.find("redacted") != std::string::npos);
+	// Non-secret fields stay visible, otherwise the view is useless.
+	CHECK(rendered.find("analyst") != std::string::npos);
+}
+
+void TestNamedParametersOverrideTheSecret() {
 	Script script;
-	script.response = MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
 	auto installed = InstallFake(script);
 
 	DuckDB db(nullptr);
 	Connection connection(db);
-	auto result = RunQuery(connection, QUERY);
+	CreateSecret(connection);
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM T', "
+	                     "report_path := '/Custom/Other.xdo', username := 'override')");
 
-	CHECK(result->RowCount() == 0);
-	CHECK(result->ColumnCount() == 2);
-	CHECK(result->names[0] == "NAME");
-	CHECK(result->names[1] == "CODE");
+	CHECK(script.configs.size() == 1);
+	CHECK(script.configs[0].report_path == "/Custom/Other.xdo");
+	CHECK(script.configs[0].username == "override");
+	// Untouched fields still come from the secret.
+	CHECK(script.configs[0].password == "hunter2");
 }
 
-void TestSelectStarWithEmptyResultFallsBackToSingleColumn() {
-	Script script;
-	script.response = MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
-	auto installed = InstallFake(script);
-
-	DuckDB db(nullptr);
-	Connection connection(db);
-	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_wsdl_query('https://h/x?WSDL', 'u', 'p', "
-	                                   "'/r.xdo', 'SELECT * FROM DUAL')");
-
-	CHECK(result->ColumnCount() == 1);
-	CHECK(result->names[0] == "RESULT");
-}
-
-//! A SOAP fault currently yields zero rows rather than an error. That is the
-//! behaviour being moved here unchanged; when it becomes an exception this test
-//! should be inverted rather than deleted.
-void TestSoapFaultCurrentlyYieldsNoRows() {
+//! A SOAP fault used to yield zero rows, so a permissions problem or a typo in
+//! a table name was indistinguishable from a query that matched nothing.
+void TestSoapFaultBecomesAnError() {
 	Script script;
 	script.response = "<soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\"><soap:Body>"
-	                  "<soap:Fault><soap:Reason><soap:Text>ORA-00942: table or view does not exist</soap:Text>"
-	                  "</soap:Reason></soap:Fault></soap:Body></soap:Envelope>";
+	                  "<soap:Fault><faultstring>oracle.xdo.XDOException: ORA-00942: table or view does not "
+	                  "exist</faultstring></soap:Fault></soap:Body></soap:Envelope>";
 	auto installed = InstallFake(script);
 
 	DuckDB db(nullptr);
 	Connection connection(db);
-	auto result = RunQuery(connection, QUERY);
+	CreateSecret(connection);
+	auto result = connection.Query(QUERY);
 
-	CHECK(result->RowCount() == 0);
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("ORA-00942") != std::string::npos);
+	// The failing statement is echoed, since the error is about that statement.
+	CHECK(result->GetError().find("FND_CURRENCIES_TL") != std::string::npos);
 }
 
-//! Missing columns are SQL NULL, not the empty string: dbms_xmlgen omits NULLs.
-void TestMissingColumnBecomesEmptyString() {
+void TestHtmlLoginPageBecomesAnError() {
+	Script script;
+	script.response = "<html><head><title>Oracle Fusion Sign In</title></head><body/></html>";
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query(QUERY);
+
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("Sign In") != std::string::npos);
+}
+
+//! An empty result carries no schema. Guessing column names from the SQL text,
+//! which is what this used to do, silently produced a wrong schema for any
+//! query with a function call or a subquery in its select list.
+void TestEmptyResultIsAnErrorRatherThanAGuessedSchema() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query(QUERY);
+
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("no rows") != std::string::npos);
+}
+
+//! dbms_xmlgen omits NULL elements, so an absent column is NULL. It used to
+//! arrive as an empty string, which is a different value.
+void TestMissingColumnBecomesNull() {
 	Script script;
 	script.response = MakeSoapResponse(
 	    MakeReportXML("&lt;ROWSET&gt;"
 	                  "&lt;ROW&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;CODE&gt;A&lt;/CODE&gt;&lt;/ROW&gt;"
-	                  "&lt;ROW&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;CODE&gt;&lt;/CODE&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Gamma&lt;/NAME&gt;&lt;/ROW&gt;"
 	                  "&lt;/ROWSET&gt;"));
 	auto installed = InstallFake(script);
 
 	DuckDB db(nullptr);
 	Connection connection(db);
+	CreateSecret(connection);
 	auto result = RunQuery(connection, QUERY);
 
-	CHECK(result->RowCount() == 2);
-	// Today the absent value is emitted as an empty string rather than NULL.
-	CHECK(result->GetValue(0, 1).ToString().empty());
+	CHECK(result->RowCount() == 3);
+	CHECK(!result->GetValue(1, 0).IsNull());          // present, "A"
+	CHECK(!result->GetValue(1, 1).IsNull());          // present but empty
+	CHECK(result->GetValue(1, 1).ToString().empty()); //   -> empty string
+	CHECK(result->GetValue(1, 2).IsNull());           // absent -> NULL
 }
 
-//! More rows than one vector, to exercise the chunking loop.
 void TestScanEmitsMoreThanOneVector() {
 	std::string rowset = "&lt;ROWSET&gt;";
 	const int row_count = STANDARD_VECTOR_SIZE + 17;
@@ -220,7 +277,8 @@ void TestScanEmitsMoreThanOneVector() {
 
 	DuckDB db(nullptr);
 	Connection connection(db);
-	auto result = RunQuery(connection, QUERY);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG')");
 
 	CHECK(result->RowCount() == static_cast<duckdb::idx_t>(row_count));
 	CHECK(result->GetValue(0, 0).ToString() == "0");
@@ -233,15 +291,98 @@ void TestTransportFailureSurfacesAsQueryError() {
 			throw std::runtime_error("SOAP request failed: Could not resolve host");
 		}
 	};
-	ScopedTransportFactory installed(
-	    [](const FusionConfig &) { return std::make_shared<ThrowingTransport>(); });
+	ScopedTransportFactory installed([](const FusionConfig &) { return std::make_shared<ThrowingTransport>(); });
 
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query(QUERY);
+
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("Could not resolve host") != std::string::npos);
+}
+
+void TestMissingSecretIsExplained() {
 	DuckDB db(nullptr);
 	Connection connection(db);
 	auto result = connection.Query(QUERY);
 
 	CHECK(result->HasError());
-	CHECK(result->GetError().find("Could not resolve host") != std::string::npos);
+	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
+}
+
+//! Picking one of several secrets by chance would send credentials to whichever
+//! instance happened to sort first, so it is reported instead.
+void TestAmbiguousSecretIsReported() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection, "dev");
+	CreateSecret(connection, "prod");
+
+	auto result = connection.Query(QUERY);
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("dev") != std::string::npos);
+	CHECK(result->GetError().find("prod") != std::string::npos);
+	CHECK(result->GetError().find("secret :=") != std::string::npos);
+}
+
+void TestNamedSecretIsSelected() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(TWO_ROWS));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection, "dev");
+	CreateSecret(connection, "prod");
+	RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT NAME, CODE FROM T', secret := 'prod')");
+
+	CHECK(script.configs.size() == 1);
+}
+
+void TestUnknownSecretIsReported() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', secret := 'nope')");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("nope") != std::string::npos);
+}
+
+void TestFetchSizeIsValidated() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', fetch_size := 999999)");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("fetch_size") != std::string::npos);
+}
+
+//! The removed positional function explains the migration rather than saying
+//! "function does not exist", which reads as a broken install.
+void TestRemovedFunctionExplainsMigration() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+
+	auto result = connection.Query("SELECT * FROM oracle_fusion_wsdl_query('https://h/x?WSDL', 'u', 'p', "
+	                               "'/r.xdo', 'SELECT 1 FROM DUAL')");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("oracle_fusion_query") != std::string::npos);
+	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
+}
+
+//! The browser provider is registered so the error names the missing feature
+//! instead of reading like a typo in the provider name.
+void TestBrowserProviderReportsNotImplemented() {
+	DuckDB db(nullptr);
+	Connection connection(db);
+
+	auto result = connection.Query("CREATE SECRET sso (TYPE oracle_fusion, PROVIDER browser, "
+	                               "ENDPOINT 'https://h/x?WSDL', REPORT_PATH '/r.xdo')");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("not implemented yet") != std::string::npos);
 }
 
 struct TestCase {
@@ -250,14 +391,23 @@ struct TestCase {
 };
 
 const TestCase TESTS[] = {
-    {"scan returns rows", TestScanReturnsRows},
-    {"credentials and sql reach the transport", TestCredentialsAndSqlReachTheTransport},
-    {"empty result derives columns from sql", TestEmptyResultDerivesColumnsFromSql},
-    {"select star with empty result falls back", TestSelectStarWithEmptyResultFallsBackToSingleColumn},
-    {"soap fault currently yields no rows", TestSoapFaultCurrentlyYieldsNoRows},
-    {"missing column becomes empty string", TestMissingColumnBecomesEmptyString},
+    {"scan returns rows in select order", TestScanReturnsRowsInSelectOrder},
+    {"secret supplies the connection", TestSecretSuppliesTheConnection},
+    {"secret redacts credentials", TestSecretRedactsCredentials},
+    {"named parameters override the secret", TestNamedParametersOverrideTheSecret},
+    {"soap fault becomes an error", TestSoapFaultBecomesAnError},
+    {"html login page becomes an error", TestHtmlLoginPageBecomesAnError},
+    {"empty result is an error", TestEmptyResultIsAnErrorRatherThanAGuessedSchema},
+    {"missing column becomes null", TestMissingColumnBecomesNull},
     {"scan emits more than one vector", TestScanEmitsMoreThanOneVector},
     {"transport failure surfaces as query error", TestTransportFailureSurfacesAsQueryError},
+    {"missing secret is explained", TestMissingSecretIsExplained},
+    {"ambiguous secret is reported", TestAmbiguousSecretIsReported},
+    {"named secret is selected", TestNamedSecretIsSelected},
+    {"unknown secret is reported", TestUnknownSecretIsReported},
+    {"fetch size is validated", TestFetchSizeIsValidated},
+    {"removed function explains migration", TestRemovedFunctionExplainsMigration},
+    {"browser provider reports not implemented", TestBrowserProviderReportsNotImplemented},
 };
 
 } // namespace

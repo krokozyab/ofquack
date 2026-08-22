@@ -4,6 +4,14 @@
 
 namespace ofquack {
 
+//! Makes `text` safe to place inside a CDATA section.
+//!
+//! CDATA has exactly one escape problem: the sequence "]]>" ends the section
+//! early, so a query containing it would otherwise inject the rest of itself
+//! into the SOAP envelope as markup. The fix is to close and reopen the
+//! section around it, which the XML parser rejoins into the original bytes.
+std::string EscapeCdata(const std::string &text);
+
 //! Builds the SOAP 1.2 body for BI Publisher's runReport operation, carrying the
 //! caller's SQL in the report's p_sql parameter.
 //!

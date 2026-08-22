@@ -50,20 +50,21 @@ full rebuild. Use it to iterate on compile errors; it cannot catch link errors.
 `scripts/check_windows_view.py` catches POSIX calls that leaked into a Windows branch without
 waiting ~40 minutes for the CI matrix.
 
-The SQL tests are a placeholder (`SELECT 1`) — they cannot reach the table function, which needs
-live Fusion credentials. Real coverage lives in the two C++ suites above, which is what the
-`FusionTransport` seam is for.
+The SQL tests cover registration, secret redaction and every binder error — everything that can
+be checked before a network call. Anything that needs a *response* belongs in
+`adapter_test.cpp`, which drives the table function against a scripted transport; that is what
+the `FusionTransport` seam is for.
 
 ## Architecture
 
 The code is cut into layers, and the cut is load-bearing:
 
-- **Layer 1 — pure** (`soap_envelope`, `xml_report`): no DuckDB, no network. Tested by
-  `pure_test` in about a second.
+- **Layer 1 — pure** (`soap_envelope`, `xml_report`, `error_decoder`): no DuckDB, no network.
+  Tested by `pure_test` in about a second.
 - **Layer 2 — transport** (`transport`, `soap_transport`, `http_curl`): knows libcurl, knows
   nothing about DuckDB.
-- **Layer 4 — adapter** (`ofquack_extension.cpp`): knows DuckDB, reaches Fusion *only* through
-  `FusionTransport`.
+- **Layer 4 — adapter** (`ofquack_extension.cpp`, `fusion_secret`, `fusion_connection`,
+  `fusion_query_function`): knows DuckDB, reaches Fusion *only* through `FusionTransport`.
 
 Keep it that way: layer 1 must not include `duckdb.hpp` or `curl.h`, and the adapter must not
 call `curl_easy_*` or touch tinyxml2 directly.
@@ -78,9 +79,11 @@ The request pipeline:
 4. `ParseRows` — the decoded payload contains `<RESULT>` elements whose *text content* is another
    escaped XML document (`<ROWSET><ROW>…`), so each is parsed again as a separate document.
 
-Table-function wiring: `FusionBind` does all network I/O and materialises the whole result;
-`FusionScan` + `FusionLocalState::offset` emit it in `STANDARD_VECTOR_SIZE` chunks.
-`init_global` is `nullptr`, so there is no parallelism.
+Table-function wiring: `FusionQueryBind` resolves the secret and fetches the first page — the
+schema lives in the data, so there is no way to describe the result without it. That page is
+carried into `FusionQueryInitGlobal`, and `FusionQueryScan` emits it in `STANDARD_VECTOR_SIZE`
+chunks. `MaxThreads()` returns 1: BI Publisher sessions are expensive and the server accumulates
+them, so the scan is deliberately serial.
 
 `tinyxml2` is aliased as `tx2` in `xml_report.cpp` to avoid a symbol collision with MSXML on
 Windows — keep it.
@@ -96,7 +99,7 @@ ScopedTransportFactory installed([&](const FusionConfig &config) {
 });
 DuckDB db(nullptr);
 Connection connection(db);
-connection.Query("SELECT * FROM oracle_fusion_wsdl_query(...)");
+connection.Query("SELECT * FROM oracle_fusion_query(...)");
 ```
 
 See `test/cpp/adapter_test.cpp`. Anything that would otherwise need credentials belongs there.
@@ -135,16 +138,24 @@ See `test/cpp/adapter_test.cpp`. Anything that would otherwise need credentials 
   `SetChildCardinality` does not exist in v1.5.5. Copy its structure, not its types verbatim.
 - `~/projects/quack-oracle/duckdb` — full DuckDB clone with every tag through v1.5.5.
 
-## Known defects being fixed
+## Public API
 
-These are deliberate, pinned by tests that assert today's wrong behaviour so the fix is visible
-when it lands. Invert those tests rather than deleting them, and do not "fix" any of this
-piecemeal without reading the plan:
+```sql
+CREATE SECRET fusion (TYPE oracle_fusion, ENDPOINT …, REPORT_PATH …, USERNAME …, PASSWORD …);
+SELECT * FROM oracle_fusion_query('SELECT … FROM …', secret := 'fusion', fetch_size := 500);
+```
 
-- columns come from a `std::set`, so they are alphabetical rather than in SELECT order;
-- a SOAP fault yields zero rows instead of an error — the caller cannot tell "no data" from
-  "the server refused";
-- an empty result guesses column names by slicing the SQL between `SELECT` and `FROM` on commas;
-- a column missing from a row becomes an empty string rather than SQL NULL;
-- `]]>` in user SQL breaks out of the CDATA section;
-- the whole result is materialised during bind: no paging, no streaming.
+Secret lookup order: `secret :=` by name → `endpoint :=` by scope → the sole `oracle_fusion`
+secret. Several secrets and no name is an error, not a guess.
+
+`oracle_fusion_wsdl_query` still exists as a stub whose bind throws a migration message. Remove
+it a release after `0.1.0`.
+
+## Still outstanding
+
+- the whole result is materialised during bind: no paging, no streaming (`fetch_size` is
+  accepted and validated but not yet applied);
+- no retries, no backoff, no circuit breaker, no per-host throttle;
+- every column is VARCHAR — no type inference, no dictionary types;
+- `AUTH 'bearer'` and `PROVIDER browser` are registered but throw;
+- transport errors surface as `Invalid Error` rather than a typed IO error.

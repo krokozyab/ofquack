@@ -2,9 +2,9 @@
 
 #include "base64.h"
 
-#include <functional>
 #include <stdexcept>
 #include <tinyxml2.h>
+#include <unordered_set>
 
 // Aliased to avoid a symbol collision with MSXML on Windows.
 namespace tx2 = tinyxml2;
@@ -82,7 +82,7 @@ std::string ExtractReportXML(const std::string &soap_xml) {
 	return base64_decode(std::string(report_bytes->GetText()));
 }
 
-std::vector<ReportRow> ParseRows(const std::string &xml, std::set<std::string> &cols) {
+ParsedReport ParseRows(const std::string &xml) {
 	tx2::XMLDocument doc;
 	if (doc.Parse(xml.c_str()) != tx2::XML_SUCCESS) {
 		throw std::runtime_error("Bad report XML");
@@ -90,7 +90,9 @@ std::vector<ReportRow> ParseRows(const std::string &xml, std::set<std::string> &
 	std::vector<tx2::XMLElement *> result_elements;
 	CollectResultElements(doc, result_elements);
 
-	std::vector<ReportRow> rows_out;
+	ParsedReport report;
+	// Tracks which names have been recorded; `report.columns` keeps the order.
+	std::unordered_set<std::string> seen_columns;
 	for (auto result_element : result_elements) {
 		const char *inner = result_element->GetText();
 		if (!inner) {
@@ -110,13 +112,15 @@ std::vector<ReportRow> ParseRows(const std::string &xml, std::set<std::string> &
 			for (auto col = row->FirstChildElement(); col; col = col->NextSiblingElement()) {
 				auto name = LocalName(*col);
 				const char *text = col->GetText();
-				cols.insert(name);
-				parsed[name] = text ? text : "";
+				if (seen_columns.insert(name).second) {
+					report.columns.push_back(name);
+				}
+				parsed[std::move(name)] = text ? text : "";
 			}
-			rows_out.push_back(std::move(parsed));
+			report.rows.push_back(std::move(parsed));
 		}
 	}
-	return rows_out;
+	return report;
 }
 
 } // namespace ofquack
