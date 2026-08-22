@@ -67,6 +67,23 @@ struct Script {
 	std::vector<FusionConfig> configs;
 };
 
+//! True when a paged statement is asking for anything past the first page.
+//!
+//! Every fake here has to honour this. A scan ends on an empty page, not on a
+//! short one, so a fake that served the same rows whatever offset it was given
+//! would never let one finish -- which is exactly the server behaviour the scan
+//! now refuses.
+bool AsksForALaterPage(const std::string &sql) {
+	// Two paging schemes are in play: the table listing seeks from the last
+	// name, and everything else offsets. A request is for a later page if it
+	// carries the seek predicate, or an offset past zero.
+	if (sql.find("t.table_name > ") != std::string::npos) {
+		return true;
+	}
+	const auto at = sql.find("OFFSET ");
+	return at != std::string::npos && sql.compare(at + 7, 1, "0") != 0;
+}
+
 class FakeTransport : public FusionTransport {
 public:
 	FakeTransport(Script &script_p, FusionConfig config) : script(script_p) {
@@ -75,6 +92,9 @@ public:
 
 	std::string Execute(const std::string &sql, const RequestContext &) override {
 		script.executed_sql.push_back(sql);
+		if (AsksForALaterPage(sql)) {
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
 		return script.response;
 	}
 
@@ -152,7 +172,8 @@ void TestSecretSuppliesTheConnection() {
 	CHECK(script.configs[0].username == "analyst");
 	CHECK(script.configs[0].password == "hunter2");
 	CHECK(script.configs[0].report_path == "/Custom/Financials/RP_ARB.xdo");
-	CHECK(script.executed_sql.size() == 1);
+	// Two requests: the page, and the one that confirms nothing follows it.
+	CHECK(script.executed_sql.size() == 2);
 	// Paging is on by default, so the statement reaches Fusion with the row
 	// limiting clause appended to it.
 	CHECK(script.executed_sql[0] == "SELECT NAME, CODE FROM FND_CURRENCIES_TL "
@@ -542,19 +563,25 @@ void TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests() {
 	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG', fetch_size := 500)");
 
 	CHECK(result->RowCount() == 1637);
-	CHECK(script.executed_sql.size() == 4);
 	CHECK(result->GetValue(0, 0).ToString() == "0");
 	CHECK(result->GetValue(0, 1636).ToString() == "1636");
 
+	// Six: the schema page, the same page again under the ordering that paging
+	// needs, three more pages, and the empty one that ends the scan.
+	CHECK(script.executed_sql.size() == 6);
 	// Offsets advance by the page size, and the first page starts at zero.
 	CHECK(script.executed_sql[0].find("OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY") != std::string::npos);
-	CHECK(script.executed_sql[1].find("OFFSET 500 ROWS") != std::string::npos);
-	CHECK(script.executed_sql[3].find("OFFSET 1500 ROWS") != std::string::npos);
+	CHECK(script.executed_sql[1].find("OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY") != std::string::npos);
+	CHECK(script.executed_sql[2].find("OFFSET 500 ROWS") != std::string::npos);
+	CHECK(script.executed_sql[4].find("OFFSET 1500 ROWS") != std::string::npos);
+	CHECK(script.executed_sql[5].find("OFFSET 1637 ROWS") != std::string::npos);
 }
 
-//! A result that fits in one page must not cost a second request just to
-//! discover there is nothing more.
-void TestShortFirstPageCostsOneRequest() {
+//! A result that fits in one page still costs one request to establish that it
+//! does. A short page is not proof of the end: BI Publisher truncates a
+//! response that grows too large without saying so, and the truncated page
+//! looks exactly like the last one.
+void TestShortFirstPageIsConfirmed() {
 	Script script;
 	auto installed = InstallPaging(script, 3);
 
@@ -564,7 +591,11 @@ void TestShortFirstPageCostsOneRequest() {
 	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM SMALL', fetch_size := 500)");
 
 	CHECK(result->RowCount() == 3);
-	CHECK(script.executed_sql.size() == 1);
+	CHECK(script.executed_sql.size() == 2);
+	CHECK(script.executed_sql[1].find("OFFSET 3 ROWS") != std::string::npos);
+	// The confirming request found nothing, so the ordering was never needed
+	// and the page fetched during bind was kept as it was.
+	CHECK(script.executed_sql[0].find("ORDER BY") == std::string::npos);
 }
 
 //! An exactly-full last page is indistinguishable from a full one, so one extra
@@ -580,7 +611,96 @@ void TestExactlyFullPageCostsOneExtraRequest() {
 	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM T', fetch_size := 10)");
 
 	CHECK(result->RowCount() == 20);
-	CHECK(script.executed_sql.size() == 3);
+	// The schema page, the ordered retake of it, the second page, and the empty
+	// one after it.
+	CHECK(script.executed_sql.size() == 4);
+}
+
+//! Each page is a separate execution of the statement, and Oracle owes no two
+//! of them the same row order. Paging an unordered statement therefore returns
+//! a sample of the result rather than the result, and every page looks right.
+void TestPagedStatementIsOrdered() {
+	Script script;
+	auto installed = InstallPaging(script, 1200);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG', fetch_size := 500)");
+
+	CHECK(result->RowCount() == 1200);
+	// The first request is the one bind makes to learn the schema, and the
+	// column count is not known before it comes back -- so it is the only one
+	// without the ordering, and it is taken again with it.
+	CHECK(script.executed_sql[0].find("ORDER BY") == std::string::npos);
+	for (size_t i = 1; i < script.executed_sql.size(); i++) {
+		CHECK(script.executed_sql[i].find("SELECT * FROM (SELECT N FROM BIG) ORDER BY 1 OFFSET") !=
+		      std::string::npos);
+	}
+}
+
+//! An author who wrote an ORDER BY has already said how the rows are to be
+//! ordered. Wrapping ours around theirs would sort the result twice and cost a
+//! request to re-read a page that was never wrong.
+void TestStatementWithItsOwnOrderIsNotWrapped() {
+	Script script;
+	auto installed = InstallPaging(script, 1200);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result =
+	    RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG ORDER BY N', fetch_size := 500)");
+
+	CHECK(result->RowCount() == 1200);
+	// Three pages and the empty one after them; no retake of the first.
+	CHECK(script.executed_sql.size() == 4);
+	for (const auto &sql : script.executed_sql) {
+		CHECK(sql.find("SELECT * FROM (") == std::string::npos);
+	}
+}
+
+void TestStablePagingCanBeTurnedOff() {
+	Script script;
+	auto installed = InstallPaging(script, 1200);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT N FROM BIG', "
+	                                   "fetch_size := 500, stable_paging := false)");
+
+	CHECK(result->RowCount() == 1200);
+	CHECK(script.executed_sql.size() == 4);
+	for (const auto &sql : script.executed_sql) {
+		CHECK(sql.find("ORDER BY") == std::string::npos);
+	}
+}
+
+//! A scan ends on an empty page, so a report that hands back the same rows
+//! whatever offset it is given would never let one end. Saying so beats
+//! streaming the first page until the user gives up.
+void TestARepeatedPageIsRefused() {
+	struct IgnoresOffsetTransport : FusionTransport {
+		std::string Execute(const std::string &, const RequestContext &) override {
+			std::string rowset = "&lt;ROWSET&gt;";
+			for (int i = 0; i < 10; i++) {
+				rowset += "&lt;ROW&gt;&lt;N&gt;" + std::to_string(i) + "&lt;/N&gt;&lt;/ROW&gt;";
+			}
+			return MakeSoapResponse(MakeReportXML(rowset + "&lt;/ROWSET&gt;"));
+		}
+	};
+	ScopedTransportFactory installed(
+	    [](const FusionConfig &) { return std::make_shared<IgnoresOffsetTransport>(); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT N FROM T', fetch_size := 10)");
+
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("not being paged") != std::string::npos);
+	CHECK(result->GetError().find("fetch_size := 0") != std::string::npos);
 }
 
 void TestPagingCanBeDisabled() {
@@ -732,20 +852,6 @@ void TestHintSurvivesToTheWire() {
 // ---------------------------------------------------------------------------
 
 //! Answers dictionary queries by recognising which one it was asked.
-//! True when a paged dictionary statement is asking for anything past the
-//! first page. A fake that ignores the offset would serve the same rows for
-//! ever, which is what the paging loop's own safety limit is there to catch.
-bool AsksForALaterPage(const std::string &sql) {
-	// Two paging schemes are in play: the table listing seeks from the last
-	// name, and everything else offsets. A request is for a later page if it
-	// carries the seek predicate, or an offset past zero.
-	if (sql.find("t.table_name > ") != std::string::npos) {
-		return true;
-	}
-	const auto at = sql.find("OFFSET ");
-	return at != std::string::npos && sql.compare(at + 7, 1, "0") != 0;
-}
-
 class DictionaryTransport : public FusionTransport {
 public:
 	explicit DictionaryTransport(Script &script_p) : script(script_p) {
@@ -757,7 +863,7 @@ public:
 			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
 		}
 
-		if (sql.find("COUNT(*)") != std::string::npos) {
+		if (sql.find("COUNT(DISTINCT") != std::string::npos) {
 			// The listing asks how many rows to expect, so that a truncated
 			// response is recognisable as truncated.
 			return MakeSoapResponse(MakeReportXML(
@@ -827,7 +933,7 @@ void TestListTables() {
 	// on a fresh session -- an exhausted BI Publisher session also returns
 	// nothing, so an empty page is confirmed before it is believed.
 	CHECK(script.executed_sql.size() == 4);
-	CHECK(script.executed_sql[0].find("COUNT(*)") != std::string::npos);
+	CHECK(script.executed_sql[0].find("COUNT(DISTINCT") != std::string::npos);
 	CHECK(script.executed_sql[1].find("FETCH FIRST") != std::string::npos);
 	// Keyset paging, so the first page carries no seek predicate.
 	CHECK(script.executed_sql[1].find("t.table_name > ") == std::string::npos);
@@ -845,7 +951,7 @@ void TestTruncatedPageDoesNotEndTheListing() {
 
 		std::string Execute(const std::string &sql, const RequestContext &) override {
 			executed.push_back(sql);
-			if (sql.find("COUNT(*)") != std::string::npos) {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
 				// Two rows exist; the pages below deliver them one at a time,
 				// which is exactly the truncation this test is about.
 				return MakeSoapResponse(MakeReportXML(
@@ -898,7 +1004,7 @@ void TestEmptyPageIsRetriedOnAFreshSession() {
 		int resets = 0;
 
 		std::string Execute(const std::string &sql, const RequestContext &) override {
-			if (sql.find("COUNT(*)") != std::string::npos) {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
 				return MakeSoapResponse(MakeReportXML(
 				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;2&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
 			}
@@ -946,7 +1052,7 @@ void TestShortListingIsReportedRatherThanCached() {
 	ResetCache();
 	struct ShortListingTransport : FusionTransport {
 		std::string Execute(const std::string &sql, const RequestContext &) override {
-			if (sql.find("COUNT(*)") != std::string::npos) {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
 				return MakeSoapResponse(MakeReportXML(
 				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;9000&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
 			}
@@ -994,6 +1100,51 @@ void TestSecondListingCostsNothing() {
 	auto result = RunQuery(second, "SELECT * FROM oracle_fusion_tables(secret := 'fusion')");
 
 	CHECK(result->RowCount() == 2);
+	CHECK(script.executed_sql.size() == after_first);
+}
+
+//! "This object has no columns we can read" is an answer, and it cost a request
+//! to obtain. Left unrecorded it is indistinguishable from never having asked,
+//! so every connection asks again -- for exactly the objects Fusion refuses to
+//! describe, which are the ones people look at twice.
+void TestAnEmptyColumnListIsCached() {
+	ResetCache();
+	Script script;
+	struct NoColumnsTransport : FusionTransport {
+		Script &script;
+		explicit NoColumnsTransport(Script &script_p) : script(script_p) {
+		}
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			script.executed_sql.push_back(sql);
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;1"
+				                                      "&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (sql.find("FND_VIEWS") != std::string::npos) {
+				return MakeSoapResponse(
+				    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;SECRET_T&lt;/TABLE_NAME&gt;"
+				                  "&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;7&lt;/TABLE_ID&gt;"
+				                  "&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			// The column query answers with nothing at all.
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
+	};
+	ScopedTransportFactory installed(
+	    [&script](const FusionConfig &) { return std::make_shared<NoColumnsTransport>(script); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto first = RunQuery(connection, "SELECT * FROM oracle_fusion_columns('SECRET_T')");
+	CHECK(first->RowCount() == 0);
+	const auto after_first = script.executed_sql.size();
+
+	auto second = RunQuery(connection, "SELECT * FROM oracle_fusion_columns('SECRET_T')");
+	CHECK(second->RowCount() == 0);
 	CHECK(script.executed_sql.size() == after_first);
 }
 
@@ -1670,7 +1821,11 @@ const TestCase TESTS[] = {
     {"bare host endpoint is completed", TestBareHostEndpointIsCompleted},
     {"full endpoint is left alone", TestFullEndpointIsLeftAlone},
     {"paging fetches every row in exactly the right number of requests", TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests},
-    {"short first page costs one request", TestShortFirstPageCostsOneRequest},
+    {"a short first page is confirmed, not assumed", TestShortFirstPageIsConfirmed},
+    {"a paged statement is ordered", TestPagedStatementIsOrdered},
+    {"a statement with its own order is not wrapped", TestStatementWithItsOwnOrderIsNotWrapped},
+    {"stable paging can be turned off", TestStablePagingCanBeTurnedOff},
+    {"a repeated page is refused", TestARepeatedPageIsRefused},
     {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},
     {"paging can be disabled", TestPagingCanBeDisabled},
     {"statement with its own limit is not rewritten", TestStatementWithItsOwnLimitIsNotRewritten},
@@ -1684,6 +1839,7 @@ const TestCase TESTS[] = {
     {"empty page is retried on a fresh session", TestEmptyPageIsRetriedOnAFreshSession},
     {"short listing is reported rather than cached", TestShortListingIsReportedRatherThanCached},
     {"second listing costs nothing", TestSecondListingCostsNothing},
+    {"an empty column list is cached", TestAnEmptyColumnListIsCached},
     {"refresh bypasses the cache", TestRefreshBypassesTheCache},
     {"invalidate forces a refetch", TestInvalidateForcesARefetch},
     {"columns of table and view", TestColumnsOfTableAndView},

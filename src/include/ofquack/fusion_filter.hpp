@@ -9,6 +9,9 @@ namespace duckdb {
 struct FusionColumn {
 	string name;
 	LogicalType type;
+	//! The Oracle type as the dictionary spells it, empty when it was inferred.
+	//! Used to keep the large object types out of a paging ORDER BY.
+	string oracle_type_name;
 	//! False when the type was guessed from data rather than read from Fusion's
 	//! dictionary. Filters are never pushed on such a column: the comparison
 	//! Oracle would perform and the one DuckDB would perform need not agree.

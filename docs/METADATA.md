@@ -69,10 +69,17 @@ Page size is 400 rows and can be lowered when an instance is stingier than that:
 SET ofquack_metadata_page_size = 200;
 ```
 
-A listing that ends short is never cached. `oracle_fusion_tables()` first asks
-the instance how many tables and views it has, and refuses a listing that
-returned fewer — a partial dictionary that looks complete is worse than an
-error, because every later lookup silently misses.
+A listing that ends short is never cached. Before listing anything, the fetcher
+asks the instance how many distinct tables and views it holds, and refuses a
+listing that returned fewer — a partial dictionary that looks complete is worse
+than an error, because it is cached for a week and every later lookup misses
+with nothing to show for it. The check lives in the fetcher rather than in
+`oracle_fusion_tables()`, so `ATTACH`, `oracle_fusion_columns()` and
+`ofquack_cache_warm()` are covered by it too.
+
+The count is `COUNT(DISTINCT UPPER(table_name))` rather than `COUNT(*)`: a name
+that exists as both a table and a view is one entry in the listing, so counting
+rows of the union would report every complete listing as short.
 
 ## The cache
 

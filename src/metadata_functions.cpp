@@ -128,27 +128,15 @@ unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInp
 		auto transport = ofquack::CreateTransport(config);
 		const auto request_context = ContextFor(context);
 
-		// Asked for first, and recorded, so that a listing which comes back
-		// short is recognised as short -- by this call and by every later one
-		// that reads the cache.
-		const auto expected = WithTranslatedErrors(
-		    [&]() { return ofquack::FetchTableCount(*transport, request_context, {"TABLE", "VIEW"}); });
+		// FetchTables asks the instance for its own count and refuses a listing
+		// that falls short of it, so nothing partial reaches the cache. The
+		// count is recorded alongside, which is what lets a later read of the
+		// cache tell a complete listing from a truncated one.
 		const auto page_size = MetadataPageSize(context, input.named_parameters);
-		tables = WithTranslatedErrors(
-		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}, page_size); });
-
-		if (expected >= 0 && static_cast<int64_t>(tables.size()) < expected) {
-			// The last name reached is the useful part: where the listing gave
-			// up says more about why than the count does.
-			const auto reached = tables.empty() ? std::string("nothing") : tables.back().name;
-			throw IOException(
-			    "Oracle Fusion says its dictionary holds %lld tables and views but the listing returned only "
-			    "%lld, stopping after %s.\nThe list is incomplete and has not been cached. This is a limit on "
-			    "the report rather than on the query -- retry, and if it stops in the same place again, ask for "
-			    "smaller pages: SET ofquack_metadata_page_size = %llu.",
-			    static_cast<long long>(expected), static_cast<long long>(tables.size()), reached,
-			    static_cast<unsigned long long>((page_size > 0 ? page_size : ofquack::metadata::PAGE_SIZE) / 2));
-		}
+		int64_t expected = -1;
+		tables = WithTranslatedErrors([&]() {
+			return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}, page_size, &expected);
+		});
 		cache.PutTables(endpoint_key, tables);
 		cache.SetExpectedTables(endpoint_key, expected);
 	}
@@ -213,8 +201,10 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 			// usually free.
 			std::vector<ofquack::TableInfo> tables;
 			if (!cache.TryGetTables(endpoint_key, TtlFor(input.named_parameters), tables)) {
-				tables = ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"});
+				int64_t expected = -1;
+				tables = ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}, 0, &expected);
 				cache.PutTables(endpoint_key, tables);
+				cache.SetExpectedTables(endpoint_key, expected);
 			}
 			for (const auto &table : tables) {
 				if (StringUtil::CIEquals(table.name, table_name)) {
@@ -313,9 +303,11 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 
 	std::vector<ofquack::TableInfo> tables;
 	if (!cache.TryGetTables(endpoint_key, TtlFor(input.named_parameters), tables)) {
+		int64_t expected = -1;
 		tables = WithTranslatedErrors(
-		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}); });
+		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}, 0, &expected); });
 		cache.PutTables(endpoint_key, tables);
+		cache.SetExpectedTables(endpoint_key, expected);
 	}
 
 	std::vector<ofquack::TableInfo> wanted;

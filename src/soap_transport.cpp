@@ -191,10 +191,13 @@ private:
 	}
 
 	std::string Attempt(const std::string &sql, const RequestContext &context) {
-		breaker->RequireClosed(host);
 		// Held for the whole request: the point is to bound how many BI
 		// Publisher sessions exist at once, not how many we start per second.
 		HostThrottle::Slot slot(*throttle);
+		// Checked after the slot, not before. A queue of callers that all passed
+		// the check while the breaker was closed would otherwise run one after
+		// another into an instance that failed on the first of them.
+		breaker->RequireClosed(host);
 
 		HttpRequest request;
 		request.url = config.endpoint;
@@ -212,6 +215,16 @@ private:
 		HttpResponse response;
 		try {
 			response = client->Post(request);
+		} catch (const CancelledError &) {
+			// The caller stopped, which says nothing about the instance. Counting
+			// it would let a few interrupted queries close the breaker on a host
+			// that was answering perfectly well.
+			throw;
+		} catch (const PermanentError &) {
+			// Same rule as for a rejected status: a refusal is not a failure. A
+			// bad CA file or an unusable proxy will not fix itself by waiting,
+			// and tripping on it would block every other query to this host.
+			throw;
 		} catch (const FusionError &) {
 			breaker->RecordFailure();
 			throw;

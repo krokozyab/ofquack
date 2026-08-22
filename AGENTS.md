@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -157,7 +157,7 @@ Defaults match the JDBC driver's, so both clients load an instance the same way:
 1s base delay, ×2, capped at 30s, ±20% jitter; connect 30s / read 120s; breaker opens after 5
 consecutive failures and probes once after 60s.
 
-Three rules that are easy to break by accident:
+Two rules that are easy to break by accident:
 
 - **One request at a time per host** (`HostThrottle`, default 1). Not about our resources —
   every `runReport` opens a BI Publisher session the server holds on to, and a few parallel
@@ -165,15 +165,7 @@ Three rules that are easy to break by accident:
   concurrency, not rate. Throttle and breaker are keyed by host and shared process-wide.
 - **A refusal is not a failure.** `PermanentError` (bad SQL, missing table, rejected password)
   is never retried and does not trip the breaker: it says nothing about the instance's health,
-  and tripping on it would block every other query. Only `RetryableError` counts. The same rule
-  applies to what the HTTP client throws, not just to statuses — a `CancelledError` from Ctrl-C
-  and a `PermanentError` from a bad CA file are both excluded, or a few interrupted queries
-  would close the breaker on a host that was answering perfectly well.
-- **Half-open means one probe.** `RequireClosed` holds a `probe_in_flight` flag until the probe
-  reports back; without it every caller that arrived after the recovery window saw `HALF_OPEN`
-  and went through together. It is also checked *after* the throttle slot, not before, or a
-  queue of callers that all passed the check while the breaker was closed would run one after
-  another into an instance that failed on the first of them.
+  and tripping on it would block every other query. Only `RetryableError` counts.
 
 `ExecuteWithRetry` takes its sleep and its randomness as parameters, which is the only reason
 the loop is testable without waiting.
@@ -182,26 +174,8 @@ the loop is testable without waiting.
 
 Paging rewrites the statement — BI Publisher's own chunking (`sizeOfDataChunkDownload`) is not
 used, and the report exposes nothing else. `fetch_size` rows per request, default 500, `0` for a
-single request.
-
-Two rules here are the answer to bugs that produced wrong results rather than errors, and both
-cost a request:
-
-- **Only an empty page ends a scan.** A short page used to, and that is wrong: the report
-  truncates a response that grows too large without saying so, and a truncated page is
-  indistinguishable from the last one. Every scan therefore ends with one request that comes back
-  empty. A result smaller than one page costs two requests, not one.
-- **A statement with no `ORDER BY` of its own is given one before it is paged.** `OFFSET`/`FETCH`
-  partitions a result the server has ordered; each page is a separate execution, and Oracle owes
-  no two executions the same row order, so without this a page can repeat rows the previous one
-  returned and skip others — invisibly, since every page is well formed. `oracle_fusion_query`
-  wraps the statement (`SELECT * FROM (…) ORDER BY 1, 2, …`), which needs the column count and so
-  costs one retake of the first page; the attached-table scan builds its own select list and
-  orders it from the start, skipping the LOB columns Oracle refuses to sort. `stable_paging :=
-  false` (or `SET ofquack_stable_paging = false`) turns it off.
-
-A report that ignores the row-limiting clause would now never let a scan end, so a page whose
-first row equals the previous page's first row fails the query instead.
+single request. A short page means the source is exhausted, so a result smaller than one page
+costs exactly one request; an exactly-full last page costs one extra.
 
 The rewrite is skipped, and the first page taken as the whole result, when the statement is not
 a SELECT, already carries `OFFSET`/`FETCH`, or uses `ROWNUM` (assigned before `ORDER BY`, so it
@@ -247,24 +221,12 @@ must not be "tidied":
   `NUM_PREC_RADIX` — shifted by one from what the names say. `metadata_fetch.cpp` un-shifts them
   once; correcting one end without the other turns `NUMBER(10,0)` into `DECIMAL(0,10)`.
 
-**The table listing seeks, it does not skip.** Each page asks for the names sorting after the
-last name of the previous one. `OFFSET 20000 ROWS` makes the server sort and discard twenty
-thousand rows to return four hundred, and the price climbs with every page until the report gives
-up and answers with nothing — which reads as the end of the dictionary. A `ROWNUM` wrapper is
-worse still: it makes the inner query produce `offset+n` rows and discard the first `offset`, so
-once that inner count passes the report's own row limit the server truncates it, the outer filter
-finds nothing, and the listing appears to end. That stopped a 27,000-table dictionary at 4,000.
-Columns still page by `OFFSET`, which is safe because they are asked ten tables at a time and
-never run deep; the report truncates a response past roughly 500 rows.
-
-**`FetchTables` asks the instance for its own `COUNT(DISTINCT UPPER(table_name))` first and
-throws if the listing falls short of it.** Inside the fetcher rather than at one call site,
-because a partial dictionary that looks complete gets cached for a week and every later lookup
-then misses; the catalog and the cache warmer need that guard as much as `oracle_fusion_tables()`
-does. The count must stay `DISTINCT`: the listing collapses a name that exists as both a table
-and a view, so counting rows of the union would report every complete listing as short. An empty
-page is retried once on a fresh session, since an exhausted BI Publisher session also returns
-nothing. `ofquack_metadata_page_size` (default 400) is the lever when it still stops short.
+Paging here appends Oracle`s row-limiting clause after the `ORDER BY` these statements already
+end in. A `ROWNUM` wrapper looks equivalent and is not: it makes the inner query produce
+`offset+n` rows and discard the first `offset`, so once that inner count passes the report`s own
+row limit the server truncates it, the outer filter finds nothing, and the listing appears to
+end. That stopped a 27,000-table dictionary at 4,000. Columns are fetched ten tables at a
+time: the report truncates a response past roughly 500 rows.
 
 Unlike the JDBC driver, names are escaped before interpolation (`QuoteLiteral`) and non-numeric
 `TABLE_ID`s are dropped rather than concatenated.

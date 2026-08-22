@@ -140,14 +140,14 @@ std::string NormalizeSql(const std::string &sql) {
 	return out;
 }
 
-size_t FindKeyword(const std::string &sql, const std::string &keyword) {
+size_t FindKeyword(const std::string &sql, const std::string &keyword, size_t from) {
 	if (keyword.empty()) {
 		return std::string::npos;
 	}
 	size_t found = std::string::npos;
 
 	Lex(sql, [&](State state, size_t index) {
-		if (found != std::string::npos || state != State::CODE || index >= sql.size()) {
+		if (found != std::string::npos || state != State::CODE || index < from || index >= sql.size()) {
 			return;
 		}
 		if (index + keyword.size() > sql.size()) {

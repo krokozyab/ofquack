@@ -16,6 +16,10 @@ struct FusionScanOptions {
 	//! Skips type inference and returns every column as VARCHAR, for when a
 	//! guess from the first page would be wrong for the rest of the data.
 	bool all_varchar = false;
+	//! Adds an ORDER BY over every column before paging, so that the pages of one
+	//! result partition it rather than sampling it. Off only when Oracle refuses
+	//! the ordering -- see ofquack_stable_paging.
+	bool stable_paging = true;
 };
 
 //! Resolves the connection from a secret plus any overriding named parameters.

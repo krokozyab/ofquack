@@ -37,19 +37,31 @@ void CircuitBreaker::RequireClosed(const std::string &host) {
 		                       std::to_string(remaining > 0 ? remaining / 1000 : 0) +
 		                       "s. Check that the instance is reachable and that the report is deployed");
 	}
-	// A half-open breaker lets exactly one probe through; it stays half-open
-	// until that probe reports back, so a burst of queries does not all rush in.
+	if (effective == State::HALF_OPEN) {
+		// Exactly one probe, and it holds the right to be the probe until it
+		// reports back. Without the flag every caller that arrived after the
+		// recovery window saw HALF_OPEN and went through together, which is the
+		// stampede into a sick instance the breaker exists to prevent.
+		if (probe_in_flight) {
+			throw CircuitOpenError("Oracle Fusion at " + host +
+			                       " is being probed after a run of failures, so this request was not attempted. "
+			                       "Retry once that probe has reported back");
+		}
+		probe_in_flight = true;
+	}
 	state = effective;
 }
 
 void CircuitBreaker::RecordSuccess() {
 	std::lock_guard<std::mutex> guard(lock);
+	probe_in_flight = false;
 	consecutive_failures = 0;
 	state = State::CLOSED;
 }
 
 void CircuitBreaker::RecordFailure() {
 	std::lock_guard<std::mutex> guard(lock);
+	probe_in_flight = false;
 	if (state == State::HALF_OPEN) {
 		// The probe failed: the instance is still unwell, so wait again from now.
 		state = State::OPEN;

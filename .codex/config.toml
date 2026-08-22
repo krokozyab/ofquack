@@ -1,0 +1,11 @@
+[mcp_servers.fusion-metadata-go]
+command = "/Users/sergeyrudenko_1_2/projects/of_rag/ofmcp"
+args = [
+    "--db",
+    "/Users/sergeyrudenko_1_2/projects/of_rag/metadata.db",
+]
+
+[mcp_servers.fusion-metadata-go.env]
+FUSION_HOST = "https://fa-erci-dev1-saasfaprod1.fa.ocs.oraclecloud.com"
+FUSION_SQL_REPORT_PATH = "/Custom/CloudSQL/RP_ARB.xdo"
+LICENSE_PATH = "/Users/sergeyrudenko_1_2/projects/of_rag/license.json"

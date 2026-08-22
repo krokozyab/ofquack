@@ -69,8 +69,10 @@ struct FusionAttachedState {
 		auto &cache = MetadataCache::Get();
 		if (!cache.TryGetTables(endpoint_key, CATALOG_CACHE_TTL_SECONDS, tables)) {
 			tables.clear();
-			tables = ofquack::FetchTables(*transport, RequestContextFor(context), {"TABLE", "VIEW"});
+			int64_t expected = -1;
+			tables = ofquack::FetchTables(*transport, RequestContextFor(context), {"TABLE", "VIEW"}, 0, &expected);
 			cache.PutTables(endpoint_key, tables);
+			cache.SetExpectedTables(endpoint_key, expected);
 		}
 		tables_loaded = true;
 		return tables;
@@ -227,8 +229,27 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 	state->paginate = ofquack::ClassifyForPagination(state->base_sql, bind_data.state->options.fetch_size) ==
 	                  ofquack::PaginationVerdict::YES;
 
+	if (state->paginate && bind_data.state->options.stable_paging) {
+		// OFFSET/FETCH only partitions a result the server has already ordered.
+		// Each page is a separate execution of the statement, and Oracle owes no
+		// two executions the same row order, so without this a page can repeat
+		// rows the previous one returned and skip others -- invisibly, since
+		// every page is individually well formed.
+		//
+		// Ordering by every projected column is a total order on the output:
+		// rows that tie on all of them are interchangeable, so it does not
+		// matter which side of a page boundary they fall.
+		std::vector<uint64_t> positions;
+		for (idx_t i = 0; i < selected.size(); i++) {
+			if (ofquack::IsSortableOracleType(bind_data.columns[selected[i]].oracle_type_name)) {
+				positions.push_back(static_cast<uint64_t>(i) + 1);
+			}
+		}
+		state->base_sql = ofquack::AppendOrderByPositions(state->base_sql, positions);
+	}
+
 	state->page = FetchCatalogPage(bind_data, *state, context, 0);
-	state->more_pages = state->paginate && state->page.rows.size() == bind_data.state->options.fetch_size;
+	state->more_pages = state->paginate && !state->page.rows.empty();
 	return std::move(state);
 }
 
@@ -241,9 +262,21 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 			output.SetCardinality(0);
 			return;
 		}
-		state.page = FetchCatalogPage(bind_data, state, context, state.rows_emitted);
+		auto fetched = FetchCatalogPage(bind_data, state, context, state.rows_emitted);
+		// A report that ignores the row-limiting clause would hand back the same
+		// rows for ever now that only an empty page ends a scan.
+		if (!state.page.rows.empty() && !fetched.rows.empty() && state.page.rows.front() == fetched.rows.front()) {
+			throw IOException("Oracle Fusion returned the same rows again for OFFSET %llu of %s, so the statement is "
+			                  "not being paged and reading it would never end",
+			                  static_cast<unsigned long long>(state.rows_emitted), bind_data.object_name);
+		}
+		state.page = std::move(fetched);
 		state.offset_in_page = 0;
-		state.more_pages = state.page.rows.size() == bind_data.state->options.fetch_size;
+		// Only an empty page ends the scan. A short one used to, and that is
+		// wrong twice over: BI Publisher truncates a response that grows too
+		// large without saying so, and a truncated page is indistinguishable
+		// from the last one. The price of being sure is one request per scan.
+		state.more_pages = !state.page.rows.empty();
 	}
 
 	const idx_t to_emit = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.page.rows.size() - state.offset_in_page);
@@ -340,7 +373,7 @@ public:
 			bool from_dictionary = false;
 			auto type = TypeOf(column, from_dictionary);
 			info->columns.AddColumn(ColumnDefinition(column.name, type));
-			fusion_columns.push_back(FusionColumn {column.name, type, from_dictionary});
+			fusion_columns.push_back(FusionColumn {column.name, type, column.type_name, from_dictionary});
 		}
 		info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 		return make_uniq<FusionTableEntry>(catalog, schema, *info, state, table->name, std::move(fusion_columns));
@@ -601,6 +634,11 @@ void RegisterFusionCatalog(ExtensionLoader &loader) {
 	                          "DuckDB removes a pushed filter from the plan, so a predicate that cannot be "
 	                          "translated exactly must fail the query rather than be approximated.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	config.AddExtensionOption("ofquack_stable_paging",
+	                          "Order a paged statement by every column it returns, so that its pages partition the "
+	                          "result instead of sampling it. On by default; turn it off only if Oracle refuses "
+	                          "the ordering, and expect pages to repeat and skip rows when you do.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	auto extension = make_shared_ptr<StorageExtension>();
 	extension->attach = FusionAttach;

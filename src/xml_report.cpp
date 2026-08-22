@@ -1,5 +1,7 @@
 #include "ofquack/xml_report.hpp"
 
+#include <cctype>
+
 #include "base64.h"
 
 #include <stdexcept>
@@ -18,6 +20,16 @@ std::string LocalName(const tx2::XMLElement &element) {
 	std::string full = element.Name();
 	const auto pos = full.find(':');
 	return pos == std::string::npos ? full : full.substr(pos + 1);
+}
+
+//! True when the text holds nothing but whitespace.
+bool IsBlank(const char *text) {
+	for (const char *c = text; *c; c++) {
+		if (!std::isspace(static_cast<unsigned char>(*c))) {
+			return false;
+		}
+	}
+	return true;
 }
 
 //! Direct child with the given local name, or nullptr.
@@ -95,17 +107,24 @@ ParsedReport ParseRows(const std::string &xml) {
 	std::unordered_set<std::string> seen_columns;
 	for (auto result_element : result_elements) {
 		const char *inner = result_element->GetText();
-		if (!inner) {
+		// A block with no text is a result set with no rows, which is an answer
+		// rather than a problem.
+		if (!inner || IsBlank(inner)) {
 			continue;
 		}
 		// The text of <RESULT> is a whole escaped document, not child nodes.
 		tx2::XMLDocument inner_doc;
 		if (inner_doc.Parse(inner) != tx2::XML_SUCCESS) {
-			continue;
+			// Skipping it would hand back the rows of the blocks that did parse
+			// and call that the answer. A report that arrives damaged has to be
+			// reported as damaged: a partial result that looks whole is the one
+			// failure the caller cannot detect.
+			throw std::runtime_error(std::string("A result block of the report is not valid XML: ") +
+			                         inner_doc.ErrorStr());
 		}
-		auto rowset = inner_doc.FirstChildElement("ROWSET");
+		auto rowset = FindChild(inner_doc, "ROWSET");
 		if (!rowset) {
-			continue;
+			throw std::runtime_error("A result block of the report holds no ROWSET element");
 		}
 		for (auto row = rowset->FirstChildElement("ROW"); row; row = row->NextSiblingElement("ROW")) {
 			ReportRow parsed;

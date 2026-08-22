@@ -63,4 +63,24 @@ DictionaryColumnType MapOracleType(const std::string &type_name, int64_t precisi
 	return {};
 }
 
+bool IsSortableOracleType(const std::string &type_name) {
+	auto upper = type_name;
+	for (auto &c : upper) {
+		c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	}
+	// Matched as prefixes: the dictionary spells them plain, but a synonym or a
+	// vendor type can arrive as CLOB(4000) or NCLOB CHARACTER SET ...
+	static const char *const UNSORTABLE[] = {"CLOB", "NCLOB", "BLOB", "BFILE", "LONG",
+	                                         "RAW",  "XMLTYPE", "ANYDATA", "SDO_"};
+	for (const auto *name : UNSORTABLE) {
+		if (upper.compare(0, std::string(name).size(), name) == 0) {
+			return false;
+		}
+	}
+	// An unknown type is treated as sortable: the alternative is dropping
+	// columns from the order for no reason, which weakens it for every type the
+	// map has not learned yet.
+	return true;
+}
+
 } // namespace ofquack

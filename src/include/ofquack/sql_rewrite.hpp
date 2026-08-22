@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ofquack {
 
@@ -29,5 +30,24 @@ PaginationVerdict ClassifyForPagination(const std::string &normalized_sql, uint6
 //! BI Publisher's own chunking (sizeOfDataChunkDownload) is not used; rewriting
 //! the statement is the only paging mechanism the report exposes.
 std::string ApplyPagination(const std::string &normalized_sql, uint64_t offset, uint64_t fetch_size);
+
+//! True when the statement carries an ORDER BY of its own.
+//!
+//! OFFSET/FETCH partitions a result the server has ordered. Without an ORDER BY
+//! Oracle is free to return the rows of one execution in a different order from
+//! the next, and every page is a separate execution -- so pages can repeat rows
+//! and skip others while each one looks perfectly well formed.
+bool HasOrderBy(const std::string &normalized_sql);
+
+//! Appends "ORDER BY 1, 2, ... n" over the given 1-based select-list positions.
+//!
+//! Ordering by every column of the output is a total order on the rows as the
+//! caller sees them: two rows that tie on all of them are interchangeable, so
+//! where a page boundary falls between them does not change the answer.
+std::string AppendOrderByPositions(const std::string &sql, const std::vector<uint64_t> &positions);
+
+//! Wraps a statement so a positional ORDER BY applies to its whole output.
+//! Used when the caller wrote the statement and we may not edit its select list.
+std::string WrapWithOrderBy(const std::string &normalized_sql, size_t column_count);
 
 } // namespace ofquack

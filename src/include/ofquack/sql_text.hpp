@@ -23,7 +23,7 @@ std::string NormalizeSql(const std::string &sql);
 //! `SELECT 'OFFSET' FROM t` does not contain the keyword OFFSET by this
 //! definition, which is the distinction a plain substring search misses.
 //! Returns npos when absent.
-size_t FindKeyword(const std::string &sql, const std::string &keyword);
+size_t FindKeyword(const std::string &sql, const std::string &keyword, size_t from = 0);
 
 //! True when the statement is a SELECT or a WITH clause feeding one, ignoring
 //! leading whitespace and comments.

@@ -25,6 +25,14 @@ struct FusionQueryBindData : public TableFunctionData {
 	FusionScanOptions options;
 	//! The statement as normalised, which is what actually goes to Fusion.
 	string sql;
+	//! `sql` with whatever ordering paging needs, which is what pages after the
+	//! first are cut from. Equal to `sql` when it already carries an ORDER BY,
+	//! when paging is off, or when stable paging was turned off.
+	string paged_sql;
+	//! True when `paged_sql` differs from `sql`, so the first page -- fetched
+	//! unordered during bind, because the schema had to come from somewhere --
+	//! has to be taken again under the ordering before any row is emitted.
+	bool first_page_needs_reordering = false;
 	vector<string> columns;
 	vector<LogicalType> column_types;
 	//! The first page, fetched during bind because the schema comes from it.
@@ -38,6 +46,24 @@ struct FusionQueryBindData : public TableFunctionData {
 	//! duckdb's own, which does not accept a std::shared_ptr.
 	std::shared_ptr<ofquack::FusionTransport> transport;
 };
+
+//! Guards against a report that ignores the row-limiting clause.
+//!
+//! Ending a scan on an empty page rather than a short one means the only thing
+//! that stops it is the server eventually running out of rows. A report that
+//! hands back the same rows whatever OFFSET it is given would never do that, so
+//! the scan would emit the first page for ever. Comparing the first row of each
+//! new page with the first row of the one before is enough to catch it, and
+//! costs one map comparison per request.
+void RefuseARepeatedPage(const ofquack::ParsedReport &previous, const ofquack::ParsedReport &fetched, idx_t offset) {
+	if (previous.rows.empty() || fetched.rows.empty() || previous.rows.front() != fetched.rows.front()) {
+		return;
+	}
+	throw IOException("Oracle Fusion returned the same rows again for OFFSET %llu, so the statement is not being "
+	                  "paged and reading it would never end.\nThis usually means the report rewrote or ignored the "
+	                  "row-limiting clause; run with fetch_size := 0 to fetch the result in one request.",
+	                  static_cast<unsigned long long>(offset));
+}
 
 struct FusionQueryGlobalState : public GlobalTableFunctionState {
 	ofquack::ParsedReport page;
@@ -94,13 +120,19 @@ ofquack::ParsedReport ParseResponseOrThrow(const std::string &soap_xml, const st
 	}
 }
 
-//! Fetches one page. `offset` is ignored when the statement cannot be paged.
+//! Fetches one page of `base_sql`. `offset` is ignored when it cannot be paged.
+ofquack::ParsedReport FetchPageOf(ofquack::FusionTransport &transport, const FusionQueryBindData &bind_data,
+                                  const string &base_sql, ClientContext &context, idx_t offset) {
+	const auto statement =
+	    bind_data.paginate ? ofquack::ApplyPagination(base_sql, offset, bind_data.options.fetch_size) : base_sql;
+	return ParseResponseOrThrow(ExecuteOrThrow(transport, statement, context), statement);
+}
+
+//! Fetches one page of the statement the scan pages over, which is the user's
+//! own once it carries an ORDER BY and the ordered wrapper otherwise.
 ofquack::ParsedReport FetchPage(ofquack::FusionTransport &transport, const FusionQueryBindData &bind_data,
                                 ClientContext &context, idx_t offset) {
-	const auto statement = bind_data.paginate
-	                           ? ofquack::ApplyPagination(bind_data.sql, offset, bind_data.options.fetch_size)
-	                           : bind_data.sql;
-	return ParseResponseOrThrow(ExecuteOrThrow(transport, statement, context), statement);
+	return FetchPageOf(transport, bind_data, bind_data.paged_sql, context, offset);
 }
 
 LogicalType ToLogicalType(const ofquack::InferredColumn &inferred) {
@@ -166,7 +198,8 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 	// The schema lives in the data, so the first page is fetched here and kept
 	// for the scan rather than being requested twice.
 	bind_data->transport = ofquack::CreateTransport(bind_data->config);
-	bind_data->first_page = FetchPage(*bind_data->transport, *bind_data, context, 0);
+	bind_data->paged_sql = bind_data->sql;
+	bind_data->first_page = FetchPageOf(*bind_data->transport, *bind_data, bind_data->sql, context, 0);
 	bind_data->columns.assign(bind_data->first_page.columns.begin(), bind_data->first_page.columns.end());
 
 	if (bind_data->columns.empty()) {
@@ -186,6 +219,21 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 	} else {
 		InferColumnTypes(bind_data->first_page, bind_data->columns, bind_data->column_types);
 	}
+	// OFFSET/FETCH only partitions a result the server has ordered, and each
+	// page is a separate execution of the statement: Oracle owes no two of them
+	// the same row order, so an unordered statement can hand back a page that
+	// repeats rows the previous one returned and skips others. Nothing about
+	// the result looks wrong when it does.
+	//
+	// The column count is only known now, which is why the ordering cannot be
+	// decided before the first page is fetched. Ordering by every column of the
+	// output is a total order on what the caller sees: rows that tie on all of
+	// them are interchangeable, so a page boundary between them changes nothing.
+	if (bind_data->paginate && bind_data->options.stable_paging && !ofquack::HasOrderBy(bind_data->sql)) {
+		bind_data->paged_sql = ofquack::WrapWithOrderBy(bind_data->sql, bind_data->columns.size());
+		bind_data->first_page_needs_reordering = true;
+	}
+
 	for (idx_t i = 0; i < bind_data->columns.size(); i++) {
 		names.push_back(bind_data->columns[i]);
 		return_types.push_back(bind_data->column_types[i]);
@@ -197,9 +245,39 @@ unique_ptr<GlobalTableFunctionState> FusionQueryInitGlobal(ClientContext &contex
 	auto &bind_data = input.bind_data->Cast<FusionQueryBindData>();
 	auto state = make_uniq<FusionQueryGlobalState>();
 	state->page = bind_data.first_page;
-	// A short page means the source is exhausted, so the common case of a
-	// result smaller than one page costs exactly one request.
-	state->more_pages = bind_data.paginate && state->page.rows.size() == bind_data.options.fetch_size;
+	if (!bind_data.paginate) {
+		return std::move(state);
+	}
+
+	// A short page used to mean the source was exhausted. It does not: BI
+	// Publisher truncates a response that grows too large without saying so,
+	// and a truncated page is indistinguishable from the last one. Only an
+	// empty page ends a scan now, which costs one request per result.
+	if (state->page.rows.empty()) {
+		return std::move(state);
+	}
+	if (state->page.rows.size() < bind_data.options.fetch_size) {
+		// Short, so this may well be the whole result -- and if it is, the
+		// ordering is not needed and the first page can be kept as fetched.
+		// Asked unordered on purpose: the answer wanted here is only whether
+		// anything at all lies past what has been read.
+		const auto probe = FetchPageOf(*bind_data.transport, bind_data, bind_data.sql, context,
+		                               state->page.rows.size());
+		if (probe.rows.empty()) {
+			state->more_pages = false;
+			return std::move(state);
+		}
+		RefuseARepeatedPage(state->page, probe, state->page.rows.size());
+	}
+
+	if (bind_data.first_page_needs_reordering) {
+		// More than one page exists, so the pages have to partition the result
+		// rather than sample it -- including the first, which was fetched
+		// before the ordering was known. Nothing has been emitted yet, so
+		// replacing it is free apart from the request.
+		state->page = FetchPage(*bind_data.transport, bind_data, context, 0);
+	}
+	state->more_pages = !state->page.rows.empty();
 	return std::move(state);
 }
 
@@ -256,9 +334,12 @@ void FusionQueryScan(ClientContext &context, TableFunctionInput &data, DataChunk
 			output.SetCardinality(0);
 			return;
 		}
-		state.page = FetchPage(*bind_data.transport, bind_data, context, state.rows_emitted);
+		auto fetched = FetchPage(*bind_data.transport, bind_data, context, state.rows_emitted);
+		RefuseARepeatedPage(state.page, fetched, state.rows_emitted);
+		state.page = std::move(fetched);
 		state.offset_in_page = 0;
-		state.more_pages = state.page.rows.size() == bind_data.options.fetch_size;
+		// Only an empty page ends the scan; see FusionQueryInitGlobal.
+		state.more_pages = !state.page.rows.empty();
 	}
 
 	const idx_t to_emit =

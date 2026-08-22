@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS CACHED_COLUMNS (
     PRIMARY KEY (ENDPOINT_KEY, TABLE_NAME, COLUMN_NAME)
 ))";
 
+//! Written as the sole row of a table whose column list came back empty, so
+//! that "asked, and the answer was nothing" is distinguishable from "never
+//! asked". Not a legal Oracle column name, which is what keeps it unambiguous.
+constexpr const char *NO_COLUMNS_MARKER = "!ofquack:no-columns";
+
 std::string DefaultCachePath() {
 	auto fs = FileSystem::CreateLocal();
 	const auto home = fs->GetHomeDirectory();
@@ -215,8 +220,9 @@ idx_t MetadataCache::CountColumns(const std::string &endpoint_key) {
 	if (!connection) {
 		return 0;
 	}
+	// The marker rows are bookkeeping, not columns anyone asked about.
 	auto result = connection->Query("SELECT count(*) FROM CACHED_COLUMNS WHERE ENDPOINT_KEY = '" +
-	                                Escape(endpoint_key) + "'");
+	                                Escape(endpoint_key) + "' AND COLUMN_NAME <> '" + NO_COLUMNS_MARKER + "'");
 	if (!result || result->HasError() || result->RowCount() != 1) {
 		return 0;
 	}
@@ -305,6 +311,10 @@ bool MetadataCache::TryGetColumns(const std::string &endpoint_key, const std::st
 			ofquack::ColumnInfo column;
 			column.table_name = table_name;
 			column.name = result->GetValue(0, row).ToString();
+			if (column.name == NO_COLUMNS_MARKER) {
+				// A recorded empty answer: cached, and cached as empty.
+				continue;
+			}
 			column.type_name = result->GetValue(1, row).IsNull() ? "" : result->GetValue(1, row).ToString();
 			column.precision = result->GetValue(2, row).IsNull() ? 0 : result->GetValue(2, row).GetValue<int64_t>();
 			column.scale = result->GetValue(3, row).IsNull() ? 0 : result->GetValue(3, row).GetValue<int64_t>();
@@ -357,6 +367,26 @@ void MetadataCache::PutColumns(const std::string &endpoint_key, const std::strin
 		                  "' AND upper(TABLE_NAME) = upper('" + Escape(table_name) + "')");
 		Appender appender(*connection, "CACHED_COLUMNS");
 		const auto now = Value::BIGINT(NowEpochSeconds());
+		if (columns.empty()) {
+			// "This table has no columns we can read" is an answer, and one that
+			// cost a request to obtain. Without something written down it is
+			// indistinguishable from never having asked, so every connection
+			// would ask again -- for exactly the objects Fusion refuses to
+			// describe, which are the ones most likely to be looked at twice.
+			// The marker is filtered out on the way back.
+			appender.BeginRow();
+			appender.Append(Value(endpoint_key));
+			appender.Append(Value(table_name));
+			appender.Append(Value(std::string(NO_COLUMNS_MARKER)));
+			appender.Append(Value(std::string()));
+			appender.Append(Value::BIGINT(0));
+			appender.Append(Value::BIGINT(0));
+			appender.Append(Value::BIGINT(-1));
+			appender.Append(Value::BOOLEAN(true));
+			appender.Append(Value(std::string()));
+			appender.Append(now);
+			appender.EndRow();
+		}
 		for (const auto &column : columns) {
 			appender.BeginRow();
 			appender.Append(Value(endpoint_key));

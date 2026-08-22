@@ -26,4 +26,10 @@ struct DictionaryColumnType {
 //! codes (C, V, N, D, T) are recognised alongside the full Oracle names.
 DictionaryColumnType MapOracleType(const std::string &type_name, int64_t precision, int64_t scale);
 
+//! False for the Oracle types that cannot appear in an ORDER BY: the large
+//! object types, LONG, and the object types built on them. Sorting by one of
+//! these is ORA-00932, so a statement paged by ordering on every column has to
+//! leave them out.
+bool IsSortableOracleType(const std::string &type_name);
+
 } // namespace ofquack

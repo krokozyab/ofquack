@@ -158,6 +158,26 @@ void TestParseRowsReadsNestedDocument() {
 	CHECK(report.columns.size() == 2);
 }
 
+//! A damaged block used to be skipped, and the rows of the blocks that did
+//! parse were handed back as the answer. There is no way for a caller to see
+//! that, which makes it the one failure worth being loud about.
+void TestDamagedResultBlockIsReported() {
+	CHECK(Throws([]() { ParseRows("<DATA_DS><G_1><RESULT>&lt;ROWSET&gt;&lt;ROW&gt;</RESULT></G_1></DATA_DS>"); }));
+
+	// Two blocks, the second unreadable: the rows of the first must not be
+	// passed off as the whole result.
+	CHECK(Throws([]() {
+		ParseRows("<DATA_DS><G_1>"
+		          "<RESULT>&lt;ROWSET&gt;&lt;ROW&gt;&lt;N&gt;1&lt;/N&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;</RESULT>"
+		          "<RESULT>&lt;ROWSET&gt;&lt;ROW&gt;</RESULT>"
+		          "</G_1></DATA_DS>");
+	}));
+
+	// An empty block is a result set with no rows, which is an answer.
+	const auto empty = ParseRows("<DATA_DS><G_1><RESULT></RESULT></G_1></DATA_DS>");
+	CHECK(empty.rows.empty());
+}
+
 //! Column order follows the document, which follows the SELECT list. This used
 //! to come out of a std::set, so it was alphabetical and a SELECT of A, B came
 //! back as B, A whenever the names sorted that way.
@@ -494,6 +514,69 @@ void TestPaginationClassification() {
 	CHECK(ClassifyForPagination("SELECT a FROM t WHERE note = 'ROWNUM'", 500) == PaginationVerdict::YES);
 }
 
+//! OFFSET/FETCH only partitions a result the server has ordered, so knowing
+//! whether the author supplied an order decides whether one has to be added.
+void TestOrderByDetection() {
+	using ofquack::HasOrderBy;
+
+	CHECK(!HasOrderBy("SELECT a FROM t"));
+	CHECK(HasOrderBy("SELECT a FROM t ORDER BY a"));
+	CHECK(HasOrderBy("SELECT a FROM t ORDER BY a DESC, b"));
+
+	// A literal is data, not a clause.
+	CHECK(!HasOrderBy("SELECT 'ORDER BY' FROM t"));
+	// ORDER is a column name often enough, and BY belongs to other clauses.
+	CHECK(!HasOrderBy("SELECT \"ORDER\" FROM t"));
+	CHECK(!HasOrderBy("SELECT a, count(*) FROM t GROUP BY a"));
+	// Both present, in that order: the ORDER BY is still there.
+	CHECK(HasOrderBy("SELECT a, count(*) FROM t GROUP BY a ORDER BY a"));
+	// ORDER without a BY after it is not the clause.
+	CHECK(!HasOrderBy("SELECT ORDER FROM t WHERE x = 1"));
+}
+
+void TestOrderingRewrites() {
+	using ofquack::AppendOrderByPositions;
+	using ofquack::WrapWithOrderBy;
+
+	CHECK(AppendOrderByPositions("SELECT a, b FROM t", {1, 2}) == "SELECT a, b FROM t ORDER BY 1, 2");
+	// A trailing semicolon would land in the middle of the rewrite.
+	CHECK(AppendOrderByPositions("SELECT a FROM t;", {1}) == "SELECT a FROM t ORDER BY 1");
+	// Nothing sortable to order by: the statement is left as it is rather than
+	// given an empty clause.
+	CHECK(AppendOrderByPositions("SELECT a FROM t", {}) == "SELECT a FROM t");
+	// Positions may skip a column, which is what keeps a CLOB out of the order.
+	CHECK(AppendOrderByPositions("SELECT a, doc, b FROM t", {1, 3}) == "SELECT a, doc, b FROM t ORDER BY 1, 3");
+
+	// Wrapped rather than appended to: appending would attach the clause to the
+	// last branch of a UNION rather than to the result as a whole.
+	CHECK(WrapWithOrderBy("SELECT a FROM t UNION ALL SELECT a FROM u", 1) ==
+	      "SELECT * FROM (SELECT a FROM t UNION ALL SELECT a FROM u) ORDER BY 1");
+	CHECK(WrapWithOrderBy("SELECT a, b, c FROM t", 3) == "SELECT * FROM (SELECT a, b, c FROM t) ORDER BY 1, 2, 3");
+}
+
+//! Sorting by a LOB is ORA-00932, so those columns have to stay out of an
+//! ordering that exists only to make paging deterministic.
+void TestSortableOracleTypes() {
+	using ofquack::IsSortableOracleType;
+
+	CHECK(IsSortableOracleType("VARCHAR2"));
+	CHECK(IsSortableOracleType("NUMBER"));
+	CHECK(IsSortableOracleType("DATE"));
+	CHECK(IsSortableOracleType("TIMESTAMP(6)"));
+
+	CHECK(!IsSortableOracleType("CLOB"));
+	CHECK(!IsSortableOracleType("clob"));
+	CHECK(!IsSortableOracleType("NCLOB"));
+	CHECK(!IsSortableOracleType("BLOB"));
+	CHECK(!IsSortableOracleType("LONG RAW"));
+	CHECK(!IsSortableOracleType("XMLTYPE"));
+
+	// An unknown type is assumed sortable: dropping columns from the order for
+	// no reason weakens it for every type the map has not learned yet.
+	CHECK(IsSortableOracleType("SOME_FUTURE_TYPE"));
+	CHECK(IsSortableOracleType(""));
+}
+
 void TestApplyPagination() {
 	CHECK(ofquack::ApplyPagination("SELECT a FROM t", 0, 500) ==
 	      "SELECT a FROM t OFFSET 0 ROWS FETCH NEXT 500 ROWS ONLY");
@@ -672,6 +755,18 @@ void TestTableListingSeeksRatherThanOffsets() {
 
 	// A name with an apostrophe must not break out of the literal.
 	CHECK(Contains(TablesAfter({}, "O'BRIEN", "TABLE", 10), "'O''BRIEN'"));
+}
+
+//! The count exists to be compared against what a listing produced, so it has
+//! to count the same things. The listing collapses a name that exists as both
+//! a table and a view onto one entry; counting rows of the union would exceed
+//! it by however many names overlap, and every complete listing would then be
+//! reported as short.
+void TestTableCountCountsDistinctNames() {
+	const auto sql = ofquack::metadata::TableCount({"TABLE", "VIEW"});
+	CHECK(Contains(sql, "COUNT(DISTINCT UPPER(t.table_name))"));
+	CHECK(Contains(sql, "FND_VIEWS"));
+	CHECK(Contains(sql, "FND_TABLES"));
 }
 
 //! The dictionary aliases are shifted by one: the column labelled
@@ -1000,6 +1095,36 @@ void TestBreakerProbesAfterRecoveryWindow() {
 	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::CLOSED);
 }
 
+//! Half-open means one probe, not "everyone who arrives after the wait".
+//! Letting them all through is the stampede into a sick instance the breaker
+//! exists to prevent, and with BI Publisher each of them leaves a session
+//! behind on a server that is already struggling.
+void TestBreakerAdmitsOnlyOneProbe() {
+	ofquack::CircuitBreaker breaker(ofquack::CircuitBreakerSettings {1, 60000});
+	TestClock clock;
+	breaker.SetClockForTesting(clock.Fn());
+
+	breaker.RecordFailure();
+	clock.Advance(61000);
+
+	breaker.RequireClosed("host");
+	// The probe is out and has not reported back, so the next caller waits.
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+
+	// Once it reports, the breaker is closed and everyone goes through.
+	breaker.RecordSuccess();
+	breaker.RequireClosed("host");
+	breaker.RequireClosed("host");
+
+	// The same holds after a failed probe: the wait restarts, and when it is
+	// over exactly one caller gets to try again.
+	breaker.RecordFailure();
+	clock.Advance(61000);
+	breaker.RequireClosed("host");
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+}
+
 //! The error names the host and says how long the wait is, since "circuit open"
 //! on its own tells an analyst nothing actionable.
 void TestBreakerErrorIsInformative() {
@@ -1067,6 +1192,7 @@ const TestCase TESTS[] = {
     {"extract ignores namespace prefixes", TestExtractIgnoresNamespacePrefixes},
     {"extract rejects malformed responses", TestExtractRejectsMalformedResponses},
     {"parse rows reads nested document", TestParseRowsReadsNestedDocument},
+    {"a damaged result block is reported", TestDamagedResultBlockIsReported},
     {"column order follows the select list", TestColumnOrderFollowsTheSelectList},
     {"column list is deduplicated across rows", TestColumnListIsDeduplicatedAcrossRows},
     {"parse rows omits null columns", TestParseRowsOmitsNullColumns},
@@ -1099,6 +1225,7 @@ const TestCase TESTS[] = {
     {"metadata queries escape literals", TestMetadataQueriesEscapeLiterals},
     {"offset pagination", TestOffsetPagination},
     {"table listing seeks rather than offsets", TestTableListingSeeksRatherThanOffsets},
+    {"table count counts distinct names", TestTableCountCountsDistinctNames},
     {"oracle type mapping", TestOracleTypeMapping},
     {"jwt claims", TestJwtClaims},
     {"base64url decoding", TestBase64UrlDecoding},
@@ -1115,7 +1242,11 @@ const TestCase TESTS[] = {
     {"breaker opens after consecutive failures", TestBreakerOpensAfterConsecutiveFailures},
     {"breaker resets on success", TestBreakerResetsOnSuccess},
     {"breaker probes after recovery window", TestBreakerProbesAfterRecoveryWindow},
+    {"breaker admits only one probe", TestBreakerAdmitsOnlyOneProbe},
     {"breaker error is informative", TestBreakerErrorIsInformative},
+    {"order by detection", TestOrderByDetection},
+    {"ordering rewrites", TestOrderingRewrites},
+    {"sortable oracle types", TestSortableOracleTypes},
     {"host of", TestHostOf},
     {"throttle serialises concurrent callers", TestThrottleSerialisesConcurrentCallers},
 };

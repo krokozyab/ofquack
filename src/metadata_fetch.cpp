@@ -142,8 +142,16 @@ int TypePriority(const std::string &type) {
 } // namespace
 
 std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
-                                   const std::vector<std::string> &types, uint64_t page_size) {
+                                   const std::vector<std::string> &types, uint64_t page_size,
+                                   int64_t *expected_out) {
 	const auto rows_per_page = page_size > 0 ? page_size : metadata::PAGE_SIZE;
+	// Asked before the listing rather than after, so that a listing which comes
+	// back short is recognised as short by whoever asked for it -- the catalog
+	// and the cache warmer just as much as oracle_fusion_tables().
+	const auto expected = FetchTableCount(transport, context, types);
+	if (expected_out) {
+		*expected_out = expected;
+	}
 	// Paged by seeking from the last name seen rather than by OFFSET: see
 	// TablesAfter for why depth-proportional paging fails against this report.
 	std::vector<ReportRow> rows;
@@ -219,6 +227,22 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 	}
 	std::sort(tables.begin(), tables.end(),
 	          [](const TableInfo &a, const TableInfo &b) { return Upper(a.name) < Upper(b.name); });
+
+	if (expected >= 0 && static_cast<int64_t>(tables.size()) < expected) {
+		// Where it stopped is the useful part: it says more about why than the
+		// count does. Thrown rather than returned, because a partial dictionary
+		// that looks complete gets cached, and every later lookup then misses
+		// without anything to show for it.
+		const auto reached = tables.empty() ? std::string("nothing") : tables.back().name;
+		throw PermanentError(
+		    "Oracle Fusion says its dictionary holds " + std::to_string(expected) +
+		    " tables and views but the listing returned only " + std::to_string(tables.size()) + ", stopping after " +
+		    reached +
+		    ".\nThe list is incomplete and has not been cached. This is a limit on the report rather than on the "
+		    "query -- retry, and if it stops in the same place again, ask for smaller pages: SET "
+		    "ofquack_metadata_page_size = " +
+		    std::to_string(rows_per_page / 2) + ".");
+	}
 	return tables;
 }
 
@@ -230,6 +254,11 @@ int64_t FetchTableCount(FusionTransport &transport, const RequestContext &contex
 			return -1;
 		}
 		return IntField(rows.front(), "TABLE_COUNT", -1);
+	} catch (const CancelledError &) {
+		// Cancellation is not "the instance would not answer": swallowing it
+		// here would start the far more expensive listing right after the user
+		// pressed Ctrl-C.
+		throw;
 	} catch (const FusionError &) {
 		// A count is a convenience, not a requirement: an instance that will
 		// not answer it must not stop the listing that follows.

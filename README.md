@@ -97,6 +97,7 @@ parameters override whatever the secret carries:
 | `fetch_size` | Rows per request, 1–10000. `0` disables paging. |
 | `all_varchar` | Return every column as VARCHAR instead of inferring types. |
 | `secured_views` | Rewrite HR tables to their `*_SECURED_LIST_V` views. |
+| `stable_paging` | Order a paged statement by every column it returns. On by default; see below. |
 
 ### Paging
 
@@ -106,6 +107,30 @@ no other paging mechanism. The rewrite is skipped, and one request made, when
 the statement already carries `OFFSET`/`FETCH`, uses `ROWNUM`, or is not a
 SELECT. A keyword inside a string literal does not count, so
 `SELECT 'OFFSET' FROM t` is still paged.
+
+`OFFSET`/`FETCH` divides a result the server has put in order. Each page is a
+separate execution of your statement, and Oracle does not promise two
+executions the same row order, so paging a statement with no `ORDER BY` can
+return a page that repeats rows the previous one gave you and skips others —
+with nothing about the result to show for it. A statement without an `ORDER BY`
+is therefore wrapped in one over every column it returns:
+
+```sql
+SELECT * FROM (SELECT NAME, CODE FROM FND_CURRENCIES_TL) ORDER BY 1, 2
+```
+
+Ordering by all of them is what makes it a total order on your rows; two rows
+that tie on every column are interchangeable, so it does not matter which side
+of a page boundary they land on. Writing your own `ORDER BY` avoids the wrapper
+and the extra request it costs, and is usually cheaper for the server if you
+order by an indexed key. `stable_paging := false`, or
+`SET ofquack_stable_paging = false`, turns it off; expect repeated and missing
+rows if you do.
+
+A scan ends on an empty page, not on a short one, so every result costs one
+request past the last one that had rows. BI Publisher truncates a response that
+grows too large without saying so, which makes a short page and a final page
+look exactly alike; the extra request is what tells them apart.
 
 Oracle hints survive: `/*+ FIRST_ROWS(1000) */` reaches the server even though
 it is lexically a comment.

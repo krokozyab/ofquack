@@ -48,6 +48,8 @@ private:
 	mutable std::mutex lock;
 	State state = State::CLOSED;
 	uint32_t consecutive_failures = 0;
+	//! Set while a half-open probe is out, so only one request is let through.
+	bool probe_in_flight = false;
 	std::chrono::steady_clock::time_point opened_at;
 	std::function<std::chrono::steady_clock::time_point()> now_fn;
 };

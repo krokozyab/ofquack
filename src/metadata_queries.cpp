@@ -110,7 +110,11 @@ std::string TablesAfter(const std::vector<std::string> &types, const std::string
 std::string TableCount(const std::vector<std::string> &types) {
 	const auto type_list = types.empty() ? std::string("'TABLE','VIEW'") : JoinQuoted(types);
 	std::ostringstream oss;
-	oss << "SELECT COUNT(*) AS TABLE_COUNT FROM ("
+	// Distinct by name, because the listing this is compared against collapses a
+	// name that exists as both a table and a view onto one entry. Counting rows
+	// would exceed a complete listing by however many names overlap, and every
+	// complete listing would then be reported as short.
+	oss << "SELECT COUNT(DISTINCT UPPER(t.table_name)) AS TABLE_COUNT FROM ("
 	    << "SELECT view_name AS table_name, 'VIEW' AS table_type FROM FND_VIEWS"
 	    << " UNION ALL"
 	    << " SELECT table_name, 'TABLE' AS table_type FROM FND_TABLES) t"

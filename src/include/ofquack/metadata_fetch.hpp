@@ -25,16 +25,20 @@ struct ColumnInfo {
 	std::string remarks;
 };
 
-//! Lists tables and views. Cost: one request per PAGE_SIZE rows.
-std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
-                                   const std::vector<std::string> &types, uint64_t page_size = 0);
-
-//! How many tables and views the dictionary holds, in one request.
+//! Lists tables and views. Cost: one request per PAGE_SIZE rows, plus one.
 //!
-//! Compared against what a listing produced, this is what turns a silently
-//! partial dictionary into a visible one. Returns -1 when the instance does
-//! not answer -- unknown is not the same as zero, and must not be reported as
-//! a shortfall.
+//! The extra request is the instance's own count, asked first and compared
+//! against what the listing produced. A listing that comes back short throws
+//! rather than returning: it would otherwise be cached and serve a partial
+//! dictionary for a week, and a caller has no way of telling that from a
+//! complete one. `expected_out` receives that count, or -1 if the instance
+//! would not answer -- unknown is not the same as zero.
+std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
+                                   const std::vector<std::string> &types, uint64_t page_size = 0,
+                                   int64_t *expected_out = nullptr);
+
+//! How many distinct tables and views the dictionary holds, in one request.
+//! Returns -1 when the instance will not answer.
 int64_t FetchTableCount(FusionTransport &transport, const RequestContext &context,
                         const std::vector<std::string> &types);
 
