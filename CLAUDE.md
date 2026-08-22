@@ -228,10 +228,51 @@ time: the report truncates a response past roughly 500 rows.
 Unlike the JDBC driver, names are escaped before interpolation (`QuoteLiteral`) and non-numeric
 `TABLE_ID`s are dropped rather than concatenated.
 
+## ATTACH
+
+```sql
+ATTACH 'my_secret' AS f (TYPE oracle_fusion);
+SELECT NAME FROM f.main.GL_JE_HEADERS WHERE ...;
+```
+
+`FusionCatalog` derives from `DuckCatalog` and hangs a `DefaultGenerator` on the table
+`CatalogSet`. That is what makes laziness cheap:
+
+- **`ATTACH` costs zero requests.** The schema is fixed and the secret is already known.
+- `SELECT … FROM f.main.T` resolves through `CreateDefaultEntry(name)` — one table's columns,
+  no schema listing.
+- `GetDefaultEntries()` (the expensive one) answers only from cache and never goes to the
+  network, so `SHOW TABLES` on a cold catalog lists nothing rather than blocking for minutes.
+  Warm it with `oracle_fusion_tables()`.
+- Column types come from the dictionary here, not from inference.
+
+Things that will bite if changed:
+
+- `Create()` returns `nullptr` for an unknown name. That is not an error — DuckDB asks every
+  attached catalog about names belonging to none of them, and a catalog that throws breaks
+  those lookups.
+- `GetStorage()` must throw `NotImplementedException`. The base implementation throws
+  `InternalException`, which marks the database invalid and kills the connection.
+- `GetVirtualColumns()`/`GetRowIdColumns()` return empty. A report has no rowid, and the
+  default offers one, after which the scan is handed a column id it cannot map.
+- `CreateSchema` must delegate for `main`: `DuckCatalog::Initialize` creates it through there.
+- `SupportsCreateTable` is a separate hook — `CREATE TABLE` does not go through
+  `PlanCreateTableAs`, so without it a local table would quietly appear inside the catalog and
+  shadow a real Fusion one.
+- The attachment is **not** marked `READ_ONLY`: DuckDB refuses an in-memory database in
+  read-only mode, and `info.path` is replaced with `:memory:` because a `DuckCatalog` opens a
+  local storage manager from it. Read-only is enforced by the catalog's own refusals instead.
+
+Projection pushdown is always on: every selected column travels back as base64-encoded XML.
+Filter pushdown is behind `ofquack_filter_pushdown`, **off by default** — DuckDB removes a
+filter it has handed to a scan, so anything not translatable exactly must fail rather than be
+approximated. Refused on purpose: ordered comparison on text (depends on `NLS_SORT`), the empty
+string (Oracle stores `''` as NULL), bare date literals (`NLS_DATE_FORMAT`), `IN` past 1000,
+and any column whose type was inferred rather than read from the dictionary.
+
 ## Still outstanding
 
-- `AUTH 'bearer'` and `PROVIDER browser` are registered but throw;
-- no ATTACH: the catalog does not exist yet, so tables are reached through
-  `oracle_fusion_query` rather than by name;
-- dictionary types are reported by `oracle_fusion_columns` but not yet used to type a scan —
-  inference from the data is still what `oracle_fusion_query` uses.
+- `AUTH 'bearer'` and `PROVIDER browser` are registered but throw — SSO is the next stage;
+- `ofquack_cache_warm()` does not exist; warm the catalog with `oracle_fusion_tables()`;
+- primary keys and foreign keys are fetched by `metadata_fetch` but not surfaced as constraints
+  on an attached table.

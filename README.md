@@ -134,6 +134,41 @@ SELECT * FROM oracle_fusion_query(sql);
 Calling the old name reports this migration rather than "function does not
 exist". That stub will be removed in a later release.
 
+## Attaching Fusion as a database
+
+```sql
+ATTACH 'fusion' AS f (TYPE oracle_fusion);       -- 'fusion' is the secret name
+SELECT NAME FROM f.main.GL_JE_HEADERS WHERE LEDGER_ID = 1;
+```
+
+Tables appear with the types Fusion's dictionary declares, rather than types
+guessed from the data. The attachment is read-only — BI Publisher cannot write
+— and `INSERT`, `UPDATE`, `DELETE` and `CREATE TABLE` are refused with an
+explanation.
+
+`ATTACH` itself makes no request. The first query about a table fetches that
+table's columns; nothing reads the whole dictionary unless you ask it to. As a
+consequence `SHOW TABLES` lists only what has been cached so far — run
+`SELECT * FROM oracle_fusion_tables()` once to populate it.
+
+Only the columns you select are requested, which matters here: every column
+travels back as base64-encoded XML.
+
+### Pushing filters down
+
+```sql
+SET ofquack_filter_pushdown = true;
+```
+
+Off by default. When on, `WHERE` predicates are translated into the statement
+sent to Fusion. A predicate that cannot be translated *exactly* raises an error
+rather than being approximated, because DuckDB removes a pushed-down filter
+from its own plan — an approximation would silently return wrong rows.
+
+Refused on purpose: ordered comparison of text (Oracle's collation depends on
+`NLS_SORT`), comparison with `''` (Oracle stores it as NULL), and `IN` lists
+past Oracle's limit of 1000.
+
 ## Browsing the dictionary
 
 ```sql

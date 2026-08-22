@@ -36,6 +36,8 @@ set(EXTENSION_SOURCES
         src/fusion_connection.cpp
         src/fusion_query_function.cpp
         src/metadata_functions.cpp
+        src/fusion_catalog.cpp
+        src/fusion_filter.cpp
         src/soap_envelope.cpp
         src/xml_report.cpp
         src/error_decoder.cpp

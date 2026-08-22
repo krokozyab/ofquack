@@ -884,6 +884,253 @@ void TestSecuredViewsIsOffByDefault() {
 	CHECK(script.executed_sql[0].find("PER_ALL_PEOPLE_F") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// ATTACH
+// ---------------------------------------------------------------------------
+
+//! Serves the dictionary and then rows for GL_JE_HEADERS, recording the
+//! statements so a test can assert what was actually sent.
+class CatalogTransport : public FusionTransport {
+public:
+	explicit CatalogTransport(Script &script_p) : script(script_p) {
+	}
+
+	std::string Execute(const std::string &sql, const RequestContext &) override {
+		script.executed_sql.push_back(sql);
+
+		if (sql.find("FND_VIEWS") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;"
+			    "&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;101&lt;/TABLE_ID&gt;&lt;/ROW&gt;"
+			    "&lt;/ROWSET&gt;"));
+		}
+		if (sql.find("FND_COLUMNS") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;JE_HEADER_ID"
+			    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;NUMBER&lt;/TYPE_NAME&gt;&lt;DECIMAL_DIGITS&gt;9"
+			    "&lt;/DECIMAL_DIGITS&gt;&lt;NUM_PREC_RADIX&gt;0&lt;/NUM_PREC_RADIX&gt;&lt;ORDINAL_POSITION&gt;1"
+			    "&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;NAME"
+			    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;&lt;ORDINAL_POSITION&gt;2"
+			    "&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
+			    "&lt;/ROWSET&gt;"));
+		}
+		// A scan of the table itself.
+		return MakeSoapResponse(MakeReportXML(
+		    "&lt;ROWSET&gt;"
+		    "&lt;ROW&gt;&lt;JE_HEADER_ID&gt;1&lt;/JE_HEADER_ID&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;/ROW&gt;"
+		    "&lt;ROW&gt;&lt;JE_HEADER_ID&gt;2&lt;/JE_HEADER_ID&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;/ROW&gt;"
+		    "&lt;/ROWSET&gt;"));
+	}
+
+private:
+	Script &script;
+};
+
+ScopedTransportFactory InstallCatalog(Script &script) {
+	return ScopedTransportFactory(
+	    [&script](const FusionConfig &) { return std::make_shared<CatalogTransport>(script); });
+}
+
+void Attach(Connection &connection) {
+	auto result = connection.Query("ATTACH 'fusion' AS fus (TYPE oracle_fusion)");
+	if (result->HasError()) {
+		std::cerr << "ATTACH failed: " << result->GetError() << std::endl;
+		std::abort();
+	}
+}
+
+//! ATTACH must be free. The schema is fixed and the secret is already known, so
+//! there is nothing to ask Fusion -- and a multi-second ATTACH would be felt on
+//! every session start.
+void TestAttachCostsNoRequests() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	CHECK(script.executed_sql.empty());
+}
+
+void TestSelectFromAttachedTable() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	auto result = RunQuery(connection, "SELECT * FROM fus.main.GL_JE_HEADERS ORDER BY JE_HEADER_ID");
+	CHECK(result->RowCount() == 2);
+	CHECK(result->ColumnCount() == 2);
+	// The types come from Fusion's dictionary, not from looking at the data.
+	CHECK(result->types[0] == duckdb::LogicalType::INTEGER);
+	CHECK(result->types[1] == duckdb::LogicalType::VARCHAR);
+	CHECK(result->GetValue(1, 0).ToString() == "Alpha");
+}
+
+//! Every selected column travels back as base64-encoded XML, so a projection is
+//! a bandwidth decision rather than a micro-optimisation.
+void TestProjectionReachesTheStatement() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+
+	// The last statement is the scan; earlier ones are dictionary reads.
+	const auto &scan_sql = script.executed_sql.back();
+	CHECK(scan_sql.find("\"NAME\"") != std::string::npos);
+	CHECK(scan_sql.find("JE_HEADER_ID") == std::string::npos);
+	CHECK(scan_sql.find("FROM \"GL_JE_HEADERS\"") != std::string::npos);
+}
+
+void TestCountStarReadsOneColumnAndEmitsNone() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	auto result = RunQuery(connection, "SELECT count(*) FROM fus.main.GL_JE_HEADERS");
+	CHECK(result->GetValue(0, 0).GetValue<int64_t>() == 2);
+	// Oracle needs a select list even when no values are wanted.
+	CHECK(script.executed_sql.back().find("SELECT ") == 0);
+}
+
+//! DuckDB removes a filter it has handed to a scan, so pushing one that cannot
+//! be translated exactly would silently change the answer. Off by default.
+void TestFilterPushdownIsOffByDefault() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS WHERE JE_HEADER_ID = 1");
+
+	CHECK(script.executed_sql.back().find("WHERE") == std::string::npos);
+}
+
+void TestFilterPushdownWhenEnabled() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+	RunQuery(connection, "SET ofquack_filter_pushdown = true");
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS WHERE JE_HEADER_ID = 1");
+
+	const auto &scan_sql = script.executed_sql.back();
+	CHECK(scan_sql.find("WHERE") != std::string::npos);
+	CHECK(scan_sql.find("\"JE_HEADER_ID\" = 1") != std::string::npos);
+}
+
+//! Ordering text depends on NLS_SORT, which this connection does not negotiate,
+//! so the comparison Oracle would make need not be the one DuckDB would.
+void TestUntranslatableFilterIsRefusedRatherThanApproximated() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+	RunQuery(connection, "SET ofquack_filter_pushdown = true");
+
+	auto result = connection.Query("SELECT NAME FROM fus.main.GL_JE_HEADERS WHERE NAME > 'M'");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("ofquack_filter_pushdown") != std::string::npos);
+}
+
+void TestAttachedCatalogIsReadOnly() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	for (const auto *statement : {"INSERT INTO fus.main.GL_JE_HEADERS VALUES (3, 'Gamma')",
+	                              "CREATE TABLE fus.main.T (a INTEGER)", "DELETE FROM fus.main.GL_JE_HEADERS",
+	                              "UPDATE fus.main.GL_JE_HEADERS SET NAME = 'x'", "CREATE SCHEMA fus.other"}) {
+		auto result = connection.Query(statement);
+		CHECK(result->HasError());
+		// A clear refusal, not an internal error -- an InternalException would
+		// mark the database invalid and kill the connection.
+		CHECK(result->GetError().find("Internal Error") == std::string::npos);
+	}
+
+	// The connection still works afterwards.
+	auto after = RunQuery(connection, "SELECT count(*) FROM fus.main.GL_JE_HEADERS");
+	CHECK(after->GetValue(0, 0).GetValue<int64_t>() == 2);
+}
+
+//! A name that belongs to no attached catalog must come back as "not found",
+//! not as an error from ours: DuckDB asks every catalog about every name.
+void TestUnknownTableInAttachedCatalog() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	auto result = connection.Query("SELECT * FROM fus.main.NO_SUCH_TABLE");
+	CHECK(result->HasError());
+	CHECK(result->GetError().find("NO_SUCH_TABLE") != std::string::npos);
+}
+
+//! SHOW TABLES lists what is already known rather than blocking on a
+//! multi-second dictionary read; warming the cache is what fills it in.
+void TestShowTablesListsCachedNamesOnly() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	auto cold = RunQuery(connection, "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fus'");
+	CHECK(cold->GetValue(0, 0).GetValue<int64_t>() == 0);
+	CHECK(script.executed_sql.empty());
+
+	// Warm the cache through the metadata function, then attach again.
+	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	RunQuery(connection, "DETACH fus");
+	Attach(connection);
+
+	auto warm = RunQuery(connection, "SELECT table_name FROM duckdb_tables() WHERE database_name = 'fus'");
+	CHECK(warm->RowCount() == 1);
+	CHECK(warm->GetValue(0, 0).ToString() == "GL_JE_HEADERS");
+}
+
 struct TestCase {
 	const char *name;
 	void (*run)();
@@ -927,6 +1174,16 @@ const TestCase TESTS[] = {
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
     {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},
     {"secured views is off by default", TestSecuredViewsIsOffByDefault},
+    {"attach costs no requests", TestAttachCostsNoRequests},
+    {"select from attached table", TestSelectFromAttachedTable},
+    {"projection reaches the statement", TestProjectionReachesTheStatement},
+    {"count star reads one column and emits none", TestCountStarReadsOneColumnAndEmitsNone},
+    {"filter pushdown is off by default", TestFilterPushdownIsOffByDefault},
+    {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},
+    {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},
+    {"attached catalog is read-only", TestAttachedCatalogIsReadOnly},
+    {"unknown table in attached catalog", TestUnknownTableInAttachedCatalog},
+    {"show tables lists cached names only", TestShowTablesListsCachedNamesOnly},
 };
 
 } // namespace
