@@ -30,7 +30,13 @@ project(${TARGET_NAME})
 
 include_directories(src/include)
 
-set(EXTENSION_SOURCES src/ofquack_extension.cpp
+set(EXTENSION_SOURCES
+        src/ofquack_extension.cpp
+        src/soap_envelope.cpp
+        src/xml_report.cpp
+        src/transport.cpp
+        src/soap_transport.cpp
+        src/http_curl.cpp
         src/base64.cpp
 )
 
@@ -53,6 +59,35 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} tinyxml2::tinyxml2)
 # Link libcurl into the loadable extension
 target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
+
+option(OFQUACK_BUILD_TESTS "Build the ofquack C++ unit tests" ON)
+if(OFQUACK_BUILD_TESTS)
+  enable_testing()
+
+  # The pure suite links neither DuckDB nor libcurl: it covers envelope
+  # construction and report parsing only, so it builds and runs in about a
+  # second and is cheap enough for every push.
+  add_executable(ofquack_pure_test
+                 test/cpp/pure_test.cpp
+                 src/soap_envelope.cpp
+                 src/xml_report.cpp
+                 src/base64.cpp)
+  target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2)
+  target_include_directories(ofquack_pure_test PRIVATE src src/include)
+  target_compile_features(ofquack_pure_test PRIVATE cxx_std_17)
+  add_test(NAME ofquack_pure_test COMMAND ofquack_pure_test)
+
+  # The adapter suite links DuckDB so it can drive the table function against a
+  # transport installed through ScopedTransportFactory, with no database file
+  # and no network. duckdb_static is defined later in the DuckDB tree than this
+  # file is processed, so it is named rather than probed with if(TARGET).
+  add_executable(ofquack_adapter_test test/cpp/adapter_test.cpp)
+  target_link_libraries(ofquack_adapter_test PRIVATE duckdb_static)
+  link_extension_libraries(ofquack_adapter_test PRIVATE)
+  target_include_directories(ofquack_adapter_test PRIVATE src src/include)
+  target_compile_features(ofquack_adapter_test PRIVATE cxx_std_17)
+  add_test(NAME ofquack_adapter_test COMMAND ofquack_adapter_test)
+endif()
 
 install(
         TARGETS ${EXTENSION_NAME}

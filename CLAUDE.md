@@ -34,6 +34,15 @@ Artifacts: `build/release/duckdb` (shell with the extension linked in),
 
 Single test file: `./build/release/test/unittest test/sql/ofquack.test`.
 
+The C++ suites are registered in the extension's own subdirectory, so the
+top-level `ctest` reports zero tests — run them there:
+
+```sh
+ctest --test-dir build/release/extension/ofquack
+./build/release/extension/ofquack/ofquack_pure_test      # ~1s, no DuckDB, no network
+./build/release/extension/ofquack/ofquack_adapter_test   # drives the table function
+```
+
 **Type-check without building:** `scripts/syntax_check.sh src/<file>.cpp` runs
 `c++ -fsyntax-only` against the pinned DuckDB headers — about a second, versus minutes for a
 full rebuild. Use it to iterate on compile errors; it cannot catch link errors.
@@ -41,27 +50,56 @@ full rebuild. Use it to iterate on compile errors; it cannot catch link errors.
 `scripts/check_windows_view.py` catches POSIX calls that leaked into a Windows branch without
 waiting ~40 minutes for the CI matrix.
 
-Note: the SQL tests are placeholders — they cannot exercise the table function, which needs live
-Fusion credentials. Real coverage depends on the `FusionTransport` seam (see below).
+The SQL tests are a placeholder (`SELECT 1`) — they cannot reach the table function, which needs
+live Fusion credentials. Real coverage lives in the two C++ suites above, which is what the
+`FusionTransport` seam is for.
 
 ## Architecture
 
-Everything currently lives in `src/ofquack_extension.cpp`, as a linear pipeline of free
-functions numbered 1–9 in comments:
+The code is cut into layers, and the cut is load-bearing:
 
-1. `BuildEnvelope` — hand-writes the SOAP `runReport` envelope, embedding the user SQL as CDATA
-   in the `p_sql` parameter, `sizeOfDataChunkDownload=-1` (whole payload in one response).
-2. `FetchSoap` — libcurl POST with Basic auth (base64 from `src/base64.cpp`, vendored).
-3. `ExtractReportXML` — tinyxml2 walk to find `<reportBytes>` by *local* name (namespace
-   prefixes are stripped everywhere, since Fusion's prefixes vary), then base64-decode.
-4. `ParseRows` — the decoded payload contains `<RESULT>` elements whose *text content* is
-   another escaped XML document (`<ROWSET><ROW>…`), so each is re-parsed as a nested document.
+- **Layer 1 — pure** (`soap_envelope`, `xml_report`): no DuckDB, no network. Tested by
+  `pure_test` in about a second.
+- **Layer 2 — transport** (`transport`, `soap_transport`, `http_curl`): knows libcurl, knows
+  nothing about DuckDB.
+- **Layer 4 — adapter** (`ofquack_extension.cpp`): knows DuckDB, reaches Fusion *only* through
+  `FusionTransport`.
 
-Table-function wiring: `fuse_bind` does all network I/O and materialises the entire result;
-`fuse_func` + `FusionLocalState::offset` emit it in `STANDARD_VECTOR_SIZE` chunks.
+Keep it that way: layer 1 must not include `duckdb.hpp` or `curl.h`, and the adapter must not
+call `curl_easy_*` or touch tinyxml2 directly.
+
+The request pipeline:
+
+1. `BuildEnvelope` — SOAP `runReport` envelope, user SQL as CDATA in the `p_sql` parameter,
+   `sizeOfDataChunkDownload=-1` (BI Publisher's own chunking is unused; paging rewrites the SQL).
+2. `SoapTransport::Execute` — libcurl POST with Basic auth (base64 from vendored `src/base64.cpp`).
+3. `ExtractReportXML` — tinyxml2 walk to find `<reportBytes>` by *local* name (prefixes are
+   stripped everywhere, since Fusion's prefixes vary), then base64-decode.
+4. `ParseRows` — the decoded payload contains `<RESULT>` elements whose *text content* is another
+   escaped XML document (`<ROWSET><ROW>…`), so each is parsed again as a separate document.
+
+Table-function wiring: `FusionBind` does all network I/O and materialises the whole result;
+`FusionScan` + `FusionLocalState::offset` emit it in `STANDARD_VECTOR_SIZE` chunks.
 `init_global` is `nullptr`, so there is no parallelism.
 
-`tinyxml2` is aliased as `tx2` to avoid a symbol collision with MSXML on Windows — keep it.
+`tinyxml2` is aliased as `tx2` in `xml_report.cpp` to avoid a symbol collision with MSXML on
+Windows — keep it.
+
+### Testing against a fake Fusion
+
+`ScopedTransportFactory` swaps the transport for the lifetime of the scope, so the adapter can be
+driven against scripted SOAP responses:
+
+```cpp
+ScopedTransportFactory installed([&](const FusionConfig &config) {
+    return std::make_shared<FakeTransport>(script, config);
+});
+DuckDB db(nullptr);
+Connection connection(db);
+connection.Query("SELECT * FROM oracle_fusion_wsdl_query(...)");
+```
+
+See `test/cpp/adapter_test.cpp`. Anything that would otherwise need credentials belongs there.
 
 ## Extension API notes (v1.5.5)
 
@@ -99,8 +137,14 @@ Table-function wiring: `fuse_bind` does all network I/O and materialises the ent
 
 ## Known defects being fixed
 
-Tracked in the plan; do not "fix" them piecemeal without reading it:
-columns collected into a `std::set` (alphabetical order instead of SELECT order);
-SOAP faults swallowed to stderr with 0 rows returned; debug output in the bind phase;
-column-name fallback that slices the SQL between `SELECT` and `FROM` on commas;
-`]]>` in user SQL breaking the CDATA section.
+These are deliberate, pinned by tests that assert today's wrong behaviour so the fix is visible
+when it lands. Invert those tests rather than deleting them, and do not "fix" any of this
+piecemeal without reading the plan:
+
+- columns come from a `std::set`, so they are alphabetical rather than in SELECT order;
+- a SOAP fault yields zero rows instead of an error — the caller cannot tell "no data" from
+  "the server refused";
+- an empty result guesses column names by slicing the SQL between `SELECT` and `FROM` on commas;
+- a column missing from a row becomes an empty string rather than SQL NULL;
+- `]]>` in user SQL breaks out of the CDATA section;
+- the whole result is materialised during bind: no paging, no streaming.
