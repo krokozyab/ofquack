@@ -379,6 +379,36 @@ void TestRemovedFunctionExplainsMigration() {
 	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
 }
 
+//! Defined with the metadata tests below; the cache is a process-wide
+//! singleton, so a test asserting a fetch must start from an empty one.
+void ResetCache();
+
+//! A metadata query that gets something other than a report must say what it
+//! got. "Missing SOAP Envelope" describes the shape of a response without
+//! saying what the response was, and the answer is usually in its first line.
+void TestMetadataFailureShowsWhatArrived() {
+	ResetCache();
+	struct SignInPageTransport : FusionTransport {
+		std::string Execute(const std::string &, const RequestContext &) override {
+			// A sign-in page that parses as XML: no Envelope, no <html> prefix,
+			// so neither the HTML check nor the fault decoder catches it.
+			return "<?xml version=\"1.0\"?><page><title>Oracle Applications Cloud Sign In</title></page>";
+		}
+	};
+	ScopedTransportFactory installed([](const FusionConfig &) { return std::make_shared<SignInPageTransport>(); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query("SELECT * FROM oracle_fusion_tables()");
+
+	CHECK(result->HasError());
+	const auto message = result->GetError();
+	// Enough of the response to recognise it.
+	CHECK(message.find("Sign In") != std::string::npos);
+	CHECK(message.find("response began") != std::string::npos);
+}
+
 //! A secret with no username and no browser provider cannot authenticate at
 //! all. Sending an empty Basic credential and reporting Fusion's 401 would
 //! blame the password, when the mistake is nearly always the mode: an instance
@@ -1337,6 +1367,7 @@ const TestCase TESTS[] = {
     {"removed function explains migration", TestRemovedFunctionExplainsMigration},
     {"unknown auth mode is reported", TestUnknownAuthModeIsReported},
     {"secret with no credential names both possibilities", TestSecretWithNoCredentialNamesBothPossibilities},
+    {"metadata failure shows what arrived", TestMetadataFailureShowsWhatArrived},
     {"paging fetches every row in exactly the right number of requests", TestPagingFetchesEveryRowInExactlyTheRightNumberOfRequests},
     {"short first page costs one request", TestShortFirstPageCostsOneRequest},
     {"exactly full page costs one extra request", TestExactlyFullPageCostsOneExtraRequest},

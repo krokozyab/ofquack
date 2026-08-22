@@ -18,25 +18,37 @@ size_t AppendToString(void *contents, size_t size, size_t nmemb, void *userp) {
 	return byte_count;
 }
 
-//! Captures WWW-Authenticate, which is what separates "wrong password" from
-//! "expired token" on a 401.
+//! Captures the two headers that explain a failure: WWW-Authenticate, which
+//! separates "wrong password" from "expired token" on a 401, and Location,
+//! which names the page a redirect was pointing at.
 size_t CollectHeader(char *buffer, size_t size, size_t nitems, void *userp) {
 	auto &response = *static_cast<HttpResponse *>(userp);
 	const size_t byte_count = size * nitems;
 	const std::string line(buffer, byte_count);
 
-	static const std::string NAME = "www-authenticate:";
-	if (line.size() > NAME.size()) {
-		std::string lowered = line.substr(0, NAME.size());
+	const auto header_value = [&line](const std::string &name) -> std::string {
+		if (line.size() <= name.size()) {
+			return {};
+		}
+		std::string lowered = line.substr(0, name.size());
 		std::transform(lowered.begin(), lowered.end(), lowered.begin(),
 		               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		if (lowered == NAME) {
-			auto value = line.substr(NAME.size());
-			const auto first = value.find_first_not_of(" \t");
-			const auto last = value.find_last_not_of(" \t\r\n");
-			response.www_authenticate =
-			    first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+		if (lowered != name) {
+			return {};
 		}
+		auto value = line.substr(name.size());
+		const auto first = value.find_first_not_of(" \t");
+		const auto last = value.find_last_not_of(" \t\r\n");
+		return first == std::string::npos ? std::string() : value.substr(first, last - first + 1);
+	};
+
+	auto value = header_value("www-authenticate:");
+	if (!value.empty()) {
+		response.www_authenticate = std::move(value);
+	}
+	value = header_value("location:");
+	if (!value.empty()) {
+		response.location = std::move(value);
 	}
 	return byte_count;
 }

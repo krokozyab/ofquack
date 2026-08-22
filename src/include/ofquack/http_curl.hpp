@@ -24,6 +24,10 @@ struct HttpResponse {
 	//! Value of WWW-Authenticate, when the server sent one. Used to tell a
 	//! rejected password from an expired token.
 	std::string www_authenticate;
+	//! Value of Location on a redirect. Redirects are not followed -- a SOAP
+	//! POST redirected to a sign-in page is an authentication problem, not a
+	//! route to the answer -- but the target says which page it was.
+	std::string location;
 };
 
 //! Holds one libcurl handle plus its cookie jar.

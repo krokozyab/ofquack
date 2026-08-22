@@ -162,6 +162,23 @@ private:
 			throw;
 		}
 
+		// A redirect is not a route to the answer. Fusion answers an
+		// unauthenticated request with one, pointing at the sign-in page, and
+		// following it would fetch that page and hand it to the XML parser --
+		// which is how this used to surface as "Missing SOAP Envelope",
+		// several layers away from the actual problem.
+		if (response.status_code >= 300 && response.status_code < 400) {
+			const auto target = response.location.empty() ? std::string() : " (to " + response.location + ")";
+			if (config.auth == AuthMode::BEARER) {
+				throw TokenExpiredError("Oracle Fusion redirected the request to a sign-in page" + target +
+				                        ", which means the token was not accepted");
+			}
+			throw AuthenticationError(
+			    "Oracle Fusion redirected the request to a sign-in page" + target +
+			    ".\nThe credentials were not accepted, or this instance uses single sign-on -- in which case "
+			    "the secret needs PROVIDER browser and SELECT * FROM ofquack_sso_login().");
+		}
+
 		if (response.status_code >= 400) {
 			// Not counted as a breaker failure when it is the caller's fault:
 			// a bad password or a missing table says nothing about the health

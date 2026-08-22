@@ -181,6 +181,8 @@ ofquack::ParsedReport FetchCatalogPage(FusionCatalogScanBindData &bind_data, Fus
 	} catch (const ofquack::FusionError &error) {
 		RethrowAsDatabaseError(error, statement);
 	} catch (const std::runtime_error &error) {
+		// "Missing SOAP Envelope" on its own says what the response was not,
+		// which is no help; the first line of what did arrive usually is.
 		throw IOException("Could not read the Oracle Fusion report response: %s\nSQL: %s", error.what(), statement);
 	}
 }

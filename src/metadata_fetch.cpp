@@ -1,5 +1,7 @@
 #include "ofquack/metadata_fetch.hpp"
 
+#include "ofquack/error_decoder.hpp"
+#include "ofquack/errors.hpp"
 #include "ofquack/metadata_queries.hpp"
 #include "ofquack/xml_report.hpp"
 
@@ -61,8 +63,31 @@ int64_t IntField(const ReportRow &row, const std::string &name, int64_t fallback
 }
 
 //! Runs one statement and returns its rows.
+//!
+//! The parse errors are turned into something readable here rather than left
+//! to escape. "Missing SOAP Envelope" is true but useless: it describes the
+//! shape of a response without saying what the response was, and the answer is
+//! usually visible in the first line of it.
 std::vector<ReportRow> Query(FusionTransport &transport, const RequestContext &context, const std::string &sql) {
-	return ParseRows(ExtractReportXML(transport.Execute(sql, context))).rows;
+	const auto response = transport.Execute(sql, context);
+	try {
+		return ParseRows(ExtractReportXML(response)).rows;
+	} catch (const std::runtime_error &parse_error) {
+		const auto described = DescribeFailure(response);
+		if (!described.empty()) {
+			throw PermanentError("Oracle Fusion rejected a metadata query: " + described + "\nSQL: " + sql);
+		}
+		// Nothing recognisable: show the start of what did arrive, which is
+		// how a sign-in page or a proxy notice announces itself.
+		auto preview = response.substr(0, 300);
+		for (auto &c : preview) {
+			if (c == '\n' || c == '\r' || c == '\t') {
+				c = ' ';
+			}
+		}
+		throw PermanentError("Could not read the response to a metadata query (" + std::string(parse_error.what()) +
+		                     ").\nThe response began: " + (preview.empty() ? "<empty>" : preview) + "\nSQL: " + sql);
+	}
 }
 
 //! Runs a statement page by page until a short page arrives.
