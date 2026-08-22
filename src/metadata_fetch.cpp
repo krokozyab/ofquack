@@ -143,7 +143,37 @@ int TypePriority(const std::string &type) {
 
 std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
                                    const std::vector<std::string> &types) {
-	const auto rows = QueryPaged(transport, context, metadata::TablesByTypes(types));
+	// Paged by seeking from the last name seen rather than by OFFSET: see
+	// TablesAfter for why depth-proportional paging fails against this report.
+	std::vector<ReportRow> rows;
+	std::string after_name;
+	std::string after_type;
+	for (;;) {
+		auto page = Query(transport, context,
+		                  metadata::TablesAfter(types, after_name, after_type, metadata::PAGE_SIZE));
+		if (page.empty()) {
+			break;
+		}
+
+		// The cursor comes from the last row of the page as the server ordered
+		// it, so a page truncated mid-way simply resumes from where it stopped.
+		const auto next_name = Field(page.back(), "TABLE_NAME");
+		const auto next_type = Field(page.back(), "TABLE_TYPE");
+		if (next_name.empty() || (next_name == after_name && next_type == after_type)) {
+			// No progress: stop rather than ask for the same page for ever.
+			break;
+		}
+		after_name = next_name;
+		after_type = next_type;
+
+		for (auto &row : page) {
+			rows.push_back(std::move(row));
+		}
+		if (rows.size() > MAX_METADATA_ROWS) {
+			throw PermanentError("Oracle Fusion returned more than " + std::to_string(MAX_METADATA_ROWS) +
+			                     " dictionary rows without ending; giving up rather than looping");
+		}
+	}
 
 	// One name can arrive as both a table and a view; keeping both would make
 	// the catalog ambiguous, so the more concrete kind wins.

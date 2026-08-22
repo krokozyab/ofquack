@@ -77,7 +77,8 @@ std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint6
 	return oss.str();
 }
 
-std::string TablesByTypes(const std::vector<std::string> &types) {
+std::string TablesAfter(const std::vector<std::string> &types, const std::string &after_name,
+                        const std::string &after_type, uint64_t page_size) {
 	const auto type_list = types.empty() ? std::string("'TABLE','VIEW'") : JoinQuoted(types);
 	std::ostringstream oss;
 	oss << "SELECT CAST(NULL AS VARCHAR2(1)) AS TABLE_CAT,"
@@ -90,8 +91,19 @@ std::string TablesByTypes(const std::vector<std::string> &types) {
 	    << " UNION ALL"
 	    << " SELECT table_id, table_name, 'TABLE' AS table_type, description"
 	    << " FROM FND_TABLES) t"
-	    << " WHERE t.table_type IN (" << type_list << ")"
-	    << " ORDER BY t.table_type, t.table_name";
+	    << " WHERE t.table_type IN (" << type_list << ")";
+
+	if (!after_name.empty()) {
+		// Ordered by (name, type), so the seek has to compare the pair. Oracle
+		// has no row-value comparison outside IN, hence the expanded form.
+		const auto name = QuoteLiteral(after_name);
+		const auto type = QuoteLiteral(after_type);
+		oss << " AND (t.table_name > '" << name << "'"
+		    << " OR (t.table_name = '" << name << "' AND t.table_type > '" << type << "'))";
+	}
+
+	oss << " ORDER BY t.table_name, t.table_type"
+	    << " FETCH FIRST " << page_size << " ROWS ONLY";
 	return oss.str();
 }
 

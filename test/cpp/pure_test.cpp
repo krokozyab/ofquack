@@ -605,7 +605,7 @@ void TestApplySecuredViews() {
 // ---------------------------------------------------------------------------
 
 void TestMetadataQueriesUseFusionDictionary() {
-	const auto tables = ofquack::metadata::TablesByTypes({"TABLE", "VIEW"});
+	const auto tables = ofquack::metadata::TablesAfter({"TABLE", "VIEW"}, "", "", 400);
 	// FND_VIEWS and FND_TABLES, not ALL_TABLES: only Fusion's own dictionary
 	// carries TABLE_ID, and TABLE_ID is how columns are found.
 	CHECK(Contains(tables, "FROM FND_VIEWS"));
@@ -642,18 +642,36 @@ void TestMetadataQueriesEscapeLiterals() {
 }
 
 void TestOffsetPagination() {
-	// The row-limiting clause is appended after ORDER BY, not wrapped around
-	// the statement. A ROWNUM wrapper makes the inner query produce offset+n
-	// rows and discard the first offset of them; once that inner count passes
-	// the report's own row limit the server truncates it, the outer filter
-	// finds nothing, and the listing looks finished. That stopped a
-	// 27,000-table dictionary at 4,000 on a real instance.
+	// Columns still page by OFFSET: a batch of ten tables is a few hundred
+	// rows, so depth never becomes a problem there.
 	const auto first = ofquack::metadata::PaginateByOffset("SELECT a FROM t ORDER BY a", 0, 400);
 	CHECK(first == "SELECT a FROM t ORDER BY a OFFSET 0 ROWS FETCH NEXT 400 ROWS ONLY");
 	CHECK(!Contains(first, "ROWNUM"));
+}
 
-	const auto deep = ofquack::metadata::PaginateByOffset("SELECT a FROM t ORDER BY a", 26000, 400);
-	CHECK(Contains(deep, "OFFSET 26000 ROWS FETCH NEXT 400 ROWS ONLY"));
+//! The table listing seeks from the last name instead, because OFFSET paging
+//! gets more expensive with depth and eventually exceeds what the report will
+//! do -- returning nothing, which reads as the end of the dictionary. On a real
+//! instance that happened at 4,000 rows one run and 5,600 the next, out of
+//! 28,978: a moving boundary, which is what marks a cost limit rather than a
+//! row limit.
+void TestTableListingSeeksRatherThanOffsets() {
+	using ofquack::metadata::TablesAfter;
+
+	const auto first = TablesAfter({"TABLE", "VIEW"}, "", "", 400);
+	CHECK(!Contains(first, "OFFSET"));
+	CHECK(Contains(first, "FETCH FIRST 400 ROWS ONLY"));
+	CHECK(Contains(first, "ORDER BY t.table_name, t.table_type"));
+
+	// The seek compares the ordering pair, since Oracle has no row-value
+	// comparison outside IN.
+	const auto next = TablesAfter({"TABLE", "VIEW"}, "GL_JE_HEADERS", "TABLE", 400);
+	CHECK(Contains(next, "t.table_name > 'GL_JE_HEADERS'"));
+	CHECK(Contains(next, "t.table_name = 'GL_JE_HEADERS' AND t.table_type > 'TABLE'"));
+	CHECK(!Contains(next, "OFFSET"));
+
+	// A name with an apostrophe must not break out of the literal.
+	CHECK(Contains(TablesAfter({}, "O'BRIEN", "TABLE", 10), "'O''BRIEN'"));
 }
 
 //! The dictionary aliases are shifted by one: the column labelled
@@ -1080,6 +1098,7 @@ const TestCase TESTS[] = {
     {"metadata queries use fusion dictionary", TestMetadataQueriesUseFusionDictionary},
     {"metadata queries escape literals", TestMetadataQueriesEscapeLiterals},
     {"offset pagination", TestOffsetPagination},
+    {"table listing seeks rather than offsets", TestTableListingSeeksRatherThanOffsets},
     {"oracle type mapping", TestOracleTypeMapping},
     {"jwt claims", TestJwtClaims},
     {"base64url decoding", TestBase64UrlDecoding},

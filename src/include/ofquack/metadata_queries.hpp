@@ -53,8 +53,21 @@ constexpr const char *SCHEMA = "FUSION";
 //! page of rows however deep it is.
 std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint64_t page_size = PAGE_SIZE);
 
-//! Tables and views. `types` is a list such as {"TABLE", "VIEW"}.
-std::string TablesByTypes(const std::vector<std::string> &types);
+//! One page of tables and views, ordered by name, starting after the given
+//! one. Pass empty strings for the first page.
+//!
+//! This is keyset paging, not OFFSET paging, and the difference is not an
+//! optimisation. `OFFSET 5600` makes the server sort the whole union of
+//! FND_VIEWS and FND_TABLES and then discard the first 5,600 rows, so each
+//! page costs more than the last; past some depth the statement exceeds what
+//! the report will do and comes back empty, which reads as the end of the
+//! dictionary. The depth at which that happened moved between runs -- 4,000
+//! one time, 5,600 another -- which is what gave it away as a cost limit
+//! rather than a row limit.
+//!
+//! Seeking from the last name seen costs the same at any depth.
+std::string TablesAfter(const std::vector<std::string> &types, const std::string &after_name,
+                        const std::string &after_type, uint64_t page_size);
 
 //! How many tables and views the dictionary holds.
 //!

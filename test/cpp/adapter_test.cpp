@@ -736,6 +736,12 @@ void TestHintSurvivesToTheWire() {
 //! first page. A fake that ignores the offset would serve the same rows for
 //! ever, which is what the paging loop's own safety limit is there to catch.
 bool AsksForALaterPage(const std::string &sql) {
+	// Two paging schemes are in play: the table listing seeks from the last
+	// name, and everything else offsets. A request is for a later page if it
+	// carries the seek predicate, or an offset past zero.
+	if (sql.find("t.table_name > ") != std::string::npos) {
+		return true;
+	}
 	const auto at = sql.find("OFFSET ");
 	return at != std::string::npos && sql.compare(at + 7, 1, "0") != 0;
 }
@@ -822,7 +828,9 @@ void TestListTables() {
 	// without saying so -- which is what the count is there to catch.
 	CHECK(script.executed_sql.size() == 3);
 	CHECK(script.executed_sql[0].find("COUNT(*)") != std::string::npos);
-	CHECK(script.executed_sql[1].find("OFFSET 0 ROWS FETCH NEXT") != std::string::npos);
+	CHECK(script.executed_sql[1].find("FETCH FIRST") != std::string::npos);
+	// Keyset paging, so the first page carries no seek predicate.
+	CHECK(script.executed_sql[1].find("t.table_name > ") == std::string::npos);
 }
 
 //! BI Publisher truncates a response without saying so, and a truncated page
@@ -869,8 +877,10 @@ void TestTruncatedPageDoesNotEndTheListing() {
 	CHECK(result->GetValue(0, 1).ToString() == "XLA_AE_LINES");
 	// Four requests: the count, two with rows, and the empty one that ends it.
 	CHECK(transport->executed.size() == 4);
-	// The offset advances by what actually arrived, not by the page size asked for.
-	CHECK(transport->executed[2].find("OFFSET 1 ROWS") != std::string::npos);
+	// The cursor is the last name the page actually delivered, so a page the
+	// server chose to cut short resumes from where it stopped rather than from
+	// where a fixed page size would have put it.
+	CHECK(transport->executed[2].find("t.table_name > 'AAA_FIRST'") != std::string::npos);
 }
 
 //! A listing that comes back short of what the instance says it has is
