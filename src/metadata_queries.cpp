@@ -99,7 +99,10 @@ std::string ColumnsByTableIds(const std::vector<std::string> &table_ids) {
 	oss << "SELECT NULL AS TABLE_CAT,"
 	    << " '" << SCHEMA << "' AS TABLE_SCHEM,"
 	    << " t.table_name AS TABLE_NAME,"
-	    << " c.user_column_name AS COLUMN_NAME,"
+	    // user_column_name is the display name and is not always populated;
+	    // falling back to the physical name keeps a table from arriving with
+	    // no columns at all, which is indistinguishable from not existing.
+	    << " COALESCE(c.user_column_name, c.column_name) AS COLUMN_NAME,"
 	    << " " << JDBC_VARCHAR << " AS DATA_TYPE,"
 	    << " COALESCE(c.column_type, c.domain_code) AS TYPE_NAME,"
 	    << " c.width AS COLUMN_SIZE,"

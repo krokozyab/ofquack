@@ -1202,9 +1202,14 @@ void TestUnknownTableInAttachedCatalog() {
 	CHECK(result->GetError().find("NO_SUCH_TABLE") != std::string::npos);
 }
 
-//! SHOW TABLES lists what is already known rather than blocking on a
-//! multi-second dictionary read; warming the cache is what fills it in.
-void TestShowTablesListsCachedNamesOnly() {
+//! SHOW TABLES lists only tables whose columns are known.
+//!
+//! DuckDB treats a name offered by the generator and then not created as an
+//! internal error that aborts the scan -- and Fusion's dictionary lists plenty
+//! of objects with no rows in FND_COLUMNS. Listing a table before its columns
+//! are known therefore risks taking down every catalog browser, so the list is
+//! restricted to what can actually be described.
+void TestShowTablesListsOnlyDescribableTables() {
 	ResetCache();
 	Script script;
 	auto installed = InstallCatalog(script);
@@ -1218,14 +1223,64 @@ void TestShowTablesListsCachedNamesOnly() {
 	CHECK(cold->GetValue(0, 0).GetValue<int64_t>() == 0);
 	CHECK(script.executed_sql.empty());
 
-	// Warm the cache through the metadata function, then attach again.
+	// The table list alone is not enough: the columns are what make a name safe
+	// to offer.
 	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
+	RunQuery(connection, "DETACH fus");
+	Attach(connection);
+	auto listed = RunQuery(connection, "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fus'");
+	CHECK(listed->GetValue(0, 0).GetValue<int64_t>() == 0);
+
+	// Warming the columns is what fills the browser in.
+	RunQuery(connection, "SELECT * FROM ofquack_cache_warm()");
 	RunQuery(connection, "DETACH fus");
 	Attach(connection);
 
 	auto warm = RunQuery(connection, "SELECT table_name FROM duckdb_tables() WHERE database_name = 'fus'");
 	CHECK(warm->RowCount() == 1);
 	CHECK(warm->GetValue(0, 0).ToString() == "GL_JE_HEADERS");
+}
+
+//! Warming reports what it did, and does not refetch what it already has.
+void TestCacheWarm() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto first = RunQuery(connection, "SELECT tables_warmed, columns_cached, already_cached FROM ofquack_cache_warm()");
+	CHECK(first->GetValue(0, 0).GetValue<int64_t>() == 2); // one table, one view
+	CHECK(first->GetValue(1, 0).GetValue<int64_t>() == 3); // two columns plus one
+	CHECK(first->GetValue(2, 0).GetValue<int64_t>() == 0);
+	const auto after_first = script.executed_sql.size();
+
+	// A second warm has nothing left to do.
+	auto second = RunQuery(connection, "SELECT tables_warmed, already_cached FROM ofquack_cache_warm()");
+	CHECK(second->GetValue(0, 0).GetValue<int64_t>() == 0);
+	CHECK(second->GetValue(1, 0).GetValue<int64_t>() == 2);
+	CHECK(script.executed_sql.size() == after_first);
+}
+
+//! Thirty thousand tables is hours of SOAP calls, so a warm is bounded and can
+//! be aimed at the tables actually of interest.
+void TestCacheWarmPatternAndLimit() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto result = RunQuery(connection, "SELECT tables_warmed FROM ofquack_cache_warm(pattern := 'GL_JE%')");
+	CHECK(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+
+	ResetCache();
+	auto limited = RunQuery(connection, "SELECT tables_warmed FROM ofquack_cache_warm(max_tables := 1)");
+	CHECK(limited->GetValue(0, 0).GetValue<int64_t>() == 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,7 +1492,9 @@ const TestCase TESTS[] = {
     {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},
     {"attached catalog is read-only", TestAttachedCatalogIsReadOnly},
     {"unknown table in attached catalog", TestUnknownTableInAttachedCatalog},
-    {"show tables lists cached names only", TestShowTablesListsCachedNamesOnly},
+    {"show tables lists only describable tables", TestShowTablesListsOnlyDescribableTables},
+    {"cache warm", TestCacheWarm},
+    {"cache warm pattern and limit", TestCacheWarmPatternAndLimit},
     {"browser secret is created without signing in", TestBrowserSecretIsCreatedWithoutSigningIn},
     {"browser secret holds no credential", TestBrowserSecretHoldsNoCredential},
     {"sso status without token", TestSsoStatusWithoutToken},

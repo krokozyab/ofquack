@@ -6,9 +6,11 @@
 #include "ofquack/fusion_connection.hpp"
 #include "ofquack/metadata_cache.hpp"
 #include "ofquack/metadata_fetch.hpp"
+#include "ofquack/metadata_queries.hpp"
 #include "ofquack/oracle_type_map.hpp"
 #include "ofquack/transport.hpp"
 
+#include <map>
 #include <memory>
 
 namespace duckdb {
@@ -207,6 +209,164 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 }
 
 // ---------------------------------------------------------------------------
+// ofquack_cache_warm
+// ---------------------------------------------------------------------------
+
+//! Case-insensitive LIKE with % and _, enough for a table-name filter.
+bool MatchesPattern(const std::string &name, const std::string &pattern) {
+	if (pattern.empty() || pattern == "%") {
+		return true;
+	}
+	const auto text = StringUtil::Upper(name);
+	const auto glob = StringUtil::Upper(pattern);
+
+	// Iterative backtracking, so a pattern of several wildcards cannot recurse
+	// its way through a dictionary of thousands of names.
+	size_t t = 0, g = 0, star = std::string::npos, matched = 0;
+	while (t < text.size()) {
+		if (g < glob.size() && (glob[g] == '_' || glob[g] == text[t])) {
+			t++;
+			g++;
+		} else if (g < glob.size() && glob[g] == '%') {
+			star = g++;
+			matched = t;
+		} else if (star != std::string::npos) {
+			g = star + 1;
+			t = ++matched;
+		} else {
+			return false;
+		}
+	}
+	while (g < glob.size() && glob[g] == '%') {
+		g++;
+	}
+	return g == glob.size();
+}
+
+//! Fetches the columns of many tables at once, so a catalog browser has
+//! something to show.
+//!
+//! An attached catalog only lists tables whose columns it already knows --
+//! offering a name it might then fail to describe is an internal error in
+//! DuckDB, not a warning. This is how that knowledge is acquired deliberately,
+//! in batches, rather than one slow table at a time or all thirty thousand of
+//! them at once.
+unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBindInput &input,
+                                       vector<LogicalType> &return_types, vector<string> &names) {
+	FusionScanOptions options;
+	auto config = ResolveFusionConfig(context, input.named_parameters, options);
+	RequireUsableCredentials(config);
+	const auto endpoint_key = EndpointKey(config.endpoint, config.report_path);
+
+	std::string pattern = "%";
+	const auto pattern_parameter = input.named_parameters.find("pattern");
+	if (pattern_parameter != input.named_parameters.end() && !pattern_parameter->second.IsNull()) {
+		pattern = pattern_parameter->second.ToString();
+	}
+	// Bounded by default: Fusion's dictionary runs to tens of thousands of
+	// tables, and warming all of them is hours of SOAP calls.
+	int64_t limit = 200;
+	const auto limit_parameter = input.named_parameters.find("max_tables");
+	if (limit_parameter != input.named_parameters.end() && !limit_parameter->second.IsNull()) {
+		limit = limit_parameter->second.GetValue<int64_t>();
+	}
+
+	auto &cache = MetadataCache::Get();
+	auto transport = ofquack::CreateTransport(config);
+	const auto request_context = ContextFor(context);
+
+	std::vector<ofquack::TableInfo> tables;
+	if (!cache.TryGetTables(endpoint_key, TtlFor(input.named_parameters), tables)) {
+		tables = WithTranslatedErrors(
+		    [&]() { return ofquack::FetchTables(*transport, request_context, {"TABLE", "VIEW"}); });
+		cache.PutTables(endpoint_key, tables);
+	}
+
+	std::vector<ofquack::TableInfo> wanted;
+	int64_t skipped_known = 0;
+	for (const auto &table : tables) {
+		if (!MatchesPattern(table.name, pattern)) {
+			continue;
+		}
+		std::vector<ofquack::ColumnInfo> already;
+		if (cache.TryGetColumns(endpoint_key, table.name, TtlFor(input.named_parameters), already)) {
+			skipped_known++;
+			continue;
+		}
+		if (limit > 0 && static_cast<int64_t>(wanted.size()) >= limit) {
+			break;
+		}
+		wanted.push_back(table);
+	}
+
+	int64_t warmed = 0;
+	int64_t columns_written = 0;
+	int64_t failed = 0;
+
+	// Views are not in FND_COLUMNS and are fetched one at a time; tables go in
+	// batches, which is where nearly all of the saving is.
+	std::vector<ofquack::TableInfo> batchable;
+	for (const auto &table : wanted) {
+		if (StringUtil::CIEquals(table.type, "VIEW") || table.table_id.empty()) {
+			try {
+				auto columns = ofquack::FetchColumnsOfView(*transport, request_context, table.name);
+				cache.PutColumns(endpoint_key, table.name, columns);
+				columns_written += static_cast<int64_t>(columns.size());
+				warmed += columns.empty() ? 0 : 1;
+				failed += columns.empty() ? 1 : 0;
+			} catch (const ofquack::CancelledError &) {
+				throw InterruptException();
+			} catch (const ofquack::FusionError &) {
+				// One unreadable object must not abandon the rest of the warm.
+				failed++;
+			}
+			continue;
+		}
+		batchable.push_back(table);
+	}
+
+	for (size_t start = 0; start < batchable.size(); start += ofquack::metadata::COLUMN_BATCH_SIZE) {
+		const auto end = std::min(start + ofquack::metadata::COLUMN_BATCH_SIZE, batchable.size());
+		const std::vector<ofquack::TableInfo> batch(batchable.begin() + static_cast<long>(start),
+		                                            batchable.begin() + static_cast<long>(end));
+		std::vector<ofquack::ColumnInfo> columns;
+		try {
+			columns = ofquack::FetchColumnsOfTables(*transport, request_context, batch);
+		} catch (const ofquack::CancelledError &) {
+			throw InterruptException();
+		} catch (const ofquack::FusionError &) {
+			failed += static_cast<int64_t>(batch.size());
+			continue;
+		}
+
+		// Split the batch's rows back out per table, so each is cached under
+		// its own name -- including the ones that came back with nothing, which
+		// is what stops them being offered to DuckDB later.
+		std::map<std::string, std::vector<ofquack::ColumnInfo>> by_table;
+		for (auto &column : columns) {
+			by_table[StringUtil::Upper(column.table_name)].push_back(column);
+		}
+		for (const auto &table : batch) {
+			auto found = by_table.find(StringUtil::Upper(table.name));
+			if (found == by_table.end() || found->second.empty()) {
+				failed++;
+				continue;
+			}
+			cache.PutColumns(endpoint_key, table.name, found->second);
+			columns_written += static_cast<int64_t>(found->second.size());
+			warmed++;
+		}
+	}
+
+	auto bind_data = make_uniq<MaterialisedBindData>();
+	bind_data->rows.push_back({Value::BIGINT(warmed), Value::BIGINT(columns_written), Value::BIGINT(failed),
+	                           Value::BIGINT(skipped_known)});
+	names = {"tables_warmed", "columns_cached", "tables_without_columns", "already_cached"};
+	return_types = {LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT};
+	return std::move(bind_data);
+}
+
+// ---------------------------------------------------------------------------
 // ofquack_cache_status / ofquack_cache_invalidate
 // ---------------------------------------------------------------------------
 
@@ -297,6 +457,13 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	columns.named_parameters["refresh"] = LogicalType::BOOLEAN;
 	columns.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
 	loader.RegisterFunction(columns);
+
+	TableFunction warm("ofquack_cache_warm", {}, ScanMaterialised, CacheWarmBind, InitMaterialised);
+	AddFusionNamedParameters(warm);
+	warm.named_parameters["pattern"] = LogicalType::VARCHAR;
+	warm.named_parameters["max_tables"] = LogicalType::BIGINT;
+	warm.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
+	loader.RegisterFunction(warm);
 
 	TableFunction status("ofquack_cache_status", {}, ScanMaterialised, CacheStatusBind, InitMaterialised);
 	AddFusionNamedParameters(status);

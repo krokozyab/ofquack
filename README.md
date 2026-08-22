@@ -261,6 +261,7 @@ SELECT * FROM ofquack_cache_status();               -- where the cache is, what 
 SELECT * FROM oracle_fusion_tables(refresh := true);        -- bypass it once
 SELECT * FROM ofquack_cache_invalidate();                   -- drop it for this endpoint
 SELECT * FROM ofquack_cache_invalidate(table := 'GL_JE_HEADERS');
+SELECT * FROM ofquack_cache_warm(pattern := 'GL_%');   -- fill the catalog browser
 ```
 
 If the cache file cannot be opened it degrades to read-only and then to

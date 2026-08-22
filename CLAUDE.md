@@ -314,7 +314,6 @@ collecting a real token, which needs a real Fusion instance.
 
 ## Still outstanding
 
-- `ofquack_cache_warm()` does not exist; warm the catalog with `oracle_fusion_tables()`;
 - primary keys and foreign keys are fetched by `metadata_fetch` but not surfaced as constraints
   on an attached table;
 - the token is never refreshed automatically mid-query: a `TokenExpiredError` surfaces as an

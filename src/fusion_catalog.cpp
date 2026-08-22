@@ -408,12 +408,20 @@ public:
 	    : DefaultGenerator(catalog), schema(schema_p), state(std::move(state_p)) {
 	}
 
+	//! Every name returned here MUST be creatable by CreateDefaultEntry.
+	//!
+	//! DuckDB treats a name it was offered and then refused as an internal
+	//! error and aborts the whole scan -- so listing a table whose columns turn
+	//! out to be unavailable takes down `SHOW TABLES` and every catalog browser
+	//! with it. Fusion's dictionary has plenty of those: FND_TABLES lists
+	//! objects that have no rows in FND_COLUMNS.
+	//!
+	//! So only tables whose columns are already known are offered. Cold, that
+	//! is none: the alternative is a multi-second dictionary read per table
+	//! before the list can even be returned, from a callback that has no
+	//! ClientContext to cancel. Use ofquack_cache_warm() to fill it in.
 	vector<string> GetDefaultEntries() override {
-		// Called without a ClientContext, so this can only answer from what is
-		// already known; a cold catalog reports nothing rather than blocking
-		// SHOW TABLES on a multi-second dictionary read.
 		std::lock_guard<std::mutex> guard(state->metadata_lock);
-		vector<string> names;
 		if (!state->tables_loaded) {
 			std::vector<ofquack::TableInfo> cached;
 			if (MetadataCache::Get().TryGetTables(state->endpoint_key, CATALOG_CACHE_TTL_SECONDS, cached)) {
@@ -421,8 +429,26 @@ public:
 				state->tables_loaded = true;
 			}
 		}
+
+		vector<string> names;
+		auto &cache = MetadataCache::Get();
 		for (const auto &table : state->tables) {
-			names.push_back(table.name);
+			const auto key = StringUtil::Upper(table.name);
+			const auto known = state->columns_by_table.find(key);
+			if (known != state->columns_by_table.end()) {
+				if (!known->second.empty()) {
+					names.push_back(table.name);
+				}
+				continue;
+			}
+			// Reading the cache is cheap and local; asking Fusion is not, and
+			// is not done here.
+			std::vector<ofquack::ColumnInfo> columns;
+			if (cache.TryGetColumns(state->endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns) &&
+			    !columns.empty()) {
+				state->columns_by_table.emplace(key, std::move(columns));
+				names.push_back(table.name);
+			}
 		}
 		return names;
 	}
