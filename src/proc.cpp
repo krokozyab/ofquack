@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables) -- POSIX's own declaration.
 extern char **environ;
 #endif
 
@@ -128,6 +129,9 @@ ChildProcess::ChildProcess(const std::string &executable, const std::vector<std:
 	std::vector<char *> argv;
 	argv.reserve(owned.size() + 1);
 	for (auto &value : owned) {
+		// execv takes char *const[] and does not modify the strings; `owned`
+		// outlives the call.
+		// NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
 		argv.push_back(const_cast<char *>(value.c_str()));
 	}
 	argv.push_back(nullptr);

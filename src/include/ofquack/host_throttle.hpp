@@ -22,7 +22,7 @@ public:
 	//! Blocks until a slot is free, then holds it until destroyed.
 	class Slot {
 	public:
-		Slot(HostThrottle &owner_p);
+		explicit Slot(HostThrottle &owner_p);
 		~Slot();
 		Slot(const Slot &) = delete;
 		Slot &operator=(const Slot &) = delete;

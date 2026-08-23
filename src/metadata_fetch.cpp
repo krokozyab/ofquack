@@ -286,7 +286,7 @@ std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const R
 	std::unordered_set<std::string> seen;
 	for (size_t start = 0; start < ids.size(); start += metadata::COLUMN_BATCH_SIZE) {
 		const auto end = std::min(start + metadata::COLUMN_BATCH_SIZE, ids.size());
-		const std::vector<std::string> batch(ids.begin() + static_cast<long>(start), ids.begin() + static_cast<long>(end));
+		const std::vector<std::string> batch(ids.begin() + static_cast<std::ptrdiff_t>(start), ids.begin() + static_cast<std::ptrdiff_t>(end));
 
 		for (const auto &row : QueryPaged(transport, context, metadata::ColumnsByTableIds(batch))) {
 			ColumnInfo column;

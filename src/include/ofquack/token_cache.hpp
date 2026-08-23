@@ -20,11 +20,11 @@ struct CachedToken {
 
 //! When a token has no usable `exp`, assume it lasts this long. Fusion issues
 //! one-hour tokens; 55 minutes leaves room to notice.
-constexpr int64_t FALLBACK_TOKEN_LIFETIME_SECONDS = 55 * 60;
+constexpr int64_t FALLBACK_TOKEN_LIFETIME_SECONDS = INT64_C(55) * 60;
 
 //! Treat a token as expired this long before it really is, so a request never
 //! goes out with a token that dies in flight.
-constexpr int64_t TOKEN_EXPIRY_BUFFER_SECONDS = 5 * 60;
+constexpr int64_t TOKEN_EXPIRY_BUFFER_SECONDS = INT64_C(5) * 60;
 
 //! Refresh once this much of the token's life has passed, rather than waiting
 //! for it to expire: an interactive login in the middle of a query is far worse

@@ -119,7 +119,8 @@ std::string DefaultLoginUrl(const std::string &endpoint) {
 }
 
 std::string FindBrowser(const std::string &configured_path) {
-	const auto from_environment = EnvironmentValue("OFQUACK_CHROME_PATH");
+	// Not const: a const local cannot be moved out of on return.
+	auto from_environment = EnvironmentValue("OFQUACK_CHROME_PATH");
 	if (!from_environment.empty()) {
 		return from_environment;
 	}

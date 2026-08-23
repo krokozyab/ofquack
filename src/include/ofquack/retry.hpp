@@ -27,7 +27,7 @@ uint64_t ComputeBackoffDelay(const RetryPolicy &policy, uint32_t attempt,
 
 //! HTTP statuses worth another attempt: transient server and gateway failures,
 //! request timeout, and rate limiting.
-bool IsRetryableStatus(long status_code);
+bool IsRetryableStatus(int64_t status_code);
 
 //! True if this libcurl error code describes a transport failure rather than a
 //! refusal by the server.

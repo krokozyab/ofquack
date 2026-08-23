@@ -39,7 +39,7 @@ uint64_t ComputeBackoffDelay(const RetryPolicy &policy, uint32_t attempt,
 	return delay <= 0.0 ? 0 : static_cast<uint64_t>(delay);
 }
 
-bool IsRetryableStatus(long status_code) {
+bool IsRetryableStatus(int64_t status_code) {
 	switch (status_code) {
 	case 408: // request timeout
 	case 429: // too many requests

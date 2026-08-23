@@ -224,7 +224,7 @@ struct WebSocket::Impl {
 			const auto byte = buffer[cursor + i];
 			payload[i] = static_cast<char>(masked ? (byte ^ mask[i % 4]) : byte);
 		}
-		buffer.erase(buffer.begin(), buffer.begin() + static_cast<long>(cursor + length));
+		buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(cursor + length));
 		return true;
 	}
 };
@@ -331,7 +331,7 @@ WebSocket::WebSocket(const std::string &url) : impl(new Impl()) {
 			}
 		}
 	}
-	impl->buffer.erase(impl->buffer.begin(), impl->buffer.begin() + static_cast<long>(header_end + 4));
+	impl->buffer.erase(impl->buffer.begin(), impl->buffer.begin() + static_cast<std::ptrdiff_t>(header_end + 4));
 }
 
 WebSocket::~WebSocket() = default;

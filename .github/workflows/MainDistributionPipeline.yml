@@ -38,14 +38,35 @@ jobs:
       # builds a target this repository never builds.
       exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw'
 
-  code-quality-check:
-    name: Code quality check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
-    with:
-      duckdb_version: v1.5.5
-      ci_tools_version: v1.5-variegata
-      extension_name: ofquack
-      format_checks: 'tidy'
+  # clang-tidy, run directly rather than through
+  # duckdb/extension-ci-tools' _extension_code_quality.yml.
+  #
+  # That reusable workflow cannot check this extension. Its `make tidy-check`
+  # configures the whole of DuckDB, which needs every dependency vcpkg.json
+  # declares -- and the workflow never sets vcpkg up, so the configure dies on
+  # `find_package(tinyxml2)` before clang-tidy starts. It takes an
+  # `extra_toolchains` input that would be the obvious place to ask for vcpkg,
+  # but nothing in the file reads it. Its file filter, `<project>/src/.*/`, also
+  # matches nothing in a flat `src/*.cpp` layout, so a successful configure
+  # would have checked no files at all.
+  #
+  # scripts/tidy.sh runs the checker over this extension's own sources with
+  # DuckDB's own .clang-tidy, needs no DuckDB build, and takes about a minute.
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install clang-tidy and the headers the sources include
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy libtinyxml2-dev libssl-dev libcurl4-openssl-dev
+
+      - name: Run clang-tidy
+        run: scripts/tidy.sh
 
   # There is deliberately no deploy job.
   #

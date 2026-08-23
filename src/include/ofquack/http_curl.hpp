@@ -19,6 +19,9 @@ struct HttpRequest {
 };
 
 struct HttpResponse {
+	// curl_easy_getinfo(CURLINFO_RESPONSE_CODE) writes through a long*, so this
+	// is libcurl's type rather than a choice.
+	// NOLINTNEXTLINE(google-runtime-int)
 	long status_code = 0;
 	std::string body;
 	//! Value of WWW-Authenticate, when the server sent one. Used to tell a

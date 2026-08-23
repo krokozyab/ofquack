@@ -21,7 +21,7 @@ namespace {
 //! Default lifetime of a cached row: a week. Fusion's dictionary changes when
 //! someone deploys, not continuously, and a stale name costs one puzzled look
 //! whereas refetching costs minutes.
-constexpr int64_t DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60;
+constexpr int64_t DEFAULT_TTL_SECONDS = INT64_C(7) * 24 * 60 * 60;
 
 //! Metadata results are small and are produced in one go, so the scan is just
 //! a cursor over rows that bind already assembled.
@@ -356,8 +356,8 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 
 	for (size_t start = 0; start < batchable.size(); start += ofquack::metadata::COLUMN_BATCH_SIZE) {
 		const auto end = std::min(start + ofquack::metadata::COLUMN_BATCH_SIZE, batchable.size());
-		const std::vector<ofquack::TableInfo> batch(batchable.begin() + static_cast<long>(start),
-		                                            batchable.begin() + static_cast<long>(end));
+		const std::vector<ofquack::TableInfo> batch(batchable.begin() + static_cast<std::ptrdiff_t>(start),
+		                                            batchable.begin() + static_cast<std::ptrdiff_t>(end));
 		std::vector<ofquack::ColumnInfo> columns;
 		try {
 			columns = ofquack::FetchColumnsOfTables(*transport, request_context, batch);

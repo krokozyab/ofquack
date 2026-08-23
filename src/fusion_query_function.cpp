@@ -65,7 +65,7 @@ void RefuseARepeatedPage(const ofquack::ParsedReport &previous, const ofquack::P
 	throw IOException("Oracle Fusion returned the same rows again for OFFSET %llu, so the statement is not being "
 	                  "paged and reading it would never end.\nThis usually means the report rewrote or ignored the "
 	                  "row-limiting clause; run with fetch_size := 0 to fetch the result in one request.",
-	                  static_cast<unsigned long long>(offset));
+	                  static_cast<uint64_t>(offset));
 }
 
 struct FusionQueryGlobalState : public GlobalTableFunctionState {
@@ -187,6 +187,7 @@ void CollectUnsortable(const FusionQueryBindData &bind_data, ClientContext &cont
 //! CLOB or LONG in the select list does.
 string WrapperWithoutUnsortableColumns(const FusionQueryBindData &bind_data, ClientContext &context) {
 	std::vector<uint64_t> all;
+	all.reserve(bind_data.columns.size());
 	for (idx_t i = 0; i < bind_data.columns.size(); i++) {
 		all.push_back(static_cast<uint64_t>(i) + 1);
 	}
@@ -285,8 +286,8 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 		    "much in one response, and the rest of the result was not received.\nPaging is off for this "
 		    "statement -- because of fetch_size := 0, or because it already carries OFFSET/FETCH or ROWNUM -- "
 		    "so let the extension page it, or narrow the statement.\nSQL: %s",
-		    static_cast<unsigned long long>(bind_data->first_page.rows.size()),
-		    static_cast<unsigned long long>(bind_data->first_page.truncated_at_bytes), bind_data->sql);
+		    static_cast<uint64_t>(bind_data->first_page.rows.size()),
+		    static_cast<uint64_t>(bind_data->first_page.truncated_at_bytes), bind_data->sql);
 	}
 	bind_data->columns.assign(bind_data->first_page.columns.begin(), bind_data->first_page.columns.end());
 

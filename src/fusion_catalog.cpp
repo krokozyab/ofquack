@@ -37,7 +37,7 @@ namespace duckdb {
 namespace {
 
 constexpr const char *STORAGE_TYPE = "oracle_fusion";
-constexpr int64_t CATALOG_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+constexpr int64_t CATALOG_CACHE_TTL_SECONDS = INT64_C(7) * 24 * 60 * 60;
 
 //! Everything one ATTACH knows, shared by the catalog, every table entry it
 //! produces, and every scan those tables start.
@@ -481,8 +481,8 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 		throw IOException("Oracle Fusion cut the response off after %llu rows (%llu bytes) of %s: the report "
 		                  "returns at most that much in one response, and paging is off (fetch_size := 0). Turn "
 		                  "paging on so the table is read in pages",
-		                  static_cast<unsigned long long>(state->page.rows.size()),
-		                  static_cast<unsigned long long>(state->page.truncated_at_bytes), bind_data.object_name);
+		                  static_cast<uint64_t>(state->page.rows.size()),
+		                  static_cast<uint64_t>(state->page.truncated_at_bytes), bind_data.object_name);
 	}
 	state->more_pages = state->paginate && !state->page.rows.empty();
 	return std::move(state);
@@ -503,7 +503,7 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 		if (!state.page.rows.empty() && !fetched.rows.empty() && state.page.rows.front() == fetched.rows.front()) {
 			throw IOException("Oracle Fusion returned the same rows again for OFFSET %llu of %s, so the statement is "
 			                  "not being paged and reading it would never end",
-			                  static_cast<unsigned long long>(state.rows_emitted), bind_data.object_name);
+			                  static_cast<uint64_t>(state.rows_emitted), bind_data.object_name);
 		}
 		state.page = std::move(fetched);
 		state.offset_in_page = 0;
