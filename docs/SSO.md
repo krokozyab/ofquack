@@ -115,3 +115,8 @@ The JWT's signature is not checked, deliberately. Fusion authenticates the
 token when it is used; the extension reads only the expiry, to know when to ask
 for another. A token this code received from a browser it launched itself is not
 a token it needs to police.
+
+---
+
+See also: [the function reference](REFERENCE.md) for every function and
+setting, and the [README](../README.md) to start from the beginning.

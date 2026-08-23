@@ -64,8 +64,9 @@ believed; it costs one request.
 
 Columns still page by `OFFSET`/`FETCH`, because they never run deep enough for
 the difference to matter, and are fetched **ten tables at a time**. Not one —
-that would be ten times the round trips — and not a hundred: the report truncates a response past
-roughly 500 rows, and ten tables of thirty columns stays under that.
+that would be ten times the round trips — and not a hundred: the report
+truncates a response past roughly 500 rows, and ten tables of thirty columns
+stays under that.
 
 Page size is 400 rows and can be lowered when an instance is stingier than that:
 
@@ -137,3 +138,8 @@ The JDBC driver lists twelve pairs, but `HR_ALL_ORGANIZATION_UNITS_F` appears
 twice and its map keeps the last, so `PER_DEPARTMENT_SECURED_LIST_V` has never
 been in effect. That resolution is reproduced deliberately and pinned by a test
 rather than left to container ordering, which C++ does not guarantee.
+
+---
+
+See also: [the function reference](REFERENCE.md) for every function and
+setting, and the [README](../README.md) to start from the beginning.

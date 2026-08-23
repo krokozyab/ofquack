@@ -81,3 +81,8 @@ Equality on text *is* pushed: it does not depend on collation.
 - `secured_views := true` rewrites eleven HR tables to their
   `*_SECURED_LIST_V` views. It is **off by default**, so querying those base
   tables directly can return rows the caller is not entitled to see.
+
+---
+
+See also: [the function reference](REFERENCE.md) for every function and
+setting, and the [README](../README.md) to start from the beginning.
