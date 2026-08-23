@@ -28,9 +28,10 @@ repo:
   # at when it builds, and a tag can be moved afterwards -- which would let the
   # published artifact drift away from the reviewed one.
   #
-  # Set this to the commit whose full matrix passed under this name. The SHA
-  # below is a placeholder until the rename has been through CI.
-  ref: 0000000000000000000000000000000000000000
+  # The commit whose full matrix passed under this name: clang-tidy,
+  # linux_amd64, linux_arm64, osx_amd64, osx_arm64 and windows_amd64,
+  # run 32640259584.
+  ref: 114c79c3f339e9cd5dab8ef568e4a7cb8bce2516
 
 docs:
   hello_world: |
