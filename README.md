@@ -66,17 +66,32 @@ The row it returns afterwards reports what happened; the call is the point. The
 ## Before you start: the report
 
 **This does not work against a stock Fusion instance.** It needs one small
-report deployed in your instance, which is what accepts a SQL statement and
-runs it.
+report deployed in your instance — that report is what accepts a SQL statement
+and runs it.
 
-Take `DM_ARB.xdm.catalog` and `RP_ARB.xdo.catalog` from
-[the ofjdbc repository](https://github.com/krokozyab/ofjdbc/tree/master/otbireport)
-and un-archive them into `/Shared Folders/Custom/Financials` in BI Publisher
-(any folder will do — you pass its path in `REPORT_PATH`).
+> **Already using ofjdbc? Skip this step.**
+>
+> It is the **same report**. [ofjdbc](https://github.com/krokozyab/ofjdbc) is
+> the JDBC driver for this same detour, by the same author, and this extension
+> talks to the report it deploys. If your DBeaver already connects through
+> ofjdbc, the Fusion side is done — use the same path you have in your JDBC
+> URL as `REPORT_PATH` here, and go straight to [Install](#install).
 
-You need the **BI Publisher Data Model Developer** role to deploy it, and the
-account you connect with needs **Access SOAP** and permission to run the
-report.
+Otherwise, deploy it once. From
+[the `otbireport` folder of the ofjdbc repository](https://github.com/krokozyab/ofjdbc/tree/master/otbireport):
+
+> Setup Fusion Reports: In your Fusion instance, un-archive
+> `DM_ARB.xdm.catalog` and `RP_ARB.xdo.catalog` (found in the `otbireport`
+> folder of this repository) into the `/Shared Folders/Custom/Financials`
+> folder. Note: You can use a different folder path, but you will need to
+> update the report path in the connection URL.
+
+Here, "the report path" is the `REPORT_PATH` on your secret — for the folder
+above, `/Custom/Financials/RP_ARB.xdo`.
+
+Deploying a data model needs BI Publisher privileges in Fusion; the account you
+then connect with needs **Access SOAP** and permission to run the report. If it
+lacks either, the error says so by name.
 
 ---
 
