@@ -90,6 +90,10 @@ LOAD ofquack;
 `INSTALL` downloads it once. `LOAD` is per session — put it at the top of your
 script, or in your DuckDB startup file.
 
+> **Going to use `ATTACH` and browse tables in a client?** Do
+> [the one-time warm-up](#first-run-warm-the-dictionary) first, or the schema
+> will look empty and you will think it is broken.
+
 ---
 
 ## Your first query
@@ -178,19 +182,52 @@ WHERE vendor_id = 12345;
 ```
 
 Column types come from Fusion's own dictionary, so `NUMBER(10,2)` arrives as
-`DECIMAL` and `DATE` as `DATE`. `ATTACH` itself costs no requests — the first
-mention of a table fetches its columns, and that is cached.
+`DECIMAL` and `DATE` as `DATE`.
 
-`SHOW TABLES` on a fresh attachment lists nothing, which is deliberate: a
-Fusion instance holds tens of thousands of objects, and listing them all with
-their columns would be hours of calls. Warm what you need:
+### First run: warm the dictionary
+
+> ⚠️ **Attach without warming and the schema looks empty.** Expand it in
+> DBeaver and there are no tables. Nothing is broken — the catalog shows only
+> what it already knows, and on a fresh install it knows nothing.
+
+Run this once, before you attach anything. It takes **minutes**, it makes tens
+of requests, and you never do it again on this machine:
 
 ```sql
-SELECT count(*) FROM oracle_fusion_tables();           -- names, once, then cached
-SELECT * FROM ofquack_cache_warm(pattern := 'AP\_%');  -- columns for a family
+LOAD ofquack;
+
+-- 1. The names. Tens of thousands of them, cached on disk for a week.
+SELECT count(*) FROM oracle_fusion_tables();
+
+-- 2. The columns, for the tables you actually care about.
+--    Without this step the tree stays empty even though step 1 succeeded.
+SELECT * FROM ofquack_cache_warm(pattern := 'AP\_%',  max_tables := 500);
+SELECT * FROM ofquack_cache_warm(pattern := 'GL\_%',  max_tables := 500);
+SELECT * FROM ofquack_cache_warm(pattern := 'XLA\_%', max_tables := 500);
 ```
 
-Tables you name directly work whether or not they have been listed.
+Then attach, and the tables are there — instantly, in this session and every
+session after it.
+
+Two things are worth separating, because they fail differently:
+
+| | Cold | After warming |
+|---|---|---|
+| `ATTACH` | instant, no requests | instant |
+| `SHOW TABLES`, the DBeaver tree, autocomplete | **empty** — never asks Fusion | lists the warmed tables |
+| `SELECT … FROM f.AP_INVOICES_ALL` | works, but the **first one pays for the whole dictionary listing** — minutes | seconds |
+
+So a table you name directly always works, listed or not. It is the *browsing*
+that needs warming — and the first query on a cold machine that is unexpectedly
+slow, because it is doing step 1 for you in the middle of your `SELECT`.
+
+Warming both steps deliberately, up front, is the difference between "this is
+broken" and "this is a database".
+
+**Why it is not automatic:** a Fusion instance holds tens of thousands of
+objects, and fetching every table's columns is hours of SOAP calls. Which
+families you need is your decision, not one this extension should make for you.
+`ofquack_cache_status()` shows what is currently cached.
 
 **Which to use.** `ATTACH` for browsing and for straightforward reads;
 `oracle_fusion_query` when you want Oracle to do the work — a join, an analytic
@@ -241,6 +278,18 @@ More detail: [capabilities and limits](docs/CAPABILITIES.md).
 ---
 
 ## Troubleshooting
+
+**The attached schema is empty — no tables in the tree** — the dictionary has
+not been warmed on this machine. See
+[warm the dictionary first](#first-run-warm-the-dictionary). Note
+that `oracle_fusion_tables()` alone is not enough: a table appears in the
+listing only once its *columns* are cached, which is what `ofquack_cache_warm()`
+does. `SELECT * FROM ofquack_cache_status()` shows where you are.
+
+**The first query on a new machine takes minutes** — the same cause. Naming a
+table on a cold cache pays for the whole dictionary listing inside your
+`SELECT`. Warm deliberately and it happens once, visibly, instead of
+unexpectedly.
 
 **"Oracle Fusion redirected the request to a sign-in page"** — the credentials
 were not accepted, or the instance uses SSO and you have not run

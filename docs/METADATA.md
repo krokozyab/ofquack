@@ -121,12 +121,22 @@ listing costs no requests.
 | `ATTACH` | 0 |
 | `SHOW TABLES` (cold) | 0 — and lists nothing |
 | `SHOW TABLES` (after warming) | 0 |
-| `SELECT … FROM f.main.T`, first time | 1 for the table list (if cold) + 1 for that table's columns |
-| the same query again | 0 metadata requests |
+| `SELECT … FROM f.main.T`, cold cache | **the whole table listing** — dozens of requests, minutes — plus 1 for that table's columns |
+| the same, table list already cached | 1, for that table's columns |
+| the same query again | 0 |
 
 `SHOW TABLES` on a cold catalog is empty rather than slow. Listing the whole
 dictionary takes long enough that blocking a tab-completion on it would be
-worse than showing nothing; `SELECT * FROM oracle_fusion_tables()` warms it.
+worse than showing nothing, so `GetDefaultEntries()` answers from the cache and
+never from the network.
+
+The consequence is worth stating plainly, because it is what a first-time user
+meets: on a machine that has never connected to the instance, an attached
+schema appears empty, and the first query that names a table pays for the
+entire dictionary listing inside that query. Both are avoided by warming
+deliberately — `oracle_fusion_tables()` for the names, then
+`ofquack_cache_warm()` for the columns, since a table is listed only once its
+columns are known.
 
 ## Secured HR views
 

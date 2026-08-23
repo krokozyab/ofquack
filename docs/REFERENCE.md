@@ -287,17 +287,41 @@ to contain a decimal point.
 an explanation, rather than quietly making a local table inside the catalog
 that would shadow the real one.
 
-#### `SHOW TABLES` on a cold catalog lists nothing
+#### Warm the dictionary before you attach
 
-On purpose. Listing tens of thousands of tables with their columns would be hours of
-SOAP calls, so the catalog lists only what it already knows. Warm it first:
+**On a machine that has never connected to this instance, an attached schema
+looks empty.** `SHOW TABLES` returns nothing, the DBeaver tree has no children,
+autocomplete offers nothing. That is not a failure — the catalog answers a
+listing only from what it has cached, and never goes to the network for it,
+because listing tens of thousands of objects with their columns would be hours
+of SOAP calls.
+
+Two separate things have to be cached, and warming only the first is the usual
+mistake:
 
 ```sql
-SELECT count(*) FROM oracle_fusion_tables();          -- the names
-SELECT * FROM ofquack_cache_warm(pattern := 'AP\_%'); -- and their columns
+-- 1. The table names. Minutes, dozens of requests, once per machine.
+SELECT count(*) FROM oracle_fusion_tables();
+
+-- 2. The columns. A table is listed only once its columns are known, so
+--    without this the tree is still empty after step 1 succeeded.
+SELECT * FROM ofquack_cache_warm(pattern := 'AP\_%', max_tables := 500);
 ```
 
-Tables you name directly always work, listed or not.
+Both are cached on disk for a week, so a new session — or a new process — pays
+nothing.
+
+What works cold, and what does not:
+
+| | Cold | Warmed |
+|---|---|---|
+| `ATTACH` | instant, 0 requests | instant |
+| `SHOW TABLES`, tree, autocomplete | empty | lists what is warmed |
+| `SELECT … FROM f.T` by name | works; the first one pays the full dictionary listing | seconds |
+
+A table you name directly always works, listed or not. If the first query on a
+cold machine seems to hang for minutes, that is step 1 happening inside your
+`SELECT`.
 
 #### When to use `ATTACH` and when to use `oracle_fusion_query`
 
