@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 #include "ofquack/metadata_fetch.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>

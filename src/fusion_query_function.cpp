@@ -1,6 +1,7 @@
 #include "ofquack/fusion_query_function.hpp"
 
 #include <algorithm>
+#include <cstdint>
 
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"

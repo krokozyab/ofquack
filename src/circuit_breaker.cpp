@@ -2,6 +2,8 @@
 
 #include "ofquack/errors.hpp"
 
+#include <cstdint>
+
 namespace ofquack {
 
 CircuitBreaker::CircuitBreaker(CircuitBreakerSettings settings_p)

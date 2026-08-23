@@ -1,6 +1,7 @@
 #include "ofquack/metadata_queries.hpp"
 
 #include <cctype>
+#include <cstdint>
 #include <sstream>
 
 namespace ofquack {

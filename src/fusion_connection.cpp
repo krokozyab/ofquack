@@ -7,6 +7,7 @@
 #include "ofquack/token_cache.hpp"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace duckdb {
 

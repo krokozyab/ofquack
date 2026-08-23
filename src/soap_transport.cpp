@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <random>
 #include <thread>

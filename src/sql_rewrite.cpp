@@ -2,6 +2,7 @@
 
 #include "ofquack/sql_text.hpp"
 
+#include <cstdint>
 #include <vector>
 
 namespace ofquack {

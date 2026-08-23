@@ -9,6 +9,7 @@
 #include "ofquack/token_cache.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 
 namespace duckdb {

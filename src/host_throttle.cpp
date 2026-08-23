@@ -2,6 +2,7 @@
 
 #include "ofquack/circuit_breaker.hpp"
 
+#include <cstdint>
 #include <unordered_map>
 
 namespace ofquack {

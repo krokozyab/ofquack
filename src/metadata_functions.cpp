@@ -10,6 +10,7 @@
 #include "ofquack/oracle_type_map.hpp"
 #include "ofquack/transport.hpp"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 

@@ -25,6 +25,7 @@
 #include "ofquack/transport.hpp"
 #include "ofquack/xml_report.hpp"
 
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <mutex>

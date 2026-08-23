@@ -7,8 +7,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Superseding a push is the point: a newer commit makes the older run's answer
+# uninteresting. A manual run is different -- it is the release matrix, started
+# deliberately, and an unrelated docs push must not cancel it. Mixing the run id
+# into the group for a workflow_dispatch gives each dispatch a group of its own.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -19,8 +23,20 @@ jobs:
       duckdb_version: v1.5.5
       ci_tools_version: v1.5-variegata
       extension_name: ofquack
-      # No process spawning, no sockets, no libcurl: the SOAP transport cannot work there.
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'
+      # wasm: no process spawning, no sockets, no libcurl, so the SOAP transport
+      # cannot work there at all. Shipping an artifact that always refuses is
+      # worse than not shipping one.
+      #
+      # windows_amd64_mingw: the MSVC target, windows_amd64, is the Windows
+      # build a user actually installs, and it stays. mingw is a second
+      # toolchain whose failures have been about its own strictness rather than
+      # about a defect anyone would meet. 132 of the 319 published community
+      # extensions exclude it.
+      #
+      # This list must stay identical to `excluded_platforms` in
+      # docs/community-extension-description.yml, or the community registry
+      # builds a target this repository never builds.
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw'
 
   code-quality-check:
     name: Code quality check
@@ -31,23 +47,12 @@ jobs:
       extension_name: ofquack
       format_checks: 'tidy'
 
-  # Publishes to the maintainer's own S3 bucket, for people who install with
-  # `SET custom_extension_repository`. Installing `FROM community` does not go
-  # through this: that channel is built and served by duckdb/community-extensions
-  # from the SHA pinned in their description.yml.
+  # There is deliberately no deploy job.
   #
-  # Needs S3 credentials in the repository secrets; without them the job fails,
-  # which is why it only runs on a tag rather than on every push.
-  duckdb-stable-deploy:
-    name: Deploy extension binaries
-    needs: duckdb-stable-build
-    if: startsWith(github.ref, 'refs/tags/v')
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5-variegata
-    secrets: inherit
-    with:
-      duckdb_version: v1.5.5
-      ci_tools_version: v1.5-variegata
-      extension_name: ofquack
-      deploy_latest: true
-      deploy_versioned: true
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'
+  # Publishing through community-extensions needs none: their registry clones
+  # this repository at the SHA pinned in the descriptor, builds the whole matrix
+  # itself, and serves the artifacts from their own bucket. A deploy job here
+  # would only publish to a maintainer's private S3 for people installing with
+  # `SET custom_extension_repository` -- and it would need S3_* secrets this
+  # repository does not have, so tagging a release would fail the run for a
+  # channel nobody uses.

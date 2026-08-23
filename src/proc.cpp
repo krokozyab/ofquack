@@ -3,6 +3,7 @@
 #include "ofquack/errors.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <thread>
 

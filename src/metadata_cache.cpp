@@ -4,6 +4,7 @@
 #include "duckdb/main/appender.hpp"
 
 #include <chrono>
+#include <cstdint>
 
 namespace duckdb {
 

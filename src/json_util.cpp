@@ -1,6 +1,7 @@
 #include "ofquack/json_util.hpp"
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 
 namespace ofquack {
