@@ -11,7 +11,7 @@
 # DuckDB and belongs on the other side of the seam.
 
 cmake_minimum_required(VERSION 3.16)
-project(ofquack_pure_tests CXX)
+project(fusion_scanner_pure_tests CXX)
 
 set(OFQUACK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
@@ -19,7 +19,7 @@ find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(tinyxml2 QUIET)
 
-add_executable(ofquack_pure_test
+add_executable(fusion_scanner_pure_test
         ${OFQUACK_ROOT}/test/cpp/pure_test.cpp
         ${OFQUACK_ROOT}/src/soap_envelope.cpp
         ${OFQUACK_ROOT}/src/xml_report.cpp
@@ -42,16 +42,16 @@ add_executable(ofquack_pure_test
         ${OFQUACK_ROOT}/src/http_curl.cpp
         ${OFQUACK_ROOT}/src/base64.cpp)
 
-target_include_directories(ofquack_pure_test PRIVATE ${OFQUACK_ROOT}/src ${OFQUACK_ROOT}/src/include)
-target_compile_features(ofquack_pure_test PRIVATE cxx_std_17)
-target_link_libraries(ofquack_pure_test PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
+target_include_directories(fusion_scanner_pure_test PRIVATE ${OFQUACK_ROOT}/src ${OFQUACK_ROOT}/src/include)
+target_compile_features(fusion_scanner_pure_test PRIVATE cxx_std_17)
+target_link_libraries(fusion_scanner_pure_test PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
 
 if(tinyxml2_FOUND)
-  target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2)
+  target_link_libraries(fusion_scanner_pure_test PRIVATE tinyxml2::tinyxml2)
 else()
   # Distribution packages do not all ship a CMake config for tinyxml2.
-  target_link_libraries(ofquack_pure_test PRIVATE tinyxml2)
+  target_link_libraries(fusion_scanner_pure_test PRIVATE tinyxml2)
 endif()
 
 enable_testing()
-add_test(NAME ofquack_pure_test COMMAND ofquack_pure_test)
+add_test(NAME fusion_scanner_pure_test COMMAND fusion_scanner_pure_test)

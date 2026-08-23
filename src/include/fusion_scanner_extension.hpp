@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-class OfquackExtension : public Extension {
+class FusionScannerExtension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;
 	std::string Name() override;

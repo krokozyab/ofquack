@@ -9,7 +9,7 @@ Almost everything here is a **table function**: you call it by selecting from
 it.
 
 ```sql
-SELECT * FROM ofquack_sso_login();
+SELECT * FROM fusion_scanner_sso_login();
 ```
 
 Oracle spells the same idea `SELECT * FROM TABLE(my_pipelined_function())`.
@@ -18,8 +18,8 @@ the `FROM` clause.
 
 **A table function does not always just return data.** This is the part that
 catches people out, so plainly: some of these functions *do something*.
-`SELECT * FROM ofquack_sso_login()` opens a browser window and waits for you to
-sign in. `SELECT * FROM ofquack_cache_invalidate()` deletes cached metadata.
+`SELECT * FROM fusion_scanner_sso_login()` opens a browser window and waits for you to
+sign in. `SELECT * FROM fusion_scanner_cache_invalidate()` deletes cached metadata.
 The row that comes back afterwards is the report of what happened, not the
 reason for the call. It is the same idea as a PL/SQL function with a side
 effect invoked through `SELECT … FROM DUAL`.
@@ -68,7 +68,7 @@ CREATE SECRET fusion (
 ```
 
 Holds no credential at all — only where to sign in. Creating it does **not**
-open a browser; that is [`ofquack_sso_login()`](#ofquack_sso_login)'s job,
+open a browser; that is [`fusion_scanner_sso_login()`](#fusion_scanner_sso_login)'s job,
 because `CREATE SECRET` is routinely run from scripts and must not block
 waiting for a person.
 
@@ -88,7 +88,7 @@ waiting for a person.
 | `TOKEN` | config | A JWT you obtained yourself, for `AUTH bearer`. |
 | `SSO_LOGIN_URL` | browser | Where to send the browser. Defaults to the endpoint's host, which is normally right. |
 | `CHROME_PATH` | browser | Path to a Chrome/Edge/Chromium binary, when it is not where we look. |
-| `CHROME_PROFILE_DIR` | browser | Where the browser profile lives. Default `~/.ofquack/chrome-profile`; it is what remembers you between sessions. |
+| `CHROME_PROFILE_DIR` | browser | Where the browser profile lives. Default `~/.fusion_scanner/chrome-profile`; it is what remembers you between sessions. |
 | `USE_TEMP_PROFILE` | browser | `true` forces a throwaway profile, so every sign-in starts clean. |
 | `SSO_TIMEOUT_SECONDS` | browser | How long to wait for the person at the keyboard. Default 300. |
 
@@ -112,7 +112,7 @@ Several secrets and no name is an error listing them, not a guess.
 
 ## Signing in with SSO
 
-### `ofquack_sso_login()`
+### `fusion_scanner_sso_login()`
 
 **This is the function that actually signs you in.** Calling it launches a
 browser window pointed at your Fusion instance, waits while you complete
@@ -121,7 +121,7 @@ collects the token Fusion hands its own signed-in session. Nothing in the name
 says "and now a window will open", so: it does.
 
 ```sql
-SELECT * FROM ofquack_sso_login();
+SELECT * FROM fusion_scanner_sso_login();
 ```
 
 **Returns** one row: `host`, `subject` (who you signed in as), `expires_at`,
@@ -138,18 +138,18 @@ Worth knowing:
 - The token lives **in memory only**, shared by every connection in the
   process, and is gone when DuckDB exits.
 - You will usually not have to sign in again tomorrow: the browser profile at
-  `~/.ofquack/chrome-profile` keeps the cookie that gets a fresh token without
+  `~/.fusion_scanner/chrome-profile` keeps the cookie that gets a fresh token without
   a fresh login.
 - If Chrome is already running under that profile it may hand the URL to the
   running instance and exit; the retry uses a throwaway profile automatically.
 
-### `ofquack_sso_status()`
+### `fusion_scanner_sso_status()`
 
 Whether you are signed in, and for how much longer. Touches no network and
 opens nothing.
 
 ```sql
-SELECT * FROM ofquack_sso_status();
+SELECT * FROM fusion_scanner_sso_status();
 ```
 
 **Returns** `host`, `have_token`, `subject`, `expires_at`, `should_refresh`,
@@ -158,13 +158,13 @@ SELECT * FROM ofquack_sso_status();
 It never prints the token itself: a live credential in your scrollback and
 query history is one more thing to worry about, for no benefit.
 
-### `ofquack_sso_logout()`
+### `fusion_scanner_sso_logout()`
 
 Discards the token held for this host. The browser profile is untouched, so the
-next `ofquack_sso_login()` will probably not ask for a password.
+next `fusion_scanner_sso_login()` will probably not ask for a password.
 
 ```sql
-SELECT * FROM ofquack_sso_logout();
+SELECT * FROM fusion_scanner_sso_logout();
 ```
 
 **Returns** `host`, `token_discarded`.
@@ -305,7 +305,7 @@ SELECT count(*) FROM oracle_fusion_tables();
 
 -- 2. The columns. A table is listed only once its columns are known, so
 --    without this the tree is still empty after step 1 succeeded.
-SELECT * FROM ofquack_cache_warm(pattern := 'AP\_%', max_tables := 500);
+SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
 ```
 
 Both are cached on disk for a week, so a new session — or a new process — pays
@@ -342,7 +342,7 @@ both and joins locally, which is usually the wrong way round for large tables.
 ## The dictionary
 
 Every question about Fusion's dictionary is answered by a report call measured
-in seconds, so answers are cached on disk at `~/.ofquack/metadata.duckdb`,
+in seconds, so answers are cached on disk at `~/.fusion_scanner/metadata.duckdb`,
 keyed by endpoint and report path, for a week.
 
 ### `oracle_fusion_tables()`
@@ -377,13 +377,13 @@ SELECT * FROM oracle_fusion_columns('AP_INVOICES_ALL');
 Tables are read from `FND_COLUMNS` by their `TABLE_ID`; views are not in
 `FND_COLUMNS` at all and come from `ALL_TAB_COLUMNS`.
 
-### `ofquack_cache_warm()`
+### `fusion_scanner_cache_warm()`
 
 Fetches columns for many tables in advance, so that autocomplete and
 `SHOW TABLES` have something to work with and later queries do not stop to ask.
 
 ```sql
-SELECT * FROM ofquack_cache_warm(pattern := 'GL\_%', max_tables := 500);
+SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%', max_tables := 500);
 ```
 
 **Returns** `tables_warmed`, `columns_cached`, `tables_without_columns`,
@@ -395,10 +395,10 @@ SELECT * FROM ofquack_cache_warm(pattern := 'GL\_%', max_tables := 500);
 Bounded by default on purpose: warming every table in the dictionary is hours of calls.
 Columns are fetched ten tables per request.
 
-### `ofquack_cache_status()`
+### `fusion_scanner_cache_status()`
 
 ```sql
-SELECT * FROM ofquack_cache_status();
+SELECT * FROM fusion_scanner_cache_status();
 ```
 
 **Returns** `mode`, `path`, `endpoint`, `cached_tables`, `dictionary_tables`,
@@ -409,14 +409,14 @@ holding the cache file pushes you down that ladder; it is a slowdown, never an
 error. `complete` compares what is cached against what the instance says it
 has.
 
-### `ofquack_cache_invalidate()`
+### `fusion_scanner_cache_invalidate()`
 
 Throws cached metadata away, for when Fusion has been patched and the
 dictionary has moved under you.
 
 ```sql
-SELECT * FROM ofquack_cache_invalidate();                            -- everything
-SELECT * FROM ofquack_cache_invalidate(table := 'AP_INVOICES_ALL');  -- one table
+SELECT * FROM fusion_scanner_cache_invalidate();                            -- everything
+SELECT * FROM fusion_scanner_cache_invalidate(table := 'AP_INVOICES_ALL');  -- one table
 ```
 
 **Returns** `tables_removed`, `columns_removed`.
@@ -425,12 +425,12 @@ SELECT * FROM ofquack_cache_invalidate(table := 'AP_INVOICES_ALL');  -- one tabl
 
 ## Housekeeping
 
-### `ofquack_version()`
+### `fusion_scanner_version()`
 
 A scalar function, so no `FROM`:
 
 ```sql
-SELECT ofquack_version();
+SELECT fusion_scanner_version();
 -- 0.1.0 (built Aug 22 2026 21:21:36)
 ```
 
@@ -438,7 +438,7 @@ The build stamp is there for a reason: a loaded extension stays in the process,
 so after replacing the binary you may still be running the old one. If the
 timestamp is not the one you just built, restart your client.
 
-### `ofquack_attached_scan`
+### `fusion_scanner_attached_scan`
 
 Internal. It is the scan behind an attached table and appears in `EXPLAIN`
 output; you never call it yourself.
@@ -451,12 +451,12 @@ Set with `SET`, read with `current_setting()`. They apply to the session.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `ofquack_stable_paging` | `true` | Gives a paged statement an order, so its pages partition the result instead of sampling it. Turning it off is faster and lets pages repeat and skip rows. |
-| `ofquack_filter_pushdown` | `false` | Sends `WHERE` predicates on attached tables to Fusion. Off because DuckDB removes a pushed filter from its own plan, so anything not translatable exactly must fail rather than be approximated. |
-| `ofquack_metadata_page_size` | `400` | Rows per page when listing the dictionary. Lower it if a listing keeps stopping short. |
+| `fusion_scanner_stable_paging` | `true` | Gives a paged statement an order, so its pages partition the result instead of sampling it. Turning it off is faster and lets pages repeat and skip rows. |
+| `fusion_scanner_filter_pushdown` | `false` | Sends `WHERE` predicates on attached tables to Fusion. Off because DuckDB removes a pushed filter from its own plan, so anything not translatable exactly must fail rather than be approximated. |
+| `fusion_scanner_metadata_page_size` | `400` | Rows per page when listing the dictionary. Lower it if a listing keeps stopping short. |
 
 ```sql
-SET ofquack_filter_pushdown = true;
+SET fusion_scanner_filter_pushdown = true;
 SELECT invoice_num FROM f.AP_INVOICES_ALL WHERE vendor_id = 12345;
 ```
 

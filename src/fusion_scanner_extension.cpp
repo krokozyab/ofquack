@@ -1,6 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "ofquack_extension.hpp"
+#include "fusion_scanner_extension.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -37,8 +37,8 @@ void EnsureCurlInitialized() {
 //! fix that did not work.
 void OfquackVersion(DataChunk &args, ExpressionState &, Vector &result) {
 	const std::string version =
-#ifdef EXT_VERSION_OFQUACK
-	    EXT_VERSION_OFQUACK
+#ifdef EXT_VERSION_FUSION_SCANNER
+	    EXT_VERSION_FUSION_SCANNER
 #else
 	    "dev"
 #endif
@@ -51,7 +51,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	EnsureCurlInitialized();
 	loader.SetDescription("Query Oracle Fusion via BI Publisher SOAP calls");
 
-	loader.RegisterFunction(ScalarFunction("ofquack_version", {}, LogicalType::VARCHAR, OfquackVersion));
+	loader.RegisterFunction(ScalarFunction("fusion_scanner_version", {}, LogicalType::VARCHAR, OfquackVersion));
 
 	RegisterFusionSecrets(loader);
 	RegisterFusionQueryFunction(loader);
@@ -60,17 +60,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterFusionSsoFunctions(loader);
 }
 
-void OfquackExtension::Load(ExtensionLoader &loader) {
+void FusionScannerExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
 
-std::string OfquackExtension::Name() {
-	return "ofquack";
+std::string FusionScannerExtension::Name() {
+	return "fusion_scanner";
 }
 
-std::string OfquackExtension::Version() const {
-#ifdef EXT_VERSION_OFQUACK
-	return EXT_VERSION_OFQUACK;
+std::string FusionScannerExtension::Version() const {
+#ifdef EXT_VERSION_FUSION_SCANNER
+	return EXT_VERSION_FUSION_SCANNER;
 #else
 	return "";
 #endif
@@ -80,7 +80,7 @@ std::string OfquackExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(ofquack, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(fusion_scanner, loader) {
 	duckdb::LoadInternal(loader);
 }
 

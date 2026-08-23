@@ -66,7 +66,7 @@ rather than after.
 1. Bump `EXTENSION_VERSION` in `extension_config.cmake`.
 2. Tag `vX.Y.Z`. The deploy job publishes to the maintainer's bucket on a tag.
 3. For the community channel, open a PR against
-   `duckdb/community-extensions` updating `extensions/ofquack/description.yml`:
+   `duckdb/community-extensions` updating `extensions/fusion_scanner/description.yml`:
    the new `version`, and `ref` set to the **commit SHA** of the release — not
    a tag, which can be moved. That commit must already have the `duckdb`
    submodule on the version named in this file.

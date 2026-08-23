@@ -11,7 +11,7 @@
 namespace duckdb {
 
 //! How the cache ended up in its current state, reported by
-//! ofquack_cache_status() so a silent downgrade is at least visible.
+//! fusion_scanner_cache_status() so a silent downgrade is at least visible.
 enum class CacheMode {
 	READ_WRITE, //!< the normal case
 	READ_ONLY,  //!< another process holds the file; reads work, writes do not
@@ -22,7 +22,7 @@ enum class CacheMode {
 //!
 //! Every metadata question costs a BI Publisher call measured in seconds, so
 //! asking twice is the thing worth avoiding. The cache is a DuckDB database of
-//! its own under ~/.ofquack rather than tables in the user's database: it must
+//! its own under ~/.fusion_scanner rather than tables in the user's database: it must
 //! work for an in-memory session, must not appear in the user's catalog, and
 //! must be shared between connections.
 //!

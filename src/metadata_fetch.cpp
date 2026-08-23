@@ -244,7 +244,7 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 		    reached +
 		    ".\nThe list is incomplete and has not been cached. This is a limit on the report rather than on the "
 		    "query -- retry, and if it stops in the same place again, ask for smaller pages: SET "
-		    "ofquack_metadata_page_size = " +
+		    "fusion_scanner_metadata_page_size = " +
 		    std::to_string(rows_per_page / 2) + ".");
 	}
 	return tables;

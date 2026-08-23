@@ -6,7 +6,7 @@
 # -- it emits no object code, so a clean run here is necessary but not
 # sufficient: link errors still need a real build.
 #
-# Usage: scripts/syntax_check.sh src/ofquack_extension.cpp [more.cpp ...]
+# Usage: scripts/syntax_check.sh src/fusion_scanner_extension.cpp [more.cpp ...]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

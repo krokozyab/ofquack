@@ -71,7 +71,7 @@ stays under that.
 Page size is 400 rows and can be lowered when an instance is stingier than that:
 
 ```sql
-SET ofquack_metadata_page_size = 200;
+SET fusion_scanner_metadata_page_size = 200;
 ```
 
 A listing that ends short is never cached. Before listing anything, the fetcher
@@ -80,7 +80,7 @@ listing that returned fewer — a partial dictionary that looks complete is wors
 than an error, because it is cached for a week and every later lookup misses
 with nothing to show for it. The check lives in the fetcher rather than in
 `oracle_fusion_tables()`, so `ATTACH`, `oracle_fusion_columns()` and
-`ofquack_cache_warm()` are covered by it too.
+`fusion_scanner_cache_warm()` are covered by it too.
 
 The count is `COUNT(DISTINCT UPPER(table_name))` rather than `COUNT(*)`: a name
 that exists as both a table and a view is one entry in the listing, so counting
@@ -88,7 +88,7 @@ rows of the union would report every complete listing as short.
 
 ## The cache
 
-`~/.ofquack/metadata.duckdb`, a DuckDB database of its own. Not tables in your
+`~/.fusion_scanner/metadata.duckdb`, a DuckDB database of its own. Not tables in your
 database, because it has to work for an in-memory session, must not appear in
 your catalog, and is shared between connections.
 
@@ -97,15 +97,15 @@ instance never share metadata. The default lifetime is a week: Fusion's
 dictionary changes when someone deploys, not continuously.
 
 ```sql
-SELECT * FROM ofquack_cache_status();
+SELECT * FROM fusion_scanner_cache_status();
 SELECT * FROM oracle_fusion_tables(refresh := true);
-SELECT * FROM ofquack_cache_invalidate();
-SELECT * FROM ofquack_cache_invalidate(table := 'GL_JE_HEADERS');
+SELECT * FROM fusion_scanner_cache_invalidate();
+SELECT * FROM fusion_scanner_cache_invalidate(table := 'GL_JE_HEADERS');
 ```
 
 If the cache file cannot be opened read-write it falls back to read-only, and
 then to memory. A cache problem is always a miss, never an error you see:
-slower is acceptable, refusing to work is not. `ofquack_cache_status()` reports
+slower is acceptable, refusing to work is not. `fusion_scanner_cache_status()` reports
 which mode is in effect.
 
 Freshness is compared against an epoch integer rather than SQL `now()`. `now()`
@@ -135,7 +135,7 @@ meets: on a machine that has never connected to the instance, an attached
 schema appears empty, and the first query that names a table pays for the
 entire dictionary listing inside that query. Both are avoided by warming
 deliberately — `oracle_fusion_tables()` for the names, then
-`ofquack_cache_warm()` for the columns, since a table is listed only once its
+`fusion_scanner_cache_warm()` for the columns, since a table is listed only once its
 columns are known.
 
 ## Secured HR views

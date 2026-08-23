@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-//! Registers ofquack_sso_login, ofquack_sso_status and ofquack_sso_logout.
+//! Registers fusion_scanner_sso_login, fusion_scanner_sso_status and fusion_scanner_sso_logout.
 void RegisterFusionSsoFunctions(ExtensionLoader &loader);
 
 } // namespace duckdb

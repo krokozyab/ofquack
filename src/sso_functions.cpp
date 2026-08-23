@@ -175,16 +175,16 @@ void RegisterFusionSsoFunctions(ExtensionLoader &loader) {
 	// Sign-in is its own function rather than something a query does on demand:
 	// it opens a browser window and waits for a person, which must never happen
 	// unexpectedly in the middle of somebody's SELECT.
-	TableFunction login("ofquack_sso_login", {}, ScanSso, SsoLoginBind, InitSso);
+	TableFunction login("fusion_scanner_sso_login", {}, ScanSso, SsoLoginBind, InitSso);
 	AddFusionNamedParameters(login);
 	login.named_parameters["force"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(login);
 
-	TableFunction status("ofquack_sso_status", {}, ScanSso, SsoStatusBind, InitSso);
+	TableFunction status("fusion_scanner_sso_status", {}, ScanSso, SsoStatusBind, InitSso);
 	AddFusionNamedParameters(status);
 	loader.RegisterFunction(status);
 
-	TableFunction logout("ofquack_sso_logout", {}, ScanSso, SsoLogoutBind, InitSso);
+	TableFunction logout("fusion_scanner_sso_logout", {}, ScanSso, SsoLogoutBind, InitSso);
 	AddFusionNamedParameters(logout);
 	loader.RegisterFunction(logout);
 }

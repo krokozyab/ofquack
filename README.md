@@ -57,7 +57,7 @@ SELECT * FROM oracle_fusion_tables();
 
 Oracle writes that as `SELECT * FROM TABLE(some_pipelined_function())`. DuckDB
 drops the `TABLE()` wrapper. And these functions are not always passive — for
-example `SELECT * FROM ofquack_sso_login()` opens a browser and signs you in.
+example `SELECT * FROM fusion_scanner_sso_login()` opens a browser and signs you in.
 The row it returns afterwards reports what happened; the call is the point. The
 [reference](docs/REFERENCE.md) says for each function what it actually does.
 
@@ -98,8 +98,8 @@ lacks either, the error says so by name.
 ## Install
 
 ```sql
-INSTALL ofquack FROM community;
-LOAD ofquack;
+INSTALL fusion_scanner FROM community;
+LOAD fusion_scanner;
 ```
 
 `INSTALL` downloads it once. `LOAD` is per session — put it at the top of your
@@ -147,7 +147,7 @@ CREATE SECRET fusion (
     REPORT_PATH '/Custom/Financials/RP_ARB.xdo'
 );
 
-SELECT * FROM ofquack_sso_login();   -- opens a browser; sign in there
+SELECT * FROM fusion_scanner_sso_login();   -- opens a browser; sign in there
 ```
 
 That second statement is the sign-in. A browser window opens, you authenticate
@@ -209,16 +209,16 @@ Run this once, before you attach anything. It takes **minutes**, it makes tens
 of requests, and you never do it again on this machine:
 
 ```sql
-LOAD ofquack;
+LOAD fusion_scanner;
 
 -- 1. The names. Tens of thousands of them, cached on disk for a week.
 SELECT count(*) FROM oracle_fusion_tables();
 
 -- 2. The columns, for the tables you actually care about.
 --    Without this step the tree stays empty even though step 1 succeeded.
-SELECT * FROM ofquack_cache_warm(pattern := 'AP\_%',  max_tables := 500);
-SELECT * FROM ofquack_cache_warm(pattern := 'GL\_%',  max_tables := 500);
-SELECT * FROM ofquack_cache_warm(pattern := 'XLA\_%', max_tables := 500);
+SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%',  max_tables := 500);
+SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%',  max_tables := 500);
+SELECT * FROM fusion_scanner_cache_warm(pattern := 'XLA\_%', max_tables := 500);
 ```
 
 Then attach, and the tables are there — instantly, in this session and every
@@ -242,7 +242,7 @@ broken" and "this is a database".
 **Why it is not automatic:** a Fusion instance holds tens of thousands of
 objects, and fetching every table's columns is hours of SOAP calls. Which
 families you need is your decision, not one this extension should make for you.
-`ofquack_cache_status()` shows what is currently cached.
+`fusion_scanner_cache_status()` shows what is currently cached.
 
 **Which to use.** `ATTACH` for browsing and for straightforward reads;
 `oracle_fusion_query` when you want Oracle to do the work — a join, an analytic
@@ -298,8 +298,8 @@ More detail: [capabilities and limits](docs/CAPABILITIES.md).
 not been warmed on this machine. See
 [warm the dictionary first](#first-run-warm-the-dictionary). Note
 that `oracle_fusion_tables()` alone is not enough: a table appears in the
-listing only once its *columns* are cached, which is what `ofquack_cache_warm()`
-does. `SELECT * FROM ofquack_cache_status()` shows where you are.
+listing only once its *columns* are cached, which is what `fusion_scanner_cache_warm()`
+does. `SELECT * FROM fusion_scanner_cache_status()` shows where you are.
 
 **The first query on a new machine takes minutes** — the same cause. Naming a
 table on a cold cache pays for the whole dictionary listing inside your
@@ -308,7 +308,7 @@ unexpectedly.
 
 **"Oracle Fusion redirected the request to a sign-in page"** — the credentials
 were not accepted, or the instance uses SSO and you have not run
-`ofquack_sso_login()`.
+`fusion_scanner_sso_login()`.
 
 **"redirected the SOAP request to … a page of the application"** — the request
 reached Fusion but was not treated as a web service call. Check that the
@@ -318,7 +318,7 @@ account has **Access SOAP** and can open BI Publisher.
 with no rows has no schema to describe. Add a predicate that matches something.
 
 **A query that used to work now fails after you rebuilt the extension** — check
-`SELECT ofquack_version()`. The build timestamp tells you whether your client
+`SELECT fusion_scanner_version()`. The build timestamp tells you whether your client
 is still holding the previous binary in memory; if it is, restart it.
 
 **A table "does not exist" that plainly does** — `oracle_fusion_columns('THE_TABLE')`
@@ -348,7 +348,7 @@ make release              # or: make debug
 Built binaries:
 
 - `./build/release/duckdb` — the DuckDB shell with the extension linked in
-- `./build/release/extension/ofquack/ofquack.duckdb_extension` — the loadable binary
+- `./build/release/extension/fusion_scanner/fusion_scanner.duckdb_extension` — the loadable binary
 - `./build/release/test/unittest` — DuckDB's test runner
 
 Built against DuckDB **v1.5.5**. A loadable extension refuses to load into any
@@ -358,7 +358,7 @@ and `duckdb_version` in the CI workflow have to move together.
 Loading a locally built binary needs unsigned extensions allowed:
 
 ```sh
-./build/release/duckdb -unsigned -c "LOAD './build/release/extension/ofquack/ofquack.duckdb_extension'"
+./build/release/duckdb -unsigned -c "LOAD './build/release/extension/fusion_scanner/fusion_scanner.duckdb_extension'"
 ```
 
 ### Tests
@@ -369,11 +369,11 @@ credentials:
 ```sh
 # Pure unit tests: no DuckDB at all, about a second.
 cmake -S test/standalone -B build/pure -G Ninja && cmake --build build/pure
-./build/pure/ofquack_pure_test
+./build/pure/fusion_scanner_pure_test
 
 # Adapter tests: drive the table functions and the catalog against a scripted
 # transport.
-./build/release/extension/ofquack/ofquack_adapter_test
+./build/release/extension/fusion_scanner/fusion_scanner_adapter_test
 
 # SQL tests.
 make test

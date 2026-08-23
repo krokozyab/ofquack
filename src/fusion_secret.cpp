@@ -30,7 +30,7 @@ unique_ptr<BaseSecret> CreateFusionSecretFromConfig(ClientContext &, CreateSecre
 //!
 //! Creating it does not open a browser: that would make CREATE SECRET
 //! interactive, and it is often run from a script. The sign-in happens when
-//! ofquack_sso_login() is called, and the token lives in memory only.
+//! fusion_scanner_sso_login() is called, and the token lives in memory only.
 unique_ptr<BaseSecret> CreateFusionSecretFromBrowser(ClientContext &, CreateSecretInput &input) {
 	auto secret = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
 	for (const auto &key : SECRET_KEYS) {

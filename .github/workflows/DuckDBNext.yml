@@ -72,7 +72,7 @@ jobs:
           per_file = collections.Counter(f for f, _ in set(own))
           total = sum(per_file.values())
           sha, date = os.environ["DUCKDB_MAIN_SHA"], os.environ["DUCKDB_MAIN_DATE"]
-          print("## ofquack against DuckDB main `%s` (%s)\n" % (sha, date))
+          print("## fusion_scanner against DuckDB main `%s` (%s)\n" % (sha, date))
           if total == 0:
               print("**Compiles cleanly.** 0 errors in this project's sources.\n")
           else:

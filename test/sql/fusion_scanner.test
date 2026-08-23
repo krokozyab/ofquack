@@ -1,8 +1,8 @@
-# name: test/sql/ofquack.test
-# description: ofquack registration, secrets and binder errors
-# group: [ofquack]
+# name: test/sql/fusion_scanner.test
+# description: fusion_scanner registration, secrets and binder errors
+# group: [fusion_scanner]
 
-require ofquack
+require fusion_scanner
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -59,7 +59,7 @@ false
 
 # Not signed in yet, and asking does not sign in.
 query II
-SELECT host, have_token FROM ofquack_sso_status(secret := 'sso');
+SELECT host, have_token FROM fusion_scanner_sso_status(secret := 'sso');
 ----
 sso.example.com	false
 
@@ -67,7 +67,7 @@ sso.example.com	false
 statement error
 SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', secret := 'sso');
 ----
-ofquack_sso_login
+fusion_scanner_sso_login
 
 # ---------------------------------------------------------------------------
 # Binder errors: everything here fails before any network access

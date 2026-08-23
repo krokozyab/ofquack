@@ -57,7 +57,7 @@ std::string DefaultCachePath() {
 	if (home.empty()) {
 		return {};
 	}
-	const auto directory = fs->JoinPath(home, ".ofquack");
+	const auto directory = fs->JoinPath(home, ".fusion_scanner");
 	try {
 		if (!fs->DirectoryExists(directory)) {
 			fs->CreateDirectory(directory);

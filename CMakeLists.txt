@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 
 # Set extension name here
-set(TARGET_NAME ofquack)
+set(TARGET_NAME fusion_scanner)
 
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
@@ -31,7 +31,7 @@ project(${TARGET_NAME})
 include_directories(src/include)
 
 set(EXTENSION_SOURCES
-        src/ofquack_extension.cpp
+        src/fusion_scanner_extension.cpp
         src/fusion_secret.cpp
         src/fusion_connection.cpp
         src/fusion_query_function.cpp
@@ -65,20 +65,20 @@ set(EXTENSION_SOURCES
         src/base64.cpp
 )
 
-# ofquack_version() embeds __DATE__ and __TIME__, which are fixed when *that*
+# fusion_scanner_version() embeds __DATE__ and __TIME__, which are fixed when *that*
 # file is compiled -- so editing any other source left the reported timestamp
 # unchanged, and the function meant to prove a binary is fresh instead argued
 # that it was stale. Rebuilding it whenever any source changes makes the stamp
 # mean what it claims.
 # Absolute paths: OBJECT_DEPENDS resolves a relative one against the build
 # directory, where these do not exist.
-set(OFQUACK_STAMP_DEPENDS "")
-foreach(ofquack_source ${EXTENSION_SOURCES})
-  if(NOT ofquack_source STREQUAL "src/ofquack_extension.cpp")
-    list(APPEND OFQUACK_STAMP_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${ofquack_source}")
+set(FUSION_SCANNER_STAMP_DEPENDS "")
+foreach(fusion_scanner_source ${EXTENSION_SOURCES})
+  if(NOT fusion_scanner_source STREQUAL "src/fusion_scanner_extension.cpp")
+    list(APPEND FUSION_SCANNER_STAMP_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${fusion_scanner_source}")
   endif()
 endforeach()
-set_property(SOURCE src/ofquack_extension.cpp APPEND PROPERTY OBJECT_DEPENDS ${OFQUACK_STAMP_DEPENDS})
+set_property(SOURCE src/fusion_scanner_extension.cpp APPEND PROPERTY OBJECT_DEPENDS ${FUSION_SCANNER_STAMP_DEPENDS})
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -100,14 +100,14 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} tinyxml2::tinyxml2)
 # Link libcurl into the loadable extension
 target_link_libraries(${LOADABLE_EXTENSION_NAME} CURL::libcurl)
 
-option(OFQUACK_BUILD_TESTS "Build the ofquack C++ unit tests" ON)
-if(OFQUACK_BUILD_TESTS)
+option(FUSION_SCANNER_BUILD_TESTS "Build the fusion_scanner C++ unit tests" ON)
+if(FUSION_SCANNER_BUILD_TESTS)
   enable_testing()
 
   # The pure suite links neither DuckDB nor libcurl: it covers envelope
   # construction and report parsing only, so it builds and runs in about a
   # second and is cheap enough for every push.
-  add_executable(ofquack_pure_test
+  add_executable(fusion_scanner_pure_test
                  test/cpp/pure_test.cpp
                  src/soap_envelope.cpp
                  src/xml_report.cpp
@@ -129,21 +129,21 @@ if(OFQUACK_BUILD_TESTS)
                  src/circuit_breaker.cpp
                  src/host_throttle.cpp
                  src/base64.cpp)
-  target_link_libraries(ofquack_pure_test PRIVATE tinyxml2::tinyxml2 OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
-  target_include_directories(ofquack_pure_test PRIVATE src src/include)
-  target_compile_features(ofquack_pure_test PRIVATE cxx_std_17)
-  add_test(NAME ofquack_pure_test COMMAND ofquack_pure_test)
+  target_link_libraries(fusion_scanner_pure_test PRIVATE tinyxml2::tinyxml2 OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
+  target_include_directories(fusion_scanner_pure_test PRIVATE src src/include)
+  target_compile_features(fusion_scanner_pure_test PRIVATE cxx_std_17)
+  add_test(NAME fusion_scanner_pure_test COMMAND fusion_scanner_pure_test)
 
   # The adapter suite links DuckDB so it can drive the table function against a
   # transport installed through ScopedTransportFactory, with no database file
   # and no network. duckdb_static is defined later in the DuckDB tree than this
   # file is processed, so it is named rather than probed with if(TARGET).
-  add_executable(ofquack_adapter_test test/cpp/adapter_test.cpp)
-  target_link_libraries(ofquack_adapter_test PRIVATE duckdb_static)
-  link_extension_libraries(ofquack_adapter_test PRIVATE)
-  target_include_directories(ofquack_adapter_test PRIVATE src src/include)
-  target_compile_features(ofquack_adapter_test PRIVATE cxx_std_17)
-  add_test(NAME ofquack_adapter_test COMMAND ofquack_adapter_test)
+  add_executable(fusion_scanner_adapter_test test/cpp/adapter_test.cpp)
+  target_link_libraries(fusion_scanner_adapter_test PRIVATE duckdb_static)
+  link_extension_libraries(fusion_scanner_adapter_test PRIVATE)
+  target_include_directories(fusion_scanner_adapter_test PRIVATE src src/include)
+  target_compile_features(fusion_scanner_adapter_test PRIVATE cxx_std_17)
+  add_test(NAME fusion_scanner_adapter_test COMMAND fusion_scanner_adapter_test)
 endif()
 
 install(

@@ -119,7 +119,7 @@ void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 			    "The secret for %s has no USERNAME, so it cannot authenticate.\n"
 			    "If this instance uses a username and password, add USERNAME and PASSWORD to the secret.\n"
 			    "If it is behind single sign-on, recreate the secret with PROVIDER browser and run "
-			    "SELECT * FROM ofquack_sso_login().",
+			    "SELECT * FROM fusion_scanner_sso_login().",
 			    host);
 		}
 		return;
@@ -133,7 +133,7 @@ void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 	}
 	// Deliberately does not sign in here: a SELECT must never open a browser
 	// window on its own.
-	throw InvalidInputException("Not signed in to %s. Run:\n  SELECT * FROM ofquack_sso_login();\n"
+	throw InvalidInputException("Not signed in to %s. Run:\n  SELECT * FROM fusion_scanner_sso_login();\n"
 	                            "or set TOKEN on the secret if you obtained one another way.",
 	                            host);
 }
@@ -238,7 +238,7 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 		options.all_varchar = all_varchar_override.GetValue<bool>();
 	}
 	Value stable_paging_setting;
-	if (context.TryGetCurrentSetting("ofquack_stable_paging", stable_paging_setting) &&
+	if (context.TryGetCurrentSetting("fusion_scanner_stable_paging", stable_paging_setting) &&
 	    !stable_paging_setting.IsNull()) {
 		options.stable_paging = stable_paging_setting.GetValue<bool>();
 	}

@@ -30,7 +30,7 @@ Consequences worth planning around:
   until something warms it. On a machine that has never connected to the
   instance this is the first thing you meet: attach, and the schema looks
   empty. Warm it deliberately — `oracle_fusion_tables()` for the names, then
-  `ofquack_cache_warm()` for the columns, because a table is listed only once
+  `fusion_scanner_cache_warm()` for the columns, because a table is listed only once
   its columns are known. See
   [the README](../README.md#first-run-warm-the-dictionary).
 
@@ -80,7 +80,7 @@ Equality on text *is* pushed: it does not depend on collation.
   Redaction hides a password from `duckdb_secrets()`, not from the disk. A
   temporary secret (the default) is not written at all.
 - SSO tokens are kept in memory only. The browser profile at
-  `~/.ofquack/chrome-profile` does persist, and holds the session cookie.
+  `~/.fusion_scanner/chrome-profile` does persist, and holds the session cookie.
 - JWT signatures are not verified. Fusion authenticates a token when it is
   used; the extension only reads the expiry to know when to ask for another.
 - `secured_views := true` rewrites eleven HR tables to their

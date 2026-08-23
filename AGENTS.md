@@ -30,17 +30,17 @@ make test                 # runs test/sql/*.test through build/release/test/unit
 ```
 
 Artifacts: `build/release/duckdb` (shell with the extension linked in),
-`build/release/extension/ofquack/ofquack.duckdb_extension` (loadable binary).
+`build/release/extension/fusion_scanner/fusion_scanner.duckdb_extension` (loadable binary).
 
-Single test file: `./build/release/test/unittest test/sql/ofquack.test`.
+Single test file: `./build/release/test/unittest test/sql/fusion_scanner.test`.
 
 The C++ suites are registered in the extension's own subdirectory, so the
 top-level `ctest` reports zero tests — run them there:
 
 ```sh
-ctest --test-dir build/release/extension/ofquack
-./build/release/extension/ofquack/ofquack_pure_test      # ~1s, no DuckDB, no network
-./build/release/extension/ofquack/ofquack_adapter_test   # drives the table function
+ctest --test-dir build/release/extension/fusion_scanner
+./build/release/extension/fusion_scanner/fusion_scanner_pure_test      # ~1s, no DuckDB, no network
+./build/release/extension/fusion_scanner/fusion_scanner_adapter_test   # drives the table function
 ```
 
 **Type-check without building:** `scripts/syntax_check.sh src/<file>.cpp` runs
@@ -63,7 +63,7 @@ The code is cut into layers, and the cut is load-bearing:
   Tested by `pure_test` in about a second.
 - **Layer 2 — transport** (`transport`, `soap_transport`, `http_curl`): knows libcurl, knows
   nothing about DuckDB.
-- **Layer 4 — adapter** (`ofquack_extension.cpp`, `fusion_secret`, `fusion_connection`,
+- **Layer 4 — adapter** (`fusion_scanner_extension.cpp`, `fusion_secret`, `fusion_connection`,
   `fusion_query_function`): knows DuckDB, reaches Fusion *only* through `FusionTransport`.
 
 Keep it that way: layer 1 must not include `duckdb.hpp` or `curl.h`, and the adapter must not
@@ -109,12 +109,12 @@ See `test/cpp/adapter_test.cpp`. Anything that would otherwise need credentials 
 - `ExtensionUtil` was **removed in v1.4.0**; its header is now a `static_assert(false)` trap.
   Registration goes through `ExtensionLoader`: `loader.RegisterFunction(fn)`,
   `loader.RegisterSecretType(type)`, `loader.SetDescription(...)`.
-- Entry point is `DUCKDB_CPP_EXTENSION_ENTRY(ofquack, loader)`. The old `ofquack_init` /
-  `ofquack_version` / `ofquack_shutdown` trio no longer exists — which is why
+- Entry point is `DUCKDB_CPP_EXTENSION_ENTRY(fusion_scanner, loader)`. The old `fusion_scanner_init` /
+  `fusion_scanner_version` / `fusion_scanner_shutdown` trio no longer exists — which is why
   `curl_global_init` sits behind a `std::once_flag` and there is no paired
   `curl_global_cleanup`: there is no shutdown hook to call it from, and calling it from a static
   destructor would race libcurl's background threads.
-- The version string comes from `EXT_VERSION_OFQUACK`, which extension-ci-tools defines from
+- The version string comes from `EXT_VERSION_FUSION_SCANNER`, which extension-ci-tools defines from
   `EXTENSION_VERSION` in `extension_config.cmake`.
 - **Do not set `CMAKE_CXX_STANDARD`.** It is a cache variable DuckDB owns and sets to 11;
   raising it from here raises it for DuckDB's own targets too, and only for those configured
@@ -197,13 +197,13 @@ than failing the query — `all_varchar := true` turns inference off entirely.
 `oracle_fusion_tables()` and `oracle_fusion_columns(name)` read Fusion's dictionary through the
 same report as everything else, so **every metadata question costs a SOAP call measured in
 seconds**. That is the constraint the whole design answers: results are cached in a DuckDB
-database of its own at `~/.ofquack/metadata.duckdb`, keyed by endpoint + report path so a
+database of its own at `~/.fusion_scanner/metadata.duckdb`, keyed by endpoint + report path so a
 development and a production instance never share rows, with a one-week TTL.
 
 The cache is a separate database rather than tables in the user's: it has to work for an
 in-memory session, must not appear in the user's catalog, and is shared between connections.
 A cache error is always a miss, never an error the user sees — `Open()` falls back read-write →
-read-only → memory, and `ofquack_cache_status()` reports which. (The read-only rung is
+read-only → memory, and `fusion_scanner_cache_status()` reports which. (The read-only rung is
 untested in practice: DuckDB v1.5.5 on macOS did not take an exclusive lock when a second
 process held the file, so the downgrade never triggered. It stays as insurance.)
 
@@ -267,7 +267,7 @@ Things that will bite if changed:
   local storage manager from it. Read-only is enforced by the catalog's own refusals instead.
 
 Projection pushdown is always on: every selected column travels back as base64-encoded XML.
-Filter pushdown is behind `ofquack_filter_pushdown`, **off by default** — DuckDB removes a
+Filter pushdown is behind `fusion_scanner_filter_pushdown`, **off by default** — DuckDB removes a
 filter it has handed to a scan, so anything not translatable exactly must fail rather than be
 approximated. Refused on purpose: ordered comparison on text (depends on `NLS_SORT`), the empty
 string (Oracle stores `''` as NULL), bare date literals (`NLS_DATE_FORMAT`), `IN` past 1000,
@@ -278,7 +278,7 @@ and any column whose type was inferred rather than read from the dictionary.
 ```sql
 CREATE SECRET fusion (TYPE oracle_fusion, PROVIDER browser, ENDPOINT …, REPORT_PATH …,
                       SSO_LOGIN_URL 'https://<host>');
-SELECT * FROM ofquack_sso_login();     -- opens a browser, waits for a person
+SELECT * FROM fusion_scanner_sso_login();     -- opens a browser, waits for a person
 ```
 
 No client secret, no registered application, no password in this process. The browser performs
@@ -295,12 +295,12 @@ Load-bearing decisions:
 - **`CREATE SECRET` is not interactive either** — it is routinely run from scripts.
 - Tokens live in memory only (`TokenCache`, keyed by host, process-wide, never per connection:
   otherwise every connection would open its own window). Persistence comes from the browser
-  profile at `~/.ofquack/chrome-profile`, which holds the cookie that gets a new token without
+  profile at `~/.fusion_scanner/chrome-profile`, which holds the cookie that gets a new token without
   a new login.
 - The JWT signature is **not** verified, on purpose: Fusion authenticates the token when it is
   used, and all this needs from it is `exp`. The expiry margin is capped at half the token's
   life, or a short-lived token would be discarded on arrival.
-- `ofquack_sso_status()` never prints the token: it is a live credential and would land in
+- `fusion_scanner_sso_status()` never prints the token: it is a live credential and would land in
   scrollback and query history.
 - If the browser exits without opening a debugging port, it handed the URL to an instance
   already running under that profile; the retry uses a throwaway profile.

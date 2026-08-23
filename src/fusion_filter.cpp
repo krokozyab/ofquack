@@ -18,7 +18,7 @@ constexpr idx_t MAX_IN_LIST = 1000;
 [[noreturn]] void Refuse(const string &what) {
 	throw NotImplementedException(
 	    "ofquack cannot push %s to Oracle Fusion without changing the result. "
-	    "Run with SET ofquack_filter_pushdown = false to filter in DuckDB instead.",
+	    "Run with SET fusion_scanner_filter_pushdown = false to filter in DuckDB instead.",
 	    what);
 }
 

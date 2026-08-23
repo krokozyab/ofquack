@@ -1,4 +1,4 @@
-# Submitted to duckdb/community-extensions as extensions/ofquack/description.yml.
+# Submitted to duckdb/community-extensions as extensions/fusion_scanner/description.yml.
 #
 # `ref` is pinned to a commit SHA rather than a tag: a tag can be moved, and the
 # build that shipped would then no longer be the build that was reviewed. It
@@ -9,7 +9,7 @@
 # `version` must match EXTENSION_VERSION in extension_config.cmake.
 
 extension:
-  name: ofquack
+  name: fusion_scanner
   description: Query Oracle Fusion from DuckDB through BI Publisher, with SSO, an ATTACH-able catalog and cached metadata
   version: 0.1.0
   language: C++
@@ -28,9 +28,9 @@ repo:
   # at when it builds, and a tag can be moved afterwards -- which would let the
   # published artifact drift away from the reviewed one.
   #
-  # This is the commit whose full matrix passed: clang-tidy, linux_amd64,
-  # linux_arm64, osx_amd64, osx_arm64 and windows_amd64, run 32629700497.
-  ref: 1482049283032d642075d22cb973039562ecc4dc
+  # Set this to the commit whose full matrix passed under this name. The SHA
+  # below is a placeholder until the rename has been through CI.
+  ref: 0000000000000000000000000000000000000000
 
 docs:
   hello_world: |

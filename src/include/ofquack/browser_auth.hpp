@@ -10,7 +10,7 @@ struct BrowserAuthSettings {
 	std::string login_url;
 	//! Explicit browser binary. Empty means search the usual places.
 	std::string chrome_path;
-	//! Profile directory. Empty means ~/.ofquack/chrome-profile.
+	//! Profile directory. Empty means ~/.fusion_scanner/chrome-profile.
 	std::string profile_dir;
 	//! Use a throwaway profile, so nothing is remembered between runs.
 	bool use_temp_profile = false;

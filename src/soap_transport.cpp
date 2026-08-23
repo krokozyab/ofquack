@@ -131,12 +131,12 @@ bool LooksLikeSignIn(const std::string &location) {
 	if (auth == AuthMode::BEARER) {
 		throw TokenExpiredError("Oracle Fusion redirected the request to a sign-in page (" + target +
 		                        "), so the token was not accepted. Sign in again with "
-		                        "SELECT * FROM ofquack_sso_login(force := true)");
+		                        "SELECT * FROM fusion_scanner_sso_login(force := true)");
 	}
 	throw AuthenticationError(
 	    "Oracle Fusion redirected the request to a sign-in page (" + target +
 	    ").\nThe credentials were not accepted, or this instance uses single sign-on -- in which case the "
-	    "secret needs PROVIDER browser and SELECT * FROM ofquack_sso_login().");
+	    "secret needs PROVIDER browser and SELECT * FROM fusion_scanner_sso_login().");
 }
 
 class SoapTransport : public FusionTransport {
@@ -182,7 +182,7 @@ private:
 			if (token.empty()) {
 				throw AuthenticationError(
 				    "No Oracle Fusion token is available for " + host +
-				    ". Run SELECT * FROM ofquack_sso_login() to sign in, or set TOKEN on the secret");
+				    ". Run SELECT * FROM fusion_scanner_sso_login() to sign in, or set TOKEN on the secret");
 			}
 			return "Authorization: Bearer " + token;
 		}

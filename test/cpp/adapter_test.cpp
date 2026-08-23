@@ -15,7 +15,7 @@
 #include "ofquack/token_cache.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/transport.hpp"
-#include "ofquack_extension.hpp"
+#include "fusion_scanner_extension.hpp"
 
 #include "base64.h"
 #include "duckdb.hpp"
@@ -1257,7 +1257,7 @@ void TestShortListingIsReportedRatherThanCached() {
 	CHECK(result->GetError().find("incomplete") != std::string::npos);
 
 	// And nothing was written, so the next attempt is not served a gap.
-	auto status = RunQuery(connection, "SELECT cached_tables FROM ofquack_cache_status()");
+	auto status = RunQuery(connection, "SELECT cached_tables FROM fusion_scanner_cache_status()");
 	CHECK(status->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
@@ -1354,7 +1354,7 @@ void TestInvalidateForcesARefetch() {
 	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
 	const auto after_first = script.executed_sql.size();
 
-	auto removed = RunQuery(connection, "SELECT tables_removed FROM ofquack_cache_invalidate()");
+	auto removed = RunQuery(connection, "SELECT tables_removed FROM fusion_scanner_cache_invalidate()");
 	CHECK(removed->GetValue(0, 0).GetValue<int64_t>() == 2);
 
 	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
@@ -1422,7 +1422,7 @@ void TestCacheStatusReportsMode() {
 	CreateSecret(connection);
 	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
 
-	auto status = RunQuery(connection, "SELECT mode, cached_tables FROM ofquack_cache_status()");
+	auto status = RunQuery(connection, "SELECT mode, cached_tables FROM fusion_scanner_cache_status()");
 	CHECK(status->RowCount() == 1);
 	// ResetForTesting("") opens the cache in memory.
 	CHECK(status->GetValue(0, 0).ToString() == "memory");
@@ -1795,7 +1795,7 @@ void TestFilterPushdownWhenEnabled() {
 	Connection connection(db);
 	CreateSecret(connection);
 	Attach(connection);
-	RunQuery(connection, "SET ofquack_filter_pushdown = true");
+	RunQuery(connection, "SET fusion_scanner_filter_pushdown = true");
 	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS WHERE JE_HEADER_ID = 1");
 
 	const auto &scan_sql = script.executed_sql.back();
@@ -1814,11 +1814,11 @@ void TestUntranslatableFilterIsRefusedRatherThanApproximated() {
 	Connection connection(db);
 	CreateSecret(connection);
 	Attach(connection);
-	RunQuery(connection, "SET ofquack_filter_pushdown = true");
+	RunQuery(connection, "SET fusion_scanner_filter_pushdown = true");
 
 	auto result = connection.Query("SELECT NAME FROM fus.main.GL_JE_HEADERS WHERE NAME > 'M'");
 	CHECK(result->HasError());
-	CHECK(result->GetError().find("ofquack_filter_pushdown") != std::string::npos);
+	CHECK(result->GetError().find("fusion_scanner_filter_pushdown") != std::string::npos);
 }
 
 void TestAttachedCatalogIsReadOnly() {
@@ -1928,7 +1928,7 @@ void TestShowTablesListsOnlyDescribableTables() {
 	CHECK(listed->GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	// Warming the columns is what fills the browser in.
-	RunQuery(connection, "SELECT * FROM ofquack_cache_warm()");
+	RunQuery(connection, "SELECT * FROM fusion_scanner_cache_warm()");
 	RunQuery(connection, "DETACH fus");
 	Attach(connection);
 
@@ -1947,14 +1947,14 @@ void TestCacheWarm() {
 	Connection connection(db);
 	CreateSecret(connection);
 
-	auto first = RunQuery(connection, "SELECT tables_warmed, columns_cached, already_cached FROM ofquack_cache_warm()");
+	auto first = RunQuery(connection, "SELECT tables_warmed, columns_cached, already_cached FROM fusion_scanner_cache_warm()");
 	CHECK(first->GetValue(0, 0).GetValue<int64_t>() == 2); // one table, one view
 	CHECK(first->GetValue(1, 0).GetValue<int64_t>() == 3); // two columns plus one
 	CHECK(first->GetValue(2, 0).GetValue<int64_t>() == 0);
 	const auto after_first = script.executed_sql.size();
 
 	// A second warm has nothing left to do.
-	auto second = RunQuery(connection, "SELECT tables_warmed, already_cached FROM ofquack_cache_warm()");
+	auto second = RunQuery(connection, "SELECT tables_warmed, already_cached FROM fusion_scanner_cache_warm()");
 	CHECK(second->GetValue(0, 0).GetValue<int64_t>() == 0);
 	CHECK(second->GetValue(1, 0).GetValue<int64_t>() == 2);
 	CHECK(script.executed_sql.size() == after_first);
@@ -1971,11 +1971,11 @@ void TestCacheWarmPatternAndLimit() {
 	Connection connection(db);
 	CreateSecret(connection);
 
-	auto result = RunQuery(connection, "SELECT tables_warmed FROM ofquack_cache_warm(pattern := 'GL_JE%')");
+	auto result = RunQuery(connection, "SELECT tables_warmed FROM fusion_scanner_cache_warm(pattern := 'GL_JE%')");
 	CHECK(result->GetValue(0, 0).GetValue<int64_t>() == 1);
 
 	ResetCache();
-	auto limited = RunQuery(connection, "SELECT tables_warmed FROM ofquack_cache_warm(max_tables := 1)");
+	auto limited = RunQuery(connection, "SELECT tables_warmed FROM fusion_scanner_cache_warm(max_tables := 1)");
 	CHECK(limited->GetValue(0, 0).GetValue<int64_t>() == 1);
 }
 
@@ -2027,7 +2027,7 @@ void TestSsoStatusWithoutToken() {
 	Connection connection(db);
 	CreateBrowserSecret(connection);
 
-	auto result = RunQuery(connection, "SELECT host, have_token, subject FROM ofquack_sso_status()");
+	auto result = RunQuery(connection, "SELECT host, have_token, subject FROM fusion_scanner_sso_status()");
 	CHECK(result->RowCount() == 1);
 	CHECK(result->GetValue(0, 0).ToString() == "sso.example.com");
 	CHECK(!result->GetValue(1, 0).GetValue<bool>());
@@ -2048,7 +2048,7 @@ void TestBearerQueryWithoutTokenExplainsHowToSignIn() {
 
 	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT NAME FROM T', secret := 'sso')");
 	CHECK(result->HasError());
-	CHECK(result->GetError().find("ofquack_sso_login") != std::string::npos);
+	CHECK(result->GetError().find("fusion_scanner_sso_login") != std::string::npos);
 	// Nothing was sent: the request never got as far as the transport.
 	CHECK(script.executed_sql.empty());
 }
@@ -2086,7 +2086,7 @@ void TestSsoStatusNeverPrintsTheToken() {
 	Connection connection(db);
 	CreateBrowserSecret(connection);
 
-	auto result = RunQuery(connection, "SELECT * FROM ofquack_sso_status()");
+	auto result = RunQuery(connection, "SELECT * FROM fusion_scanner_sso_status()");
 	CHECK(result->GetValue(1, 0).GetValue<bool>()); // have_token
 	for (duckdb::idx_t column = 0; column < result->ColumnCount(); column++) {
 		const auto rendered = result->GetValue(column, 0).ToString();
@@ -2104,10 +2104,10 @@ void TestSsoLogoutDiscardsTheToken() {
 	Connection connection(db);
 	CreateBrowserSecret(connection);
 
-	auto result = RunQuery(connection, "SELECT token_discarded FROM ofquack_sso_logout()");
+	auto result = RunQuery(connection, "SELECT token_discarded FROM fusion_scanner_sso_logout()");
 	CHECK(result->GetValue(0, 0).GetValue<bool>());
 
-	auto status = RunQuery(connection, "SELECT have_token FROM ofquack_sso_status()");
+	auto status = RunQuery(connection, "SELECT have_token FROM fusion_scanner_sso_status()");
 	CHECK(!status->GetValue(0, 0).GetValue<bool>());
 }
 

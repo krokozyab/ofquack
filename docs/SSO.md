@@ -13,7 +13,7 @@ CREATE SECRET fusion (
     REPORT_PATH '/Custom/Financials/RP_ARB.xdo'
 );
 
-SELECT * FROM ofquack_sso_login();
+SELECT * FROM fusion_scanner_sso_login();
 ```
 
 There is no separate sign-in URL to configure. The report endpoint and the
@@ -41,7 +41,7 @@ collecting a token the same way.
 | Thing | Where | Survives a restart |
 |---|---|---|
 | Bearer token | memory only | no |
-| Browser session cookie | `~/.ofquack/chrome-profile` | yes |
+| Browser session cookie | `~/.fusion_scanner/chrome-profile` | yes |
 | Endpoint, report path, login URL | the secret | if `PERSISTENT` |
 
 The token is never written to disk. Persistence comes from the browser profile
@@ -54,7 +54,7 @@ but a browser secret holds no credential to leak, only where to sign in.
 ## Two rules worth knowing
 
 **A query never opens a browser.** If there is no token, the query fails and
-tells you to run `ofquack_sso_login()`. Sign-in is interactive and slow; an
+tells you to run `fusion_scanner_sso_login()`. Sign-in is interactive and slow; an
 ordinary `SELECT` becoming interactive would be a bad surprise in a script and
 a worse one in a scheduled job.
 
@@ -64,12 +64,12 @@ setup script.
 ## Managing the session
 
 ```sql
-SELECT * FROM ofquack_sso_status();   -- signed in? as whom? until when?
-SELECT * FROM ofquack_sso_login(force := true);   -- sign in again now
-SELECT * FROM ofquack_sso_logout();   -- discard the token
+SELECT * FROM fusion_scanner_sso_status();   -- signed in? as whom? until when?
+SELECT * FROM fusion_scanner_sso_login(force := true);   -- sign in again now
+SELECT * FROM fusion_scanner_sso_logout();   -- discard the token
 ```
 
-`ofquack_sso_status()` never prints the token itself. It is a live credential,
+`fusion_scanner_sso_status()` never prints the token itself. It is a live credential,
 and printing it would put it into terminal scrollback and query history.
 
 A token is treated as expired shortly before it really is, and is refreshed
@@ -107,7 +107,7 @@ this code like a failure to start; it retries with a throwaway profile, which
 carries no cookies. Closing the other Chrome window first avoids it.
 
 **`Not signed in to <host>`** on a query means exactly that — run
-`ofquack_sso_login()`.
+`fusion_scanner_sso_login()`.
 
 ## What is not verified
 

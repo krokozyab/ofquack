@@ -313,7 +313,7 @@ BrowserAuthResult AuthenticateThroughBrowser(const BrowserAuthSettings &settings
 		if (home.empty()) {
 			throw PermanentError("Could not locate a home directory for the browser profile");
 		}
-		profile_dir = home + "/.ofquack";
+		profile_dir = home + "/.fusion_scanner";
 		EnsureDirectory(profile_dir);
 		profile_dir += "/chrome-profile";
 	}

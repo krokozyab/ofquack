@@ -18,7 +18,7 @@ struct FusionScanOptions {
 	bool all_varchar = false;
 	//! Adds an ORDER BY over every column before paging, so that the pages of one
 	//! result partition it rather than sampling it. Off only when Oracle refuses
-	//! the ordering -- see ofquack_stable_paging.
+	//! the ordering -- see fusion_scanner_stable_paging.
 	bool stable_paging = true;
 };
 

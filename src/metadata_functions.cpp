@@ -94,7 +94,7 @@ uint64_t MetadataPageSize(ClientContext &context, const named_parameter_map_t &n
 		return entry->second.GetValue<uint64_t>();
 	}
 	Value setting;
-	if (context.TryGetCurrentSetting("ofquack_metadata_page_size", setting) && !setting.IsNull()) {
+	if (context.TryGetCurrentSetting("fusion_scanner_metadata_page_size", setting) && !setting.IsNull()) {
 		return setting.GetValue<uint64_t>();
 	}
 	return 0; // the built-in default
@@ -236,7 +236,7 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 }
 
 // ---------------------------------------------------------------------------
-// ofquack_cache_warm
+// fusion_scanner_cache_warm
 // ---------------------------------------------------------------------------
 
 //! Case-insensitive LIKE with % and _, enough for a table-name filter.
@@ -396,7 +396,7 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 }
 
 // ---------------------------------------------------------------------------
-// ofquack_cache_status / ofquack_cache_invalidate
+// fusion_scanner_cache_status / fusion_scanner_cache_invalidate
 // ---------------------------------------------------------------------------
 
 const char *ModeName(CacheMode mode) {
@@ -482,7 +482,7 @@ unique_ptr<FunctionData> CacheInvalidateBind(ClientContext &context, TableFuncti
 
 void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	DBConfig::GetConfig(loader.GetDatabaseInstance())
-	    .AddExtensionOption("ofquack_metadata_page_size",
+	    .AddExtensionOption("fusion_scanner_metadata_page_size",
 	                        "Rows per page when listing Oracle Fusion's dictionary. Lower it if a listing "
 	                        "keeps stopping short of the instance's own table count.",
 	                        LogicalType::UBIGINT, Value::UBIGINT(ofquack::metadata::PAGE_SIZE));
@@ -501,18 +501,18 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	columns.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
 	loader.RegisterFunction(columns);
 
-	TableFunction warm("ofquack_cache_warm", {}, ScanMaterialised, CacheWarmBind, InitMaterialised);
+	TableFunction warm("fusion_scanner_cache_warm", {}, ScanMaterialised, CacheWarmBind, InitMaterialised);
 	AddFusionNamedParameters(warm);
 	warm.named_parameters["pattern"] = LogicalType::VARCHAR;
 	warm.named_parameters["max_tables"] = LogicalType::BIGINT;
 	warm.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
 	loader.RegisterFunction(warm);
 
-	TableFunction status("ofquack_cache_status", {}, ScanMaterialised, CacheStatusBind, InitMaterialised);
+	TableFunction status("fusion_scanner_cache_status", {}, ScanMaterialised, CacheStatusBind, InitMaterialised);
 	AddFusionNamedParameters(status);
 	loader.RegisterFunction(status);
 
-	TableFunction invalidate("ofquack_cache_invalidate", {}, ScanMaterialised, CacheInvalidateBind, InitMaterialised);
+	TableFunction invalidate("fusion_scanner_cache_invalidate", {}, ScanMaterialised, CacheInvalidateBind, InitMaterialised);
 	AddFusionNamedParameters(invalidate);
 	invalidate.named_parameters["table"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(invalidate);

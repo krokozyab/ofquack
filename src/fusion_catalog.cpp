@@ -627,13 +627,13 @@ public:
 		// cannot be written until init, which is where the projection and the
 		// filters arrive. Nothing reaches Fusion during binding.
 		TableFunction function({}, FusionCatalogScan, nullptr, FusionCatalogScanInit);
-		function.name = "ofquack_attached_scan";
+		function.name = "fusion_scanner_attached_scan";
 		function.get_bind_info = FusionCatalogScanBindInfo;
 		function.projection_pushdown = true;
 
 		Value pushdown;
 		function.filter_pushdown =
-		    context.TryGetCurrentSetting("ofquack_filter_pushdown", pushdown) && BooleanValue::Get(pushdown);
+		    context.TryGetCurrentSetting("fusion_scanner_filter_pushdown", pushdown) && BooleanValue::Get(pushdown);
 		return function;
 	}
 
@@ -698,7 +698,7 @@ public:
 	//! So only tables whose columns are already known are offered. Cold, that
 	//! is none: the alternative is a multi-second dictionary read per table
 	//! before the list can even be returned, from a callback that has no
-	//! ClientContext to cancel. Use ofquack_cache_warm() to fill it in.
+	//! ClientContext to cancel. Use fusion_scanner_cache_warm() to fill it in.
 	vector<string> GetDefaultEntries() override {
 		std::lock_guard<std::mutex> guard(state->metadata_lock);
 		if (!state->tables_loaded) {
@@ -897,12 +897,12 @@ unique_ptr<TransactionManager> FusionCreateTransactionManager(optional_ptr<Stora
 
 void RegisterFusionCatalog(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.AddExtensionOption("ofquack_filter_pushdown",
+	config.AddExtensionOption("fusion_scanner_filter_pushdown",
 	                          "Send WHERE predicates on an attached Oracle Fusion table to Fusion. Off by default: "
 	                          "DuckDB removes a pushed filter from the plan, so a predicate that cannot be "
 	                          "translated exactly must fail the query rather than be approximated.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	config.AddExtensionOption("ofquack_stable_paging",
+	config.AddExtensionOption("fusion_scanner_stable_paging",
 	                          "Give a paged statement an order, so that its pages partition the result instead of "
 	                          "sampling it: an attached table by its primary key (or ROWID), a query by every "
 	                          "column it returns. On by default; turn it off only if Oracle refuses the ordering, "
