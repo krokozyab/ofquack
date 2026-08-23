@@ -8,3 +8,7 @@ test/python/__pycache__/
 .Rhistory
 .cache/
 vcpkg_installed/
+
+# Local tool configuration: machine-specific paths and instance hostnames.
+# Nothing here belongs to the extension.
+.mcp.json
