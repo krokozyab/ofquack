@@ -24,7 +24,13 @@ extension:
 
 repo:
   github: krokozyab/ofquack
-  ref: 0000000000000000000000000000000000000000  # replace with the release commit SHA
+  # A full commit SHA, never a tag: the registry builds whatever the ref points
+  # at when it builds, and a tag can be moved afterwards -- which would let the
+  # published artifact drift away from the reviewed one.
+  #
+  # This is the commit whose full matrix passed: clang-tidy, linux_amd64,
+  # linux_arm64, osx_amd64, osx_arm64 and windows_amd64, run 32629700497.
+  ref: 1482049283032d642075d22cb973039562ecc4dc
 
 docs:
   hello_world: |
