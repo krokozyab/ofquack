@@ -104,7 +104,7 @@ private:
 
 	std::mutex lock;
 	std::mutex population_lock;
-	std::unordered_map<std::string, std::shared_ptr<std::mutex>> population_mutexes;
+	std::unordered_map<std::string, std::weak_ptr<std::mutex>> population_mutexes;
 	uint64_t next_revision = 1;
 	std::unordered_map<std::string, uint64_t> table_revisions;
 	std::unordered_map<std::string, uint64_t> all_column_revisions;

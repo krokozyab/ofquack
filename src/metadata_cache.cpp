@@ -633,10 +633,28 @@ bool MetadataCache::PutColumnsBatch(
 std::shared_ptr<std::mutex> MetadataCache::PopulationMutex(const std::string &resource_key) {
 	std::lock_guard<std::mutex> guard(population_lock);
 	auto &entry = population_mutexes[resource_key];
-	if (!entry) {
-		entry = std::make_shared<std::mutex>();
+	if (auto existing = entry.lock()) {
+		return existing;
 	}
-	return entry;
+
+	auto *raw = new std::mutex();
+	std::shared_ptr<std::mutex> created(raw, [this, resource_key](std::mutex *released) {
+		std::lock_guard<std::mutex> cleanup_guard(population_lock);
+		const auto found = population_mutexes.find(resource_key);
+		if (found != population_mutexes.end()) {
+			auto replacement = found->second.lock();
+			// The last owner can disappear just before another caller takes the
+			// map lock and installs a replacement. Do not let the old deleter erase
+			// that new mutex; the old object is still alive here, so pointer identity
+			// cannot be confused by allocator reuse.
+			if (!replacement || replacement.get() == released) {
+				population_mutexes.erase(found);
+			}
+		}
+		delete released;
+	});
+	entry = created;
+	return created;
 }
 
 void MetadataCache::InvalidateTables(const std::string &endpoint_key) {

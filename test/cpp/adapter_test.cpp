@@ -1671,6 +1671,27 @@ void TestCacheStatusReportsMode() {
 	CHECK(status->GetValue(1, 0).GetValue<int64_t>() == 2);
 }
 
+//! Population locks live only while callers may still acquire or hold them.
+//! Keeping one strong owner in the map retained a mutex and its 29k possible
+//! resource keys until process exit after a full dictionary warm.
+void TestPopulationMutexIsReleasedAfterItsUsers() {
+	auto &cache = duckdb::MetadataCache::Get();
+	std::weak_ptr<std::mutex> observer;
+	{
+		auto first = cache.PopulationMutex("test:population-lifetime");
+		observer = first;
+		auto second = cache.PopulationMutex("test:population-lifetime");
+		CHECK(first == second);
+		first.reset();
+		auto while_still_owned = cache.PopulationMutex("test:population-lifetime");
+		CHECK(second == while_still_owned);
+	}
+	CHECK(observer.expired());
+
+	auto next_generation = cache.PopulationMutex("test:population-lifetime");
+	CHECK(next_generation != nullptr);
+}
+
 //! Two instances must not share cached metadata: a table that exists on
 //! development need not exist on production.
 void TestCacheIsKeyedByEndpoint() {
@@ -2646,6 +2667,7 @@ const TestCase TESTS[] = {
     {"unconstrained number is double", TestUnconstrainedNumberIsDouble},
     {"unknown table is reported", TestUnknownTableIsReported},
     {"cache status reports mode", TestCacheStatusReportsMode},
+    {"population mutex is released after its users", TestPopulationMutexIsReleasedAfterItsUsers},
     {"cache status does not call unknown complete", TestCacheStatusDoesNotCallUnknownComplete},
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
     {"cache is keyed by principal", TestCacheIsKeyedByPrincipal},
