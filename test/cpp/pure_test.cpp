@@ -773,6 +773,19 @@ void TestTypeInference() {
 	CHECK(InferColumnType({"2024-01-31", "31/01/2024"}).type == InferredType::VARCHAR);
 	// Mixed integers and decimals are all numbers.
 	CHECK(InferColumnType({"1", "2.5"}).type == InferredType::DECIMAL);
+
+	// Oracle writes a value below one without its integer part, so a column of
+	// amounts arrives as ".84" and not "0.84". Read as text, GL_JE_LINES.ENTERED_DR
+	// came back VARCHAR on a live instance.
+	const auto no_integer_part = InferColumnType({".84", "0", "-.5"});
+	CHECK(no_integer_part.type == InferredType::DECIMAL);
+	CHECK(no_integer_part.scale == 2);
+	CHECK(InferColumnType({".84"}).type == InferredType::DECIMAL);
+	CHECK(InferColumnType({"-.84"}).type == InferredType::DECIMAL);
+	// A bare separator is not a number, with or without a sign.
+	CHECK(InferColumnType({"."}).type == InferredType::VARCHAR);
+	CHECK(InferColumnType({"-."}).type == InferredType::VARCHAR);
+	CHECK(InferColumnType({".x"}).type == InferredType::VARCHAR);
 }
 
 //! '00123' is an account code, and reading it as 123 loses information the

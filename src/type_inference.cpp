@@ -31,8 +31,8 @@ struct NumericShape {
 	uint8_t scale = 0;
 };
 
-//! Recognises the two numeric shapes dbms_xmlgen emits, and rejects anything
-//! with a leading zero.
+//! Recognises the numeric shapes dbms_xmlgen emits, and rejects anything with a
+//! leading zero.
 NumericShape ClassifyNumeric(const std::string &value) {
 	NumericShape shape;
 	size_t at = 0;
@@ -44,7 +44,11 @@ NumericShape ClassifyNumeric(const std::string &value) {
 		at++;
 	}
 	const auto integer_digits = at - digits_start;
-	if (integer_digits == 0) {
+	// Oracle writes a value below one without its integer part: dbms_xmlgen emits
+	// ".84", never "0.84". Such a value has no integer digits at all, and is a
+	// number exactly when a fraction follows -- which is what the whole column of
+	// GL_JE_LINES.ENTERED_DR turns on.
+	if (integer_digits == 0 && (at == value.size() || value[at] != '.')) {
 		return shape;
 	}
 	// "0" itself is a number; "0123" is an identifier that happens to be digits.
