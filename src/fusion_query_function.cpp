@@ -220,6 +220,12 @@ LogicalType ToLogicalType(const ofquack::InferredColumn &inferred) {
 	case ofquack::InferredType::DECIMAL:
 		// Widest precision Oracle NUMBER can hold; the scale comes from the data.
 		return LogicalType::DECIMAL(38, inferred.scale);
+	case ofquack::InferredType::DOUBLE:
+		// Inference never produces this -- it reads a scale off the data, so it
+		// always has one. It is here because the dictionary mapping shares the
+		// enum, and a silently defaulted arm would be a VARCHAR column nobody
+		// asked for.
+		return LogicalType::DOUBLE;
 	case ofquack::InferredType::DATE:
 		return LogicalType::DATE;
 	case ofquack::InferredType::TIMESTAMP:

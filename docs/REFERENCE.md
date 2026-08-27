@@ -283,6 +283,15 @@ request per page.
 data, so a `NUMBER(10,2)` is a `DECIMAL` whether or not the first page happens
 to contain a decimal point.
 
+A `NUMBER` that declares neither precision nor scale — which is how Fusion
+declares its amount columns, `GL_JE_LINES.ENTERED_DR` among them — becomes a
+`DOUBLE`. There is no scale to give `DECIMAL` and the only one available is
+zero, which would round every amount; Oracle writes 0.84 as `.84`, and
+`DECIMAL(38,0)` read that as `1`. The cost of `DOUBLE` is that it cannot hold
+all 38 digits Oracle allows, so an unconstrained `NUMBER` used as a wide
+integer identifier loses its low digits past 2^53. A column with a declared
+precision or scale is unaffected and stays exact.
+
 **Writes are refused.** `INSERT`, `CREATE TABLE`, `DROP` and the rest fail with
 an explanation, rather than quietly making a local table inside the catalog
 that would shadow the real one.

@@ -1486,6 +1486,55 @@ void TestColumnsOfTableAndView() {
 	CHECK(asked_all_tab_columns);
 }
 
+//! Fusion declares its amount columns as a bare NUMBER, with neither precision
+//! nor scale. DECIMAL needs a scale and the only one on offer was zero, so
+//! GL_JE_LINES.ENTERED_DR -- and every amount beside it -- was read as a whole
+//! number: Oracle writes 0.84 as ".84", and DECIMAL(38,0) rounded it to 1.
+void TestUnconstrainedNumberIsDouble() {
+	ResetCache();
+	struct AmountsTransport : FusionTransport {
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;1&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			if (sql.find("FND_COLUMNS") != std::string::npos) {
+				// No DECIMAL_DIGITS and no NUM_PREC_RADIX: nothing was declared.
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;"
+				    "&lt;ROW&gt;&lt;TABLE_NAME&gt;AMOUNTS&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;ENTERED_DR"
+				    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;NUMBER&lt;/TYPE_NAME&gt;"
+				    "&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
+				    "&lt;ROW&gt;&lt;TABLE_NAME&gt;AMOUNTS&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;LINE_ID"
+				    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;NUMBER&lt;/TYPE_NAME&gt;&lt;DECIMAL_DIGITS&gt;18"
+				    "&lt;/DECIMAL_DIGITS&gt;&lt;ORDINAL_POSITION&gt;2&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
+				    "&lt;/ROWSET&gt;"));
+			}
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;AMOUNTS&lt;/TABLE_NAME&gt;"
+			    "&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	auto transport = std::make_shared<AmountsTransport>();
+	ScopedTransportFactory installed([transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto columns =
+	    RunQuery(connection, "SELECT column_name, duckdb_type FROM oracle_fusion_columns('AMOUNTS') ORDER BY 1");
+	CHECK(columns->RowCount() == 2);
+	CHECK(columns->GetValue(0, 0).ToString() == "ENTERED_DR");
+	CHECK(columns->GetValue(1, 0).ToString() == "DOUBLE");
+	// A declared precision still means an exact type, and an identifier that
+	// fits BIGINT must not become a float.
+	CHECK(columns->GetValue(0, 1).ToString() == "LINE_ID");
+	CHECK(columns->GetValue(1, 1).ToString() == "BIGINT");
+}
+
 void TestUnknownTableIsReported() {
 	ResetCache();
 	Script script;
@@ -2463,6 +2512,7 @@ const TestCase TESTS[] = {
     {"invalidate forces a refetch", TestInvalidateForcesARefetch},
     {"invalidate removes expected count and order keys", TestInvalidateRemovesExpectedCountAndOrderKeys},
     {"columns of table and view", TestColumnsOfTableAndView},
+    {"unconstrained number is double", TestUnconstrainedNumberIsDouble},
     {"unknown table is reported", TestUnknownTableIsReported},
     {"cache status reports mode", TestCacheStatusReportsMode},
     {"cache status does not call unknown complete", TestCacheStatusDoesNotCallUnknownComplete},

@@ -47,8 +47,20 @@ DictionaryColumnType MapOracleType(const std::string &type_name, int64_t precisi
 		if (scale == 0 && precision >= 10 && precision <= 18) {
 			return {true, InferredType::BIGINT, 0};
 		}
-		// A NUMBER with no declared precision, or with a fractional part.
-		// DECIMAL(38, s) is the widest Oracle can have meant.
+		// Nothing declared at all: a bare NUMBER, or one of the genuinely binary
+		// floating types, which carry no precision either. DECIMAL needs a scale
+		// and the only one available here is zero, so `.84` -- how Oracle writes
+		// a value below one -- was read as 1. GL_JE_LINES.ENTERED_DR is declared
+		// this way, and so is every amount column beside it.
+		//
+		// DOUBLE cannot hold all 38 digits Oracle allows, so an unconstrained
+		// NUMBER used as a wide integer identifier loses its low digits past
+		// 2^53. That is the trade the alternatives lose worse: DECIMAL(38,0)
+		// rounds every amount, and VARCHAR cannot be summed.
+		if (precision <= 0 && scale <= 0) {
+			return {true, InferredType::DOUBLE, 0};
+		}
+		// A declared scale is exact, and DECIMAL keeps it that way.
 		const auto effective_scale = static_cast<uint8_t>(std::min<int64_t>(std::max<int64_t>(scale, 0), 38));
 		return {true, InferredType::DECIMAL, effective_scale};
 	}

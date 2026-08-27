@@ -8,7 +8,7 @@ namespace ofquack {
 
 //! Types this layer can infer. Kept independent of duckdb::LogicalType so the
 //! inference stays testable without linking DuckDB.
-enum class InferredType { VARCHAR, INTEGER, BIGINT, DECIMAL, DATE, TIMESTAMP };
+enum class InferredType { VARCHAR, INTEGER, BIGINT, DECIMAL, DOUBLE, DATE, TIMESTAMP };
 
 struct InferredColumn {
 	InferredType type = InferredType::VARCHAR;

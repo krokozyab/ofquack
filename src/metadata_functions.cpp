@@ -195,6 +195,8 @@ LogicalType DictionaryLogicalType(const ofquack::ColumnInfo &column) {
 		return LogicalType::BIGINT;
 	case ofquack::InferredType::DECIMAL:
 		return LogicalType::DECIMAL(38, mapped.scale);
+	case ofquack::InferredType::DOUBLE:
+		return LogicalType::DOUBLE;
 	case ofquack::InferredType::TIMESTAMP:
 		return LogicalType::TIMESTAMP;
 	case ofquack::InferredType::DATE:

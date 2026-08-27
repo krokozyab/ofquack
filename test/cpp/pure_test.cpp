@@ -961,8 +961,22 @@ void TestOracleTypeMapping() {
 	const auto money = MapOracleType("NUMBER", 12, 2);
 	CHECK(money.type == InferredType::DECIMAL);
 	CHECK(money.scale == 2);
-	// NUMBER with nothing declared: the widest thing it could be.
-	CHECK(MapOracleType("NUMBER", 0, 0).type == InferredType::DECIMAL);
+	// NUMBER with nothing declared has no scale to give DECIMAL, and the only
+	// one available was zero -- which read GL_JE_LINES.ENTERED_DR, an amount, as
+	// a whole number and rounded `.84` to 1. Every Fusion amount column is
+	// declared this way.
+	CHECK(MapOracleType("NUMBER", 0, 0).type == InferredType::DOUBLE);
+	// The genuinely binary types carry no precision either, and DOUBLE is what
+	// they actually are.
+	CHECK(MapOracleType("BINARY_DOUBLE", 0, 0).type == InferredType::DOUBLE);
+	CHECK(MapOracleType("BINARY_FLOAT", 0, 0).type == InferredType::DOUBLE);
+	CHECK(MapOracleType("FLOAT", 0, 0).type == InferredType::DOUBLE);
+	// FND's single-letter code for a number, which never carries precision.
+	CHECK(MapOracleType("N", 0, 0).type == InferredType::DOUBLE);
+	// A declared scale is exact and stays exact: NUMBER(*,2) keeps DECIMAL.
+	const auto scaled_only = MapOracleType("NUMBER", 0, 2);
+	CHECK(scaled_only.type == InferredType::DECIMAL);
+	CHECK(scaled_only.scale == 2);
 
 	// Oracle's DATE carries a time of day, so DATE would truncate it.
 	CHECK(MapOracleType("DATE", 0, 0).type == InferredType::TIMESTAMP);
