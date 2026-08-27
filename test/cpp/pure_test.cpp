@@ -868,6 +868,17 @@ void TestMetadataQueriesUseFusionDictionary() {
 	CHECK(Contains(columns, "FROM FND_COLUMNS c"));
 	CHECK(Contains(columns, "JOIN FND_TABLES t ON c.table_id = t.table_id"));
 	CHECK(Contains(columns, "IN (101,102)"));
+	// Both column queries have to shift the aliases the same way round, or one
+	// of them arrives at the mapper transposed. This one used to select the
+	// scale as DECIMAL_DIGITS and a literal radix 10 as NUM_PREC_RADIX, so
+	// GL_JE_LINES.JE_HEADER_ID -- NUMBER(18,0) in FND_COLUMNS on a live
+	// instance -- reached it as precision 0, scale 10 and became
+	// DECIMAL(38,10) instead of BIGINT.
+	CHECK(Contains(columns, "c.\"PRECISION\" AS DECIMAL_DIGITS"));
+	CHECK(Contains(columns, "c.\"SCALE\" AS NUM_PREC_RADIX"));
+	CHECK(!Contains(columns, "THEN 10 ELSE NULL END AS NUM_PREC_RADIX"));
+	CHECK(Contains(ofquack::metadata::ColumnsOfViews("V"), "data_precision AS DECIMAL_DIGITS"));
+	CHECK(Contains(ofquack::metadata::ColumnsOfViews("V"), "data_scale AS NUM_PREC_RADIX"));
 
 	// Views are not in FND_COLUMNS at all, and a concrete object name is an
 	// equality comparison: underscores in it must not become LIKE wildcards.

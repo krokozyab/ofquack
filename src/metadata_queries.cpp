@@ -135,9 +135,13 @@ std::string ColumnsByTableIds(const std::vector<std::string> &table_ids) {
 	    << " " << JDBC_VARCHAR << " AS DATA_TYPE,"
 	    << " COALESCE(c.column_type, c.domain_code) AS TYPE_NAME,"
 	    << " c.width AS COLUMN_SIZE,"
-	    // Shifted aliases, deliberately: see the header.
-	    << " c.\"SCALE\" AS DECIMAL_DIGITS,"
-	    << " CASE WHEN c.\"PRECISION\" IS NOT NULL THEN 10 ELSE NULL END AS NUM_PREC_RADIX,"
+	    // Shifted aliases, deliberately: see the header. DECIMAL_DIGITS carries
+	    // the precision and NUM_PREC_RADIX the scale, the same way round as the
+	    // view query -- this one used to put the scale in DECIMAL_DIGITS and the
+	    // literal radix 10 in NUM_PREC_RADIX, so FND's own NUMBER(18,0) reached
+	    // the mapper as precision 0, scale 10 and became DECIMAL(38,10).
+	    << " c.\"PRECISION\" AS DECIMAL_DIGITS,"
+	    << " c.\"SCALE\" AS NUM_PREC_RADIX,"
 	    << " CASE WHEN c.null_allowed_flag = 'Y' THEN 1 ELSE 0 END AS NULLABLE,"
 	    << " COALESCE(c.column_sequence, c.column_id) AS ORDINAL_POSITION,"
 	    << " c.description AS REMARKS,"
