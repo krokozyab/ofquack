@@ -149,7 +149,7 @@ std::string ColumnsByTableIds(const std::vector<std::string> &table_ids) {
 	return oss.str();
 }
 
-std::string ColumnsOfViews(const std::string &table_name_pattern) {
+std::string ColumnsOfViews(const std::string &table_name) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS TABLE_CAT,"
 	    << " owner AS TABLE_SCHEM,"
@@ -165,7 +165,7 @@ std::string ColumnsOfViews(const std::string &table_name_pattern) {
 	    << " column_id AS ORDINAL_POSITION"
 	    << " FROM all_tab_columns"
 	    << " WHERE owner = '" << SCHEMA << "'"
-	    << " AND table_name LIKE '" << QuoteLiteral(Upper(table_name_pattern)) << "'"
+	    << " AND UPPER(table_name) = '" << QuoteLiteral(Upper(table_name)) << "'"
 	    << " ORDER BY owner, table_name, column_id";
 	return oss.str();
 }

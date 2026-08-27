@@ -1261,6 +1261,41 @@ void TestShortListingIsReportedRatherThanCached() {
 	CHECK(status->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
+//! Without the independent count there is no proof that the last empty page is
+//! the end rather than BI Publisher truncation, so the current call may use the
+//! rows but they must not become a week-long cache snapshot.
+void TestUnverifiedListingIsNotCached() {
+	ResetCache();
+	struct NoCountTransport : FusionTransport {
+		int requests = 0;
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			requests++;
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				throw ofquack::PermanentError("count is not available");
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;"
+			    "&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	auto transport = std::make_shared<NoCountTransport>();
+	ScopedTransportFactory installed([transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto first = RunQuery(connection, "SELECT table_name FROM oracle_fusion_tables()");
+	CHECK(first->RowCount() == 1);
+	auto status = RunQuery(connection, "SELECT cached_tables FROM fusion_scanner_cache_status()");
+	CHECK(status->GetValue(0, 0).GetValue<int64_t>() == 0);
+	const auto after_first = transport->requests;
+	RunQuery(connection, "SELECT table_name FROM oracle_fusion_tables()");
+	CHECK(transport->requests > after_first);
+}
+
 //! The whole reason the cache exists: every metadata question costs a BI
 //! Publisher call measured in seconds.
 void TestSecondListingCostsNothing() {
@@ -1359,6 +1394,59 @@ void TestInvalidateForcesARefetch() {
 
 	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
 	CHECK(script.executed_sql.size() > after_first);
+}
+
+//! A table-list snapshot and the count that validates it are one cache unit.
+//! Invalidating the list must not leave an old count attached to the next one.
+void TestInvalidateRemovesExpectedCountAndOrderKeys() {
+	ResetCache();
+	auto &cache = duckdb::MetadataCache::Get();
+	const std::string scope = "scope";
+	cache.PutTables(scope, {ofquack::TableInfo {"T", "TABLE", "", "1"}}, 1);
+	CHECK(cache.ExpectedTables(scope) == 1);
+
+	cache.PutOrderKey(scope, "T", {"ID"});
+	std::vector<std::string> key;
+	CHECK(cache.TryGetOrderKey(scope, "T", 3600, key));
+	CHECK(key.size() == 1 && key[0] == "ID");
+
+	cache.InvalidateColumns(scope, "T");
+	key.clear();
+	CHECK(!cache.TryGetOrderKey(scope, "T", 3600, key));
+
+	cache.InvalidateTables(scope);
+	CHECK(cache.ExpectedTables(scope) == -1);
+	cache.PutTables(scope, {ofquack::TableInfo {"T", "TABLE", "", "1"}}, -1);
+	CHECK(cache.ExpectedTables(scope) == -1);
+}
+
+//! Metadata visibility can differ by account, so users of one Fusion instance
+//! must not share a dictionary cache merely because the endpoint is the same.
+void TestCacheIsKeyedByPrincipal() {
+	FusionConfig first;
+	first.endpoint = "https://fusion.example.com/service";
+	first.report_path = "/Custom/RP_ARB.xdo";
+	first.username = "alice";
+	FusionConfig second = first;
+	second.username = "bob";
+	CHECK(duckdb::EndpointKey(first) != duckdb::EndpointKey(second));
+}
+
+//! Unknown completeness is not complete. The status must also distinguish
+//! rows on disk from fresh rows and report how many tables have descriptions.
+void TestCacheStatusDoesNotCallUnknownComplete() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto status = RunQuery(
+	    connection, "SELECT complete, fresh_tables, fresh_columns, described_tables FROM fusion_scanner_cache_status()");
+	CHECK(status->GetValue(0, 0).IsNull());
+	CHECK(status->GetValue(1, 0).GetValue<int64_t>() == 0);
+	CHECK(status->GetValue(2, 0).GetValue<int64_t>() == 0);
+	CHECK(status->GetValue(3, 0).GetValue<int64_t>() == 0);
 }
 
 //! Columns of a table come from FND_COLUMNS by TABLE_ID; columns of a view are
@@ -1497,6 +1585,10 @@ public:
 			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
 		}
 
+		if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;1&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
 		if (sql.find("FND_VIEWS") != std::string::npos) {
 			return MakeSoapResponse(MakeReportXML(
 			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;GL_JE_HEADERS&lt;/TABLE_NAME&gt;"
@@ -1768,6 +1860,31 @@ void TestAttachedScanOrdersByThePrimaryKey() {
 	}
 }
 
+//! DuckDB materialises an attached table's schema. If that metadata is
+//! invalidated later, silently scanning with the old schema is unsafe; the
+//! catalog requires a reattach and succeeds again afterwards.
+void TestAttachedEntryRejectsInvalidatedMetadata() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+
+	RunQuery(connection, "SELECT * FROM fusion_scanner_cache_invalidate(table_name := 'GL_JE_HEADERS')");
+	auto stale = connection.Query("SELECT NAME FROM fus.main.GL_JE_HEADERS");
+	CHECK(stale->HasError());
+	CHECK(stale->GetError().find("DETACH") != std::string::npos);
+
+	RunQuery(connection, "DETACH fus");
+	Attach(connection);
+	auto fresh = RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS ORDER BY NAME");
+	CHECK(fresh->RowCount() == 2);
+}
+
 void TestFilterPushdownIsOffByDefault() {
 	ResetCache();
 	Script script;
@@ -1977,6 +2094,165 @@ void TestCacheWarmPatternAndLimit() {
 	ResetCache();
 	auto limited = RunQuery(connection, "SELECT tables_warmed FROM fusion_scanner_cache_warm(max_tables := 1)");
 	CHECK(limited->GetValue(0, 0).GetValue<int64_t>() == 1);
+
+	auto invalid = connection.Query("SELECT * FROM fusion_scanner_cache_warm(max_tables := -1)");
+	CHECK(invalid->HasError());
+	CHECK(invalid->GetError().find("max_tables") != std::string::npos);
+}
+
+//! The documented backslash escape makes '_' literal, and a cold warm honours
+//! the configured table-list page size instead of silently using 400.
+void TestCacheWarmPatternEscapeAndPageSize() {
+	ResetCache();
+	Script script;
+	auto installed = InstallDictionary(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SET fusion_scanner_metadata_page_size = 17");
+	auto result = RunQuery(connection,
+	                       "SELECT tables_warmed FROM fusion_scanner_cache_warm(pattern := 'GL\\_JE%')");
+	CHECK(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+
+	bool used_setting = false;
+	for (const auto &sql : script.executed_sql) {
+		used_setting = used_setting ||
+		               (sql.find("FND_VIEWS") != std::string::npos && sql.find("FETCH FIRST 17 ROWS ONLY") != std::string::npos);
+	}
+	CHECK(used_setting);
+}
+
+//! A table for which FND_COLUMNS returns nothing is still a completed lookup.
+//! The warmer records the empty answer so repeated runs do not hit Fusion.
+void TestCacheWarmRecordsEmptyTableColumns() {
+	ResetCache();
+	Script script;
+	struct EmptyColumnsTransport : FusionTransport {
+		Script &script;
+		explicit EmptyColumnsTransport(Script &script_p) : script(script_p) {
+		}
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			script.executed_sql.push_back(sql);
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;1&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (sql.find("FND_VIEWS") != std::string::npos && !AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;EMPTY_T&lt;/TABLE_NAME&gt;"
+				    "&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;7&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+		}
+	};
+	ScopedTransportFactory installed(
+	    [&script](const FusionConfig &) { return std::make_shared<EmptyColumnsTransport>(script); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto first = RunQuery(connection,
+	                      "SELECT tables_without_columns FROM fusion_scanner_cache_warm(pattern := 'EMPTY\\_T')");
+	CHECK(first->GetValue(0, 0).GetValue<int64_t>() == 1);
+	const auto requests_after_first = script.executed_sql.size();
+	auto second = RunQuery(connection, "SELECT already_cached FROM fusion_scanner_cache_warm(pattern := 'EMPTY\\_T')");
+	CHECK(second->GetValue(0, 0).GetValue<int64_t>() == 1);
+	CHECK(script.executed_sql.size() == requests_after_first);
+}
+
+//! A view is not in FND_COLUMNS and so costs a request of its own. A warm that
+//! reaches its last view has already spent one per view, and an error there
+//! used to discard every one of them: the columns were held in memory until the
+//! whole loop finished. What has arrived is now written on the way out, so the
+//! retry pays only for what is still missing.
+void TestCacheWarmKeepsViewColumnsWhenItFails() {
+	ResetCache();
+	struct FailingViewTransport : FusionTransport {
+		bool fail_second_view = true;
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;2&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (sql.find("all_tab_columns") != std::string::npos) {
+				if (AsksForALaterPage(sql)) {
+					return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+				}
+				if (fail_second_view && sql.find("WARM_V2") != std::string::npos) {
+					throw ofquack::RetryableError("BI Publisher is busy");
+				}
+				const auto name = sql.find("WARM_V2") != std::string::npos ? "WARM_V2" : "WARM_V1";
+				return MakeSoapResponse(MakeReportXML(
+				    std::string("&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;") + name +
+				    "&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;C1&lt;/COLUMN_NAME&gt;"
+				    "&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;"
+				    "&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			return MakeSoapResponse(
+			    MakeReportXML("&lt;ROWSET&gt;"
+			                  "&lt;ROW&gt;&lt;TABLE_NAME&gt;WARM_V1&lt;/TABLE_NAME&gt;"
+			                  "&lt;TABLE_TYPE&gt;VIEW&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;&lt;/TABLE_ID&gt;&lt;/ROW&gt;"
+			                  "&lt;ROW&gt;&lt;TABLE_NAME&gt;WARM_V2&lt;/TABLE_NAME&gt;"
+			                  "&lt;TABLE_TYPE&gt;VIEW&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;&lt;/TABLE_ID&gt;&lt;/ROW&gt;"
+			                  "&lt;/ROWSET&gt;"));
+		}
+	};
+	auto transport = std::make_shared<FailingViewTransport>();
+	ScopedTransportFactory installed([transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	// Two views, and the second one refuses. Fewer than a batch, so nothing was
+	// written before the failure -- which is exactly the case that used to lose
+	// everything.
+	auto failed = connection.Query("SELECT * FROM fusion_scanner_cache_warm(pattern := 'WARM\\_V%')");
+	CHECK(failed->HasError());
+
+	transport->fail_second_view = false;
+	auto retry = RunQuery(connection, "SELECT tables_warmed, already_cached FROM "
+	                                  "fusion_scanner_cache_warm(pattern := 'WARM\\_V%')");
+	// The first view survived the failure; only the second is fetched again.
+	CHECK(retry->GetValue(1, 0).GetValue<int64_t>() == 1);
+	CHECK(retry->GetValue(0, 0).GetValue<int64_t>() == 1);
+}
+
+//! An instance that will not count its own dictionary leaves the list
+//! unverifiable, so it is not cached -- and warming columns against a list
+//! nothing can read back is pointless. Refusing is right; blaming the cache
+//! file for it sent the user looking at the wrong machine.
+void TestCacheWarmNamesTheMissingCount() {
+	ResetCache();
+	struct NoCountTransport : FusionTransport {
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				throw ofquack::PermanentError("ORA-00942: table or view does not exist");
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE&lt;/TABLE_TYPE&gt;"
+			    "&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	auto transport = std::make_shared<NoCountTransport>();
+	ScopedTransportFactory installed([transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query("SELECT * FROM fusion_scanner_cache_warm()");
+	CHECK(result->HasError());
+	// Names the count and where it comes from, not the cache.
+	CHECK(result->GetError().find("would not count") != std::string::npos);
+	CHECK(result->GetError().find("FND_TABLES") != std::string::npos);
+	CHECK(result->GetError().find("metadata cache at") == std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -2180,14 +2456,18 @@ const TestCase TESTS[] = {
     {"truncated page does not end the listing", TestTruncatedPageDoesNotEndTheListing},
     {"empty page is retried on a fresh session", TestEmptyPageIsRetriedOnAFreshSession},
     {"short listing is reported rather than cached", TestShortListingIsReportedRatherThanCached},
+    {"unverified listing is not cached", TestUnverifiedListingIsNotCached},
     {"second listing costs nothing", TestSecondListingCostsNothing},
     {"an empty column list is cached", TestAnEmptyColumnListIsCached},
     {"refresh bypasses the cache", TestRefreshBypassesTheCache},
     {"invalidate forces a refetch", TestInvalidateForcesARefetch},
+    {"invalidate removes expected count and order keys", TestInvalidateRemovesExpectedCountAndOrderKeys},
     {"columns of table and view", TestColumnsOfTableAndView},
     {"unknown table is reported", TestUnknownTableIsReported},
     {"cache status reports mode", TestCacheStatusReportsMode},
+    {"cache status does not call unknown complete", TestCacheStatusDoesNotCallUnknownComplete},
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
+    {"cache is keyed by principal", TestCacheIsKeyedByPrincipal},
     {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},
     {"secured views is off by default", TestSecuredViewsIsOffByDefault},
     {"attach options reach the scan", TestAttachOptionsReachTheScan},
@@ -2198,6 +2478,7 @@ const TestCase TESTS[] = {
     {"unique indexes arrive grouped and narrowest first", TestUniqueIndexesArriveGroupedAndNarrowestFirst},
     {"table is found after the schema was listed", TestTableIsFoundAfterTheSchemaWasListed},
     {"attached scan orders by the primary key", TestAttachedScanOrdersByThePrimaryKey},
+    {"attached entry rejects invalidated metadata", TestAttachedEntryRejectsInvalidatedMetadata},
     {"filter pushdown is off by default", TestFilterPushdownIsOffByDefault},
     {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},
     {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},
@@ -2207,6 +2488,10 @@ const TestCase TESTS[] = {
     {"show tables lists only describable tables", TestShowTablesListsOnlyDescribableTables},
     {"cache warm", TestCacheWarm},
     {"cache warm pattern and limit", TestCacheWarmPatternAndLimit},
+    {"cache warm pattern escape and page size", TestCacheWarmPatternEscapeAndPageSize},
+    {"cache warm records empty table columns", TestCacheWarmRecordsEmptyTableColumns},
+    {"cache warm keeps view columns when it fails", TestCacheWarmKeepsViewColumnsWhenItFails},
+    {"cache warm names the missing count", TestCacheWarmNamesTheMissingCount},
     {"browser secret is created without signing in", TestBrowserSecretIsCreatedWithoutSigningIn},
     {"browser secret holds no credential", TestBrowserSecretHoldsNoCredential},
     {"sso status without token", TestSsoStatusWithoutToken},

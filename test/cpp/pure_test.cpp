@@ -869,8 +869,12 @@ void TestMetadataQueriesUseFusionDictionary() {
 	CHECK(Contains(columns, "JOIN FND_TABLES t ON c.table_id = t.table_id"));
 	CHECK(Contains(columns, "IN (101,102)"));
 
-	// Views are not in FND_COLUMNS at all.
-	CHECK(Contains(ofquack::metadata::ColumnsOfViews("GL_%_V"), "FROM all_tab_columns"));
+	// Views are not in FND_COLUMNS at all, and a concrete object name is an
+	// equality comparison: underscores in it must not become LIKE wildcards.
+	const auto view_columns = ofquack::metadata::ColumnsOfViews("GL_BALANCES_V");
+	CHECK(Contains(view_columns, "FROM all_tab_columns"));
+	CHECK(Contains(view_columns, "UPPER(table_name) = 'GL_BALANCES_V'"));
+	CHECK(!Contains(view_columns, "table_name LIKE"));
 	CHECK(Contains(ofquack::metadata::PrimaryKeys("T"), "constraint_type = 'P'"));
 	CHECK(Contains(ofquack::metadata::ForeignKeys("T"), "constraint_type = 'R'"));
 	// The predicate, not the CASE in the select list, which is always there.

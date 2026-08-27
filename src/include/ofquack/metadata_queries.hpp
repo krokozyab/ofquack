@@ -81,9 +81,10 @@ std::string TableCount(const std::vector<std::string> &types);
 //! returned.
 std::string ColumnsByTableIds(const std::vector<std::string> &table_ids);
 
-//! Columns of a view. Views are not in FND_COLUMNS, so ALL_TAB_COLUMNS is the
-//! only source; `table_name_pattern` is a LIKE pattern.
-std::string ColumnsOfViews(const std::string &table_name_pattern);
+//! Columns of one view. Views are not in FND_COLUMNS, so ALL_TAB_COLUMNS is the
+//! only source. The name is compared exactly: underscores in Oracle object
+//! names must not become LIKE wildcards and merge several schemas together.
+std::string ColumnsOfViews(const std::string &table_name);
 
 std::string PrimaryKeys(const std::string &table_name);
 std::string ForeignKeys(const std::string &table_name);

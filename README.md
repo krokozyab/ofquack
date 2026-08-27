@@ -244,6 +244,10 @@ objects, and fetching every table's columns is hours of SOAP calls. Which
 families you need is your decision, not one this extension should make for you.
 `fusion_scanner_cache_status()` shows what is currently cached.
 
+If you warm after the catalog has already been attached and browsed, `DETACH`
+and `ATTACH` it once more. DuckDB treats a completed schema listing as immutable,
+so the existing catalog tree cannot acquire newly warmed entries in place.
+
 **Which to use.** `ATTACH` for browsing and for straightforward reads;
 `oracle_fusion_query` when you want Oracle to do the work — a join, an analytic
 function, a hint. The [reference](docs/REFERENCE.md#when-to-use-attach-and-when-to-use-oracle_fusion_query)

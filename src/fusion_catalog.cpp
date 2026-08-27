@@ -39,6 +39,14 @@ namespace {
 constexpr const char *STORAGE_TYPE = "oracle_fusion";
 constexpr int64_t CATALOG_CACHE_TTL_SECONDS = INT64_C(7) * 24 * 60 * 60;
 
+uint64_t MetadataPageSize(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("fusion_scanner_metadata_page_size", setting) && !setting.IsNull()) {
+		return setting.GetValue<uint64_t>();
+	}
+	return 0;
+}
+
 //! Everything one ATTACH knows, shared by the catalog, every table entry it
 //! produces, and every scan those tables start.
 //!
@@ -55,31 +63,60 @@ struct FusionAttachedState {
 
 	std::mutex metadata_lock;
 	bool tables_loaded = false;
+	uint64_t tables_revision = 0;
 	std::vector<ofquack::TableInfo> tables;
 	std::unordered_map<string, std::vector<ofquack::ColumnInfo>> columns_by_table;
+	std::unordered_map<string, uint64_t> column_revisions;
 	std::unordered_map<string, vector<string>> order_keys;
 
 	ofquack::RequestContext RequestContextFor(ClientContext &context) {
 		ofquack::RequestContext request_context;
-		request_context.is_cancelled = [&context]() { return context.interrupted.load(); };
+		request_context.is_cancelled = [&context]() {
+			return context.interrupted.load();
+		};
 		return request_context;
 	}
 
 	//! The table list, from memory, then from the file, then from Fusion.
 	const std::vector<ofquack::TableInfo> &Tables(ClientContext &context) {
-		if (tables_loaded) {
+		auto &cache = MetadataCache::Get();
+		const auto current_revision = cache.TablesRevision(endpoint_key);
+		if (tables_loaded && tables_revision == current_revision) {
 			return tables;
 		}
-		auto &cache = MetadataCache::Get();
-		if (!cache.TryGetTables(endpoint_key, CATALOG_CACHE_TTL_SECONDS, tables)) {
+		if (tables_loaded) {
+			tables_loaded = false;
 			tables.clear();
-			int64_t expected = -1;
-			tables = ofquack::FetchTables(*transport, RequestContextFor(context), {"TABLE", "VIEW"}, 0, &expected);
-			cache.PutTables(endpoint_key, tables);
-			cache.SetExpectedTables(endpoint_key, expected);
+			columns_by_table.clear();
+			column_revisions.clear();
+			order_keys.clear();
+		}
+		if (!cache.TryGetTables(endpoint_key, CATALOG_CACHE_TTL_SECONDS, tables)) {
+			auto population = cache.PopulationMutex("tables:" + endpoint_key);
+			std::lock_guard<std::mutex> population_guard(*population);
+			tables.clear();
+			if (!cache.TryGetTables(endpoint_key, CATALOG_CACHE_TTL_SECONDS, tables)) {
+				int64_t expected = -1;
+				tables = ofquack::FetchTables(*transport, RequestContextFor(context), {"TABLE", "VIEW"},
+				                              MetadataPageSize(context), &expected);
+				cache.PutTables(endpoint_key, tables, expected);
+			}
 		}
 		tables_loaded = true;
+		tables_revision = cache.TablesRevision(endpoint_key);
 		return tables;
+	}
+
+	void SynchronizeColumns(const string &table_name) {
+		const auto key = StringUtil::Upper(table_name);
+		const auto current = MetadataCache::Get().ColumnsRevision(endpoint_key, table_name);
+		const auto known = column_revisions.find(key);
+		if (known != column_revisions.end() && known->second == current) {
+			return;
+		}
+		columns_by_table.erase(key);
+		order_keys.erase(key);
+		column_revisions[key] = current;
 	}
 
 	optional_ptr<const ofquack::TableInfo> FindTable(ClientContext &context, const string &name) {
@@ -104,42 +141,50 @@ struct FusionAttachedState {
 	//! Empty means there is no key at all, which is answered with ROWID.
 	const std::vector<string> &OrderKey(ClientContext &context, const ofquack::TableInfo &table) {
 		const auto key = StringUtil::Upper(table.name);
+		SynchronizeColumns(table.name);
 		const auto known = order_keys.find(key);
 		if (known != order_keys.end()) {
 			return known->second;
 		}
 		std::vector<std::string> columns;
 		auto &cache = MetadataCache::Get();
-		if (!cache.TryGetOrderKey(endpoint_key, table.name, columns)) {
-			const auto request_context = RequestContextFor(context);
-			columns = ofquack::FetchPrimaryKey(*transport, request_context, table.name);
-			if (columns.empty()) {
-				std::unordered_set<string> nullable;
-				for (const auto &column : Columns(context, table)) {
-					if (column.nullable) {
-						nullable.insert(StringUtil::Upper(column.name));
+		if (!cache.TryGetOrderKey(endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns)) {
+			auto population = cache.PopulationMutex("order-key:" + endpoint_key + ":" + key);
+			std::lock_guard<std::mutex> population_guard(*population);
+			columns.clear();
+			if (!cache.TryGetOrderKey(endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns)) {
+				const auto request_context = RequestContextFor(context);
+				columns = ofquack::FetchPrimaryKey(*transport, request_context, table.name);
+				if (columns.empty()) {
+					std::unordered_set<string> nullable;
+					for (const auto &column : Columns(context, table)) {
+						if (column.nullable) {
+							nullable.insert(StringUtil::Upper(column.name));
+						}
+					}
+					for (const auto &index : ofquack::FetchUniqueIndexes(*transport, request_context, table.name)) {
+						bool usable = true;
+						for (const auto &column : index.columns) {
+							usable = usable && nullable.count(StringUtil::Upper(column)) == 0;
+						}
+						if (usable) {
+							columns = index.columns;
+							break;
+						}
 					}
 				}
-				for (const auto &index : ofquack::FetchUniqueIndexes(*transport, request_context, table.name)) {
-					bool usable = true;
-					for (const auto &column : index.columns) {
-						usable = usable && nullable.count(StringUtil::Upper(column)) == 0;
-					}
-					if (usable) {
-						columns = index.columns;
-						break;
-					}
-				}
+				cache.PutOrderKey(endpoint_key, table.name, columns);
 			}
-			cache.PutOrderKey(endpoint_key, table.name, columns);
 		}
 		vector<string> as_duckdb;
 		as_duckdb.assign(columns.begin(), columns.end());
+		column_revisions[key] = cache.ColumnsRevision(endpoint_key, table.name);
 		return order_keys.emplace(key, std::move(as_duckdb)).first->second;
 	}
 
 	const std::vector<ofquack::ColumnInfo> &Columns(ClientContext &context, const ofquack::TableInfo &table) {
 		const auto key = StringUtil::Upper(table.name);
+		SynchronizeColumns(table.name);
 		const auto known = columns_by_table.find(key);
 		if (known != columns_by_table.end()) {
 			return known->second;
@@ -148,14 +193,19 @@ struct FusionAttachedState {
 		auto &cache = MetadataCache::Get();
 		std::vector<ofquack::ColumnInfo> columns;
 		if (!cache.TryGetColumns(endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns)) {
+			auto population = cache.PopulationMutex("columns:" + endpoint_key + ":" + key);
+			std::lock_guard<std::mutex> population_guard(*population);
 			columns.clear();
-			const auto request_context = RequestContextFor(context);
-			// Views are not in FND_COLUMNS; tables are looked up by TABLE_ID.
-			columns = StringUtil::CIEquals(table.type, "VIEW") || table.table_id.empty()
-			              ? ofquack::FetchColumnsOfView(*transport, request_context, table.name)
-			              : ofquack::FetchColumnsOfTables(*transport, request_context, {table});
-			cache.PutColumns(endpoint_key, table.name, columns);
+			if (!cache.TryGetColumns(endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns)) {
+				const auto request_context = RequestContextFor(context);
+				// Views are not in FND_COLUMNS; tables are looked up by TABLE_ID.
+				columns = StringUtil::CIEquals(table.type, "VIEW") || table.table_id.empty()
+				              ? ofquack::FetchColumnsOfView(*transport, request_context, table.name)
+				              : ofquack::FetchColumnsOfTables(*transport, request_context, {table});
+				cache.PutColumns(endpoint_key, table.name, columns);
+			}
 		}
+		column_revisions[key] = cache.ColumnsRevision(endpoint_key, table.name);
 		return columns_by_table.emplace(key, std::move(columns)).first->second;
 	}
 };
@@ -286,8 +336,8 @@ string NextPageStatement(const FusionCatalogScanBindData &bind_data, const Fusio
 			for (const auto &part : state.key) {
 				expressions.push_back(part.expression);
 			}
-			conditions.push_back(ofquack::SeekPredicate(expressions, std::vector<std::string>(state.last_key.begin(),
-			                                                                                   state.last_key.end())));
+			conditions.push_back(ofquack::SeekPredicate(
+			    expressions, std::vector<std::string>(state.last_key.begin(), state.last_key.end())));
 		}
 		if (!conditions.empty()) {
 			statement += " WHERE " + StringUtil::Join(conditions, " AND ");
@@ -331,10 +381,12 @@ ofquack::ParsedReport FetchCatalogPage(FusionCatalogScanBindData &bind_data, Fus
                                        ClientContext &context, idx_t offset) {
 	const auto statement = NextPageStatement(bind_data, state, offset);
 	ofquack::RequestContext request_context;
-	request_context.is_cancelled = [&context]() { return context.interrupted.load(); };
+	request_context.is_cancelled = [&context]() {
+		return context.interrupted.load();
+	};
 	try {
-		return ofquack::ParseRows(ofquack::ExtractReportXML(bind_data.state->transport->Execute(statement,
-		                                                                                       request_context)));
+		return ofquack::ParseRows(
+		    ofquack::ExtractReportXML(bind_data.state->transport->Execute(statement, request_context)));
 	} catch (const ofquack::CancelledError &) {
 		throw InterruptException();
 	} catch (const ofquack::FusionError &error) {
@@ -381,11 +433,11 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 
 	const auto from_table = " FROM " + KeywordHelper::WriteQuoted(bind_data.object_name, '"');
 	const auto where = state->where_clause.empty() ? string() : " WHERE " + state->where_clause;
-	state->paginate = ofquack::ClassifyForPagination("SELECT " + select_list + from_table + where,
-	                                                 bind_data.state->options.fetch_size) ==
-	                  ofquack::PaginationVerdict::YES;
-	state->mode = state->paginate ? FusionCatalogScanState::PagingMode::OFFSET
-	                              : FusionCatalogScanState::PagingMode::NONE;
+	state->paginate =
+	    ofquack::ClassifyForPagination("SELECT " + select_list + from_table + where,
+	                                   bind_data.state->options.fetch_size) == ofquack::PaginationVerdict::YES;
+	state->mode =
+	    state->paginate ? FusionCatalogScanState::PagingMode::OFFSET : FusionCatalogScanState::PagingMode::NONE;
 
 	// Paging needs an order: each page is a separate execution of the
 	// statement, and Oracle owes no two executions the same row order, so
@@ -401,6 +453,7 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 	string order_by_names;
 	bool is_view = true;
 	if (state->paginate && bind_data.state->options.stable_paging) {
+		std::lock_guard<std::mutex> metadata_guard(bind_data.state->metadata_lock);
 		auto table = bind_data.state->FindTable(context, bind_data.object_name);
 		is_view = !table || StringUtil::CIEquals(table->type, "VIEW");
 		if (!is_view) {
@@ -440,9 +493,9 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 						projected = projected || StringUtil::CIEquals(name, part.xml_name);
 					}
 					if (!projected) {
-						select_list += ", " + (part.kind == ofquack::KeyKind::ROWID
-						                           ? string("ROWID AS \"OFQUACK_ROWID\"")
-						                           : part.expression);
+						select_list +=
+						    ", " + (part.kind == ofquack::KeyKind::ROWID ? string("ROWID AS \"OFQUACK_ROWID\"")
+						                                                 : part.expression);
 					}
 					state->order_clause += (state->order_clause.empty() ? "" : ", ") + part.expression;
 				}
@@ -568,9 +621,11 @@ BindInfo FusionCatalogScanBindInfo(const optional_ptr<FunctionData> bind_data) {
 class FusionTableEntry : public TableCatalogEntry {
 public:
 	FusionTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
-	                 std::shared_ptr<FusionAttachedState> state_p, string object_name_p, vector<FusionColumn> columns_p)
+	                 std::shared_ptr<FusionAttachedState> state_p, string object_name_p, vector<FusionColumn> columns_p,
+	                 uint64_t tables_revision_p, uint64_t columns_revision_p)
 	    : TableCatalogEntry(catalog, schema, info), state(std::move(state_p)), object_name(std::move(object_name_p)),
-	      fusion_columns(std::move(columns_p)) {
+	      fusion_columns(std::move(columns_p)), tables_revision(tables_revision_p),
+	      columns_revision(columns_revision_p) {
 	}
 
 	//! Returns nullptr when Fusion has no such object.
@@ -612,10 +667,21 @@ public:
 			fusion_columns.push_back(FusionColumn {column.name, type, column.type_name, from_dictionary});
 		}
 		info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
-		return make_uniq<FusionTableEntry>(catalog, schema, *info, state, table->name, std::move(fusion_columns));
+		auto &cache = MetadataCache::Get();
+		return make_uniq<FusionTableEntry>(catalog, schema, *info, state, table->name, std::move(fusion_columns),
+		                                   cache.TablesRevision(state->endpoint_key),
+		                                   cache.ColumnsRevision(state->endpoint_key, table->name));
 	}
 
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override {
+		auto &cache = MetadataCache::Get();
+		if (tables_revision != cache.TablesRevision(state->endpoint_key) ||
+		    columns_revision != cache.ColumnsRevision(state->endpoint_key, object_name)) {
+			throw BinderException(
+			    "Cached metadata for Oracle Fusion table \"%s\" changed after it was attached. DETACH this catalog "
+			    "and ATTACH it again before querying the table",
+			    object_name);
+		}
 		auto scan_bind = make_uniq<FusionCatalogScanBindData>();
 		scan_bind->state = state;
 		scan_bind->object_name = object_name;
@@ -673,6 +739,8 @@ private:
 	std::shared_ptr<FusionAttachedState> state;
 	string object_name;
 	vector<FusionColumn> fusion_columns;
+	uint64_t tables_revision;
+	uint64_t columns_revision;
 };
 
 //! Materialises table entries on demand.
@@ -701,18 +769,28 @@ public:
 	//! ClientContext to cancel. Use fusion_scanner_cache_warm() to fill it in.
 	vector<string> GetDefaultEntries() override {
 		std::lock_guard<std::mutex> guard(state->metadata_lock);
+		auto &cache = MetadataCache::Get();
+		const auto current_tables_revision = cache.TablesRevision(state->endpoint_key);
+		if (state->tables_loaded && state->tables_revision != current_tables_revision) {
+			state->tables_loaded = false;
+			state->tables.clear();
+			state->columns_by_table.clear();
+			state->column_revisions.clear();
+			state->order_keys.clear();
+		}
 		if (!state->tables_loaded) {
 			std::vector<ofquack::TableInfo> cached;
-			if (MetadataCache::Get().TryGetTables(state->endpoint_key, CATALOG_CACHE_TTL_SECONDS, cached)) {
+			if (cache.TryGetTables(state->endpoint_key, CATALOG_CACHE_TTL_SECONDS, cached)) {
 				state->tables = std::move(cached);
 				state->tables_loaded = true;
+				state->tables_revision = cache.TablesRevision(state->endpoint_key);
 			}
 		}
 
 		vector<string> names;
-		auto &cache = MetadataCache::Get();
 		for (const auto &table : state->tables) {
 			const auto key = StringUtil::Upper(table.name);
+			state->SynchronizeColumns(table.name);
 			const auto known = state->columns_by_table.find(key);
 			if (known != state->columns_by_table.end()) {
 				if (!known->second.empty()) {
@@ -864,7 +942,7 @@ unique_ptr<Catalog> FusionAttach(optional_ptr<StorageExtensionInfo>, ClientConte
 
 	state->config = ResolveFusionConfig(context, parameters, state->options);
 	RequireUsableCredentials(state->config);
-	state->endpoint_key = EndpointKey(state->config.endpoint, state->config.report_path);
+	state->endpoint_key = EndpointKey(state->config);
 	state->transport = ofquack::CreateTransport(state->config);
 
 	// DuckDB builds a local StorageManager for a DuckCatalog from info.path,

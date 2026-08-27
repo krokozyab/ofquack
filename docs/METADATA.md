@@ -68,7 +68,9 @@ that would be ten times the round trips — and not a hundred: the report
 truncates a response past roughly 500 rows, and ten tables of thirty columns
 stays under that.
 
-Page size is 400 rows and can be lowered when an instance is stingier than that:
+Page size is 400 rows and can be lowered when an instance is stingier than that.
+The setting applies to every cold path: direct listing, column lookup, cache
+warming, and an attached catalog's first named-table lookup.
 
 ```sql
 SET fusion_scanner_metadata_page_size = 200;
@@ -82,6 +84,10 @@ with nothing to show for it. The check lives in the fetcher rather than in
 `oracle_fusion_tables()`, so `ATTACH`, `oracle_fusion_columns()` and
 `fusion_scanner_cache_warm()` are covered by it too.
 
+If the independent count cannot be obtained, the listing may serve the current
+call but is not persisted. There is no safe way to distinguish its final page
+from a silently truncated BI Publisher response.
+
 The count is `COUNT(DISTINCT UPPER(table_name))` rather than `COUNT(*)`: a name
 that exists as both a table and a view is one entry in the listing, so counting
 rows of the union would report every complete listing as short.
@@ -92,21 +98,28 @@ rows of the union would report every complete listing as short.
 database, because it has to work for an in-memory session, must not appear in
 your catalog, and is shared between connections.
 
-Rows are keyed by endpoint + report path, so a development and a production
-instance never share metadata. The default lifetime is a week: Fusion's
+Rows are keyed by endpoint + report path + authenticated principal, so a
+development and a production instance — or two users with different metadata
+visibility — never share metadata. The default lifetime is a week: Fusion's
 dictionary changes when someone deploys, not continuously.
 
 ```sql
 SELECT * FROM fusion_scanner_cache_status();
 SELECT * FROM oracle_fusion_tables(refresh := true);
 SELECT * FROM fusion_scanner_cache_invalidate();
-SELECT * FROM fusion_scanner_cache_invalidate(table := 'GL_JE_HEADERS');
+SELECT * FROM fusion_scanner_cache_invalidate(table_name := 'GL_JE_HEADERS');
 ```
 
 If the cache file cannot be opened read-write it falls back to read-only, and
 then to memory. A cache problem is always a miss, never an error you see:
 slower is acceptable, refusing to work is not. `fusion_scanner_cache_status()` reports
 which mode is in effect.
+
+Table rows and the instance's expected table count are replaced atomically.
+Invalidation also removes cached primary/unique ordering keys; otherwise an
+attached scan could continue keyset paging with a key that no longer exists.
+An already materialised attached table cannot change its DuckDB schema in place:
+after refreshing or invalidating its metadata, `DETACH` and `ATTACH` the catalog.
 
 Freshness is compared against an epoch integer rather than SQL `now()`. `now()`
 carries a time zone and the stored value does not, so a cache written in UTC and

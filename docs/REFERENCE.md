@@ -308,8 +308,8 @@ SELECT count(*) FROM oracle_fusion_tables();
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
 ```
 
-Both are cached on disk for a week, so a new session — or a new process — pays
-nothing.
+Both are cached on disk for a week, so a new session — or a new process using
+the same Fusion principal — pays nothing.
 
 What works cold, and what does not:
 
@@ -343,7 +343,7 @@ both and joins locally, which is usually the wrong way round for large tables.
 
 Every question about Fusion's dictionary is answered by a report call measured
 in seconds, so answers are cached on disk at `~/.fusion_scanner/metadata.duckdb`,
-keyed by endpoint and report path, for a week.
+keyed by endpoint, report path, and authenticated principal, for a week.
 
 ### `oracle_fusion_tables()`
 
@@ -387,13 +387,17 @@ SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%', max_tables := 500);
 ```
 
 **Returns** `tables_warmed`, `columns_cached`, `tables_without_columns`,
-`already_cached`.
+`already_cached`, and the nullable `first_error` for an object-specific failure.
 
-**Named parameters:** `pattern` (SQL `LIKE`), `max_tables` (default 200),
-`cache_ttl_seconds`.
+**Named parameters:** `pattern` (SQL `LIKE`, with `\` as the escape character),
+`max_tables` (default 200, zero for no limit), `cache_ttl_seconds`, and
+`page_size`. A negative limit is rejected.
 
 Bounded by default on purpose: warming every table in the dictionary is hours of calls.
-Columns are fetched ten tables per request.
+Columns are fetched and committed ten tables per batch. An empty column result
+is cached as a completed lookup, so later warm-ups do not ask for it again. A
+read-only cache refuses an explicit warm instead of reporting writes it could
+not make.
 
 ### `fusion_scanner_cache_status()`
 
@@ -402,12 +406,15 @@ SELECT * FROM fusion_scanner_cache_status();
 ```
 
 **Returns** `mode`, `path`, `endpoint`, `cached_tables`, `dictionary_tables`,
-`complete`, `cached_columns`.
+`complete`, `cached_columns`, `fresh_tables`, `fresh_columns`, and
+`described_tables`. The original seven columns retain their order.
 
 `mode` is `read_write`, `read_only` or `memory`. A second DuckDB process
 holding the cache file pushes you down that ladder; it is a slowdown, never an
-error. `complete` compares what is cached against what the instance says it
-has.
+error. `complete` compares fresh table rows against what the instance says it
+has and is `NULL` when that expected count is unknown. `described_tables` is the
+number of tables for which a fresh column lookup — including an empty answer —
+has been cached.
 
 ### `fusion_scanner_cache_invalidate()`
 
@@ -416,10 +423,16 @@ dictionary has moved under you.
 
 ```sql
 SELECT * FROM fusion_scanner_cache_invalidate();                            -- everything
-SELECT * FROM fusion_scanner_cache_invalidate(table := 'AP_INVOICES_ALL');  -- one table
+SELECT * FROM fusion_scanner_cache_invalidate(table_name := 'AP_INVOICES_ALL');  -- one table
 ```
 
 **Returns** `tables_removed`, `columns_removed`.
+
+Invalidation also removes ordering keys used by stable paging. If the affected
+table has already been materialised in an attached DuckDB catalog, detach and
+attach that catalog again before querying it; the extension refuses to scan
+with the stale schema. A read-only cache refuses invalidation explicitly rather
+than reporting a successful no-op.
 
 ---
 

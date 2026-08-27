@@ -95,14 +95,30 @@ std::vector<ReportRow> Query(FusionTransport &transport, const RequestContext &c
 	}
 }
 
-//! Runs a statement page by page until a short page arrives.
+//! Runs a statement page by page until an empty page is confirmed on a fresh
+//! BI Publisher session.
 std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestContext &context,
                                   const std::string &base_sql) {
 	std::vector<ReportRow> all;
 	uint64_t offset = 0;
+	ReportRow previous_first;
 	for (;;) {
 		auto page = Query(transport, context, metadata::PaginateByOffset(base_sql, offset));
+		if (page.empty()) {
+			// A spent BI Publisher session can answer with an empty result instead
+			// of an error. Believing it here would cache a partial column list.
+			transport.ResetSession();
+			page = Query(transport, context, metadata::PaginateByOffset(base_sql, offset));
+			if (page.empty()) {
+				return all;
+			}
+		}
 		const auto page_size = page.size();
+		if (offset > 0 && !previous_first.empty() && page.front() == previous_first) {
+			throw PermanentError("Oracle Fusion returned the same metadata page for OFFSET " + std::to_string(offset) +
+			                     "; refusing to cache a result that is not advancing");
+		}
+		previous_first = page.front();
 		for (auto &row : page) {
 			// OFFSET/FETCH adds no columns of its own, so nothing to strip.
 			all.push_back(std::move(row));
@@ -112,9 +128,6 @@ std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestConte
 		// the last one -- which silently cut the table list off partway
 		// through the alphabet. The cost of being right is one extra request
 		// at the end.
-		if (page_size == 0) {
-			return all;
-		}
 		offset += page_size;
 		// A server that keeps returning rows without advancing would loop for
 		// ever; the dictionary is large but finite.
@@ -143,8 +156,7 @@ int TypePriority(const std::string &type) {
 } // namespace
 
 std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
-                                   const std::vector<std::string> &types, uint64_t page_size,
-                                   int64_t *expected_out) {
+                                   const std::vector<std::string> &types, uint64_t page_size, int64_t *expected_out) {
 	const auto rows_per_page = page_size > 0 ? page_size : metadata::PAGE_SIZE;
 	// Asked before the listing rather than after, so that a listing which comes
 	// back short is recognised as short by whoever asked for it -- the catalog
@@ -159,8 +171,7 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 	std::string after_name;
 	std::string after_type;
 	for (;;) {
-		auto page = Query(transport, context,
-		                  metadata::TablesAfter(types, after_name, after_type, rows_per_page));
+		auto page = Query(transport, context, metadata::TablesAfter(types, after_name, after_type, rows_per_page));
 		if (page.empty()) {
 			// An empty page is how the end of the data looks. Before the end is
 			// believed, the same page is asked once more on a fresh session --
@@ -171,8 +182,7 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 			// stays because it is cheap and the failure it guards against is
 			// silent.)
 			transport.ResetSession();
-			page = Query(transport, context,
-			             metadata::TablesAfter(types, after_name, after_type, rows_per_page));
+			page = Query(transport, context, metadata::TablesAfter(types, after_name, after_type, rows_per_page));
 			if (page.empty()) {
 				break;
 			}
@@ -183,8 +193,9 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 		const auto next_name = Field(page.back(), "TABLE_NAME");
 		const auto next_type = Field(page.back(), "TABLE_TYPE");
 		if (next_name.empty() || (next_name == after_name && next_type == after_type)) {
-			// No progress: stop rather than ask for the same page for ever.
-			break;
+			throw PermanentError("Oracle Fusion's dictionary listing did not advance past " +
+			                     (after_name.empty() ? std::string("its first page") : after_name) +
+			                     "; refusing to cache a possibly partial result");
 		}
 		after_name = next_name;
 		after_type = next_type;
@@ -263,7 +274,15 @@ int64_t FetchTableCount(FusionTransport &transport, const RequestContext &contex
 		// here would start the far more expensive listing right after the user
 		// pressed Ctrl-C.
 		throw;
-	} catch (const FusionError &) {
+	} catch (const AuthenticationError &) {
+		throw;
+	} catch (const RetryableError &) {
+		throw;
+	} catch (const TokenExpiredError &) {
+		throw;
+	} catch (const CircuitOpenError &) {
+		throw;
+	} catch (const PermanentError &) {
 		// A count is a convenience, not a requirement: an instance that will
 		// not answer it must not stop the listing that follows.
 		return -1;
@@ -286,7 +305,8 @@ std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const R
 	std::unordered_set<std::string> seen;
 	for (size_t start = 0; start < ids.size(); start += metadata::COLUMN_BATCH_SIZE) {
 		const auto end = std::min(start + metadata::COLUMN_BATCH_SIZE, ids.size());
-		const std::vector<std::string> batch(ids.begin() + static_cast<std::ptrdiff_t>(start), ids.begin() + static_cast<std::ptrdiff_t>(end));
+		const std::vector<std::string> batch(ids.begin() + static_cast<std::ptrdiff_t>(start),
+		                                     ids.begin() + static_cast<std::ptrdiff_t>(end));
 
 		for (const auto &row : QueryPaged(transport, context, metadata::ColumnsByTableIds(batch))) {
 			ColumnInfo column;
@@ -386,9 +406,8 @@ std::vector<IndexInfo> FetchUniqueIndexes(FusionTransport &transport, const Requ
 std::vector<std::string> FetchPrimaryKey(FusionTransport &transport, const RequestContext &context,
                                          const std::string &table_name) {
 	auto rows = Query(transport, context, metadata::PrimaryKeys(table_name));
-	std::sort(rows.begin(), rows.end(), [](const ReportRow &a, const ReportRow &b) {
-		return IntField(a, "KEY_SEQ") < IntField(b, "KEY_SEQ");
-	});
+	std::sort(rows.begin(), rows.end(),
+	          [](const ReportRow &a, const ReportRow &b) { return IntField(a, "KEY_SEQ") < IntField(b, "KEY_SEQ"); });
 
 	std::vector<std::string> key_columns;
 	for (const auto &row : rows) {
