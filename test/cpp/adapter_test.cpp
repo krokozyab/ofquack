@@ -1840,6 +1840,29 @@ void TestAttachCostsNoRequests() {
 	CHECK(script.executed_sql.empty());
 }
 
+//! Catalog lookup and the metadata table functions share one page-size
+//! resolver, so the connection setting cannot silently diverge between them.
+void TestAttachedCatalogHonoursMetadataPageSize() {
+	ResetCache();
+	Script script;
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "SET fusion_scanner_metadata_page_size = 17");
+	Attach(connection);
+	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+
+	bool used_setting = false;
+	for (const auto &sql : script.executed_sql) {
+		used_setting = used_setting ||
+		               (sql.find("FND_VIEWS") != std::string::npos &&
+		                sql.find("FETCH FIRST 17 ROWS ONLY") != std::string::npos);
+	}
+	CHECK(used_setting);
+}
+
 void TestSelectFromAttachedTable() {
 	ResetCache();
 	Script script;
@@ -2630,6 +2653,7 @@ const TestCase TESTS[] = {
     {"secured views is off by default", TestSecuredViewsIsOffByDefault},
     {"attach options reach the scan", TestAttachOptionsReachTheScan},
     {"attach costs no requests", TestAttachCostsNoRequests},
+    {"attached catalog honours metadata page size", TestAttachedCatalogHonoursMetadataPageSize},
     {"select from attached table", TestSelectFromAttachedTable},
     {"projection reaches the statement", TestProjectionReachesTheStatement},
     {"count star reads one column and emits none", TestCountStarReadsOneColumnAndEmitsNone},

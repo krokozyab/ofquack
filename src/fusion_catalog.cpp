@@ -20,6 +20,7 @@
 #include "ofquack/fusion_filter.hpp"
 #include "ofquack/metadata_cache.hpp"
 #include "ofquack/metadata_fetch.hpp"
+#include "ofquack/metadata_functions.hpp"
 #include "ofquack/oracle_type_map.hpp"
 #include "ofquack/sql_rewrite.hpp"
 #include "ofquack/transport.hpp"
@@ -38,14 +39,6 @@ namespace {
 
 constexpr const char *STORAGE_TYPE = "oracle_fusion";
 constexpr int64_t CATALOG_CACHE_TTL_SECONDS = INT64_C(7) * 24 * 60 * 60;
-
-uint64_t MetadataPageSize(ClientContext &context) {
-	Value setting;
-	if (context.TryGetCurrentSetting("fusion_scanner_metadata_page_size", setting) && !setting.IsNull()) {
-		return setting.GetValue<uint64_t>();
-	}
-	return 0;
-}
 
 //! Everything one ATTACH knows, shared by the catalog, every table entry it
 //! produces, and every scan those tables start.
@@ -98,7 +91,7 @@ struct FusionAttachedState {
 			if (!cache.TryGetTables(endpoint_key, CATALOG_CACHE_TTL_SECONDS, tables)) {
 				int64_t expected = -1;
 				tables = ofquack::FetchTables(*transport, RequestContextFor(context), {"TABLE", "VIEW"},
-				                              MetadataPageSize(context), &expected);
+				                              MetadataPageSize(context, {}), &expected);
 				cache.PutTables(endpoint_key, tables, expected);
 			}
 		}

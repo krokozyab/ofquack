@@ -16,6 +16,18 @@
 
 namespace duckdb {
 
+uint64_t MetadataPageSize(ClientContext &context, const named_parameter_map_t &named_parameters) {
+	const auto entry = named_parameters.find("page_size");
+	if (entry != named_parameters.end() && !entry->second.IsNull()) {
+		return entry->second.GetValue<uint64_t>();
+	}
+	Value setting;
+	if (context.TryGetCurrentSetting("fusion_scanner_metadata_page_size", setting) && !setting.IsNull()) {
+		return setting.GetValue<uint64_t>();
+	}
+	return 0; // the built-in default
+}
+
 namespace {
 
 //! Default lifetime of a cached row: a week. Fusion's dictionary changes when
@@ -86,20 +98,6 @@ auto WithTranslatedErrors(Callable &&callable) -> decltype(callable()) {
 bool WantsRefresh(const named_parameter_map_t &named_parameters) {
 	const auto entry = named_parameters.find("refresh");
 	return entry != named_parameters.end() && !entry->second.IsNull() && entry->second.GetValue<bool>();
-}
-
-//! Rows per dictionary page, overridable because the limit that governs it
-//! lives on the server and is not documented anywhere we can read.
-uint64_t MetadataPageSize(ClientContext &context, const named_parameter_map_t &named_parameters) {
-	const auto entry = named_parameters.find("page_size");
-	if (entry != named_parameters.end() && !entry->second.IsNull()) {
-		return entry->second.GetValue<uint64_t>();
-	}
-	Value setting;
-	if (context.TryGetCurrentSetting("fusion_scanner_metadata_page_size", setting) && !setting.IsNull()) {
-		return setting.GetValue<uint64_t>();
-	}
-	return 0; // the built-in default
 }
 
 int64_t TtlFor(const named_parameter_map_t &named_parameters) {
