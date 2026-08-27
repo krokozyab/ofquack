@@ -416,14 +416,18 @@ SELECT * FROM fusion_scanner_cache_status();
 
 **Returns** `mode`, `path`, `endpoint`, `cached_tables`, `dictionary_tables`,
 `complete`, `cached_columns`, `fresh_tables`, `fresh_columns`, and
-`described_tables`. The original seven columns retain their order.
+`described_tables`, followed by `principal`. The original seven columns retain
+their order.
 
 `mode` is `read_write`, `read_only` or `memory`. A second DuckDB process
 holding the cache file pushes you down that ladder; it is a slowdown, never an
 error. `complete` compares fresh table rows against what the instance says it
 has and is `NULL` when that expected count is unknown. `described_tables` is the
 number of tables for which a fresh column lookup — including an empty answer —
-has been cached.
+has been cached. `principal` identifies the account whose cache key is being
+reported. Before browser SSO supplies a token subject it is `NULL`, as are all
+cache counters: the function cannot know which user's rows to count, and does
+not report a misleading zero under the unused `bearer:unknown` key.
 
 ### `fusion_scanner_cache_invalidate()`
 

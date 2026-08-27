@@ -2519,6 +2519,25 @@ void TestSsoStatusWithoutToken() {
 	CHECK(result->GetValue(2, 0).IsNull());
 }
 
+//! Before browser login there is an endpoint but no authenticated principal.
+//! Zero would claim knowledge about a cache key that no signed-in user uses.
+void TestCacheStatusWithoutBrowserPrincipalIsUnknown() {
+	ofquack::TokenCache::Get().Clear();
+	ResetCache();
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateBrowserSecret(connection);
+
+	auto status = RunQuery(connection,
+	                       "SELECT endpoint, principal, cached_tables, dictionary_tables, complete, cached_columns, "
+	                       "fresh_tables, fresh_columns, described_tables "
+	                       "FROM fusion_scanner_cache_status(secret := 'sso')");
+	CHECK(!status->GetValue(0, 0).IsNull());
+	for (idx_t column = 1; column < status->ColumnCount(); column++) {
+		CHECK(status->GetValue(column, 0).IsNull());
+	}
+}
+
 //! A query on a browser secret with no token says how to sign in rather than
 //! opening a window by itself: a SELECT must never become interactive.
 void TestBearerQueryWithoutTokenExplainsHowToSignIn() {
@@ -2711,6 +2730,7 @@ const TestCase TESTS[] = {
     {"browser secret is created without signing in", TestBrowserSecretIsCreatedWithoutSigningIn},
     {"browser secret holds no credential", TestBrowserSecretHoldsNoCredential},
     {"sso status without token", TestSsoStatusWithoutToken},
+    {"cache status without browser principal is unknown", TestCacheStatusWithoutBrowserPrincipalIsUnknown},
     {"bearer query without token explains how to sign in", TestBearerQueryWithoutTokenExplainsHowToSignIn},
     {"bearer token from secret is used", TestBearerTokenFromSecretIsUsed},
     {"sso status never prints the token", TestSsoStatusNeverPrintsTheToken},

@@ -129,17 +129,22 @@ void SafeRollback(Connection &connection) {
 
 } // namespace
 
-std::string EndpointKey(const ofquack::FusionConfig &config) {
-	std::string principal;
+std::string CachePrincipal(const ofquack::FusionConfig &config) {
 	if (config.auth == ofquack::AuthMode::BASIC) {
-		principal = "basic:" + config.username;
-	} else {
-		auto token = config.token;
-		if (token.empty()) {
-			token = ofquack::TokenCache::Get().Lookup(ofquack::HostOf(config.endpoint)).access_token;
-		}
-		const auto subject = ofquack::ParseJwtClaims(token).subject;
-		principal = "bearer:" + (subject.empty() ? std::string("unknown") : subject);
+		return "basic:" + config.username;
+	}
+	auto token = config.token;
+	if (token.empty()) {
+		token = ofquack::TokenCache::Get().Lookup(ofquack::HostOf(config.endpoint)).access_token;
+	}
+	const auto subject = ofquack::ParseJwtClaims(token).subject;
+	return subject.empty() ? std::string() : "bearer:" + subject;
+}
+
+std::string EndpointKey(const ofquack::FusionConfig &config) {
+	auto principal = CachePrincipal(config);
+	if (principal.empty()) {
+		principal = "bearer:unknown";
 	}
 	const auto part = [](const std::string &value) {
 		return std::to_string(value.size()) + ":" + value;

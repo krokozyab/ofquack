@@ -549,38 +549,54 @@ unique_ptr<FunctionData> CacheStatusBind(ClientContext &context, TableFunctionBi
 	// where the cache is and whether it can be written to.
 	std::string endpoint_key;
 	std::string display_endpoint;
+	std::string principal;
 	try {
 		FusionScanOptions options;
 		const auto config = ResolveFusionConfig(context, input.named_parameters, options);
-		endpoint_key = EndpointKey(config);
 		display_endpoint = config.endpoint;
+		principal = CachePrincipal(config);
+		if (!principal.empty()) {
+			endpoint_key = EndpointKey(config);
+		}
 	} catch (const std::exception &) {
 		endpoint_key.clear();
 		display_endpoint.clear();
+		principal.clear();
 	}
 
-	const auto cached_tables = static_cast<int64_t>(cache.CountTables(endpoint_key));
-	const auto fresh_tables = static_cast<int64_t>(cache.CountFreshTables(endpoint_key, DEFAULT_TTL_SECONDS));
+	const bool principal_known = !endpoint_key.empty();
+	const auto cached_tables = principal_known ? static_cast<int64_t>(cache.CountTables(endpoint_key)) : 0;
+	const auto fresh_tables = principal_known
+	                              ? static_cast<int64_t>(cache.CountFreshTables(endpoint_key, DEFAULT_TTL_SECONDS))
+	                              : 0;
 	const auto expected = endpoint_key.empty() ? -1 : cache.ExpectedTables(endpoint_key);
+	const auto counter = [principal_known](int64_t value) {
+		return principal_known ? Value::BIGINT(value) : Value(LogicalType::BIGINT);
+	};
 
 	auto bind_data = make_uniq<MaterialisedBindData>();
 	bind_data->rows.push_back(
 	    {Value(ModeName(cache.Mode())), cache.Path().empty() ? Value(LogicalType::VARCHAR) : Value(cache.Path()),
-	     display_endpoint.empty() ? Value(LogicalType::VARCHAR) : Value(display_endpoint), Value::BIGINT(cached_tables),
+	     display_endpoint.empty() ? Value(LogicalType::VARCHAR) : Value(display_endpoint), counter(cached_tables),
 	     // -1 means the instance was never asked; that is
 	     // unknown, not zero, and NULL says so.
 	     expected < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(expected),
 	     expected < 0 ? Value(LogicalType::BOOLEAN) : Value::BOOLEAN(fresh_tables >= expected),
-	     Value::BIGINT(static_cast<int64_t>(cache.CountColumns(endpoint_key))),
-	     Value::BIGINT(fresh_tables),
-	     Value::BIGINT(static_cast<int64_t>(cache.CountFreshColumns(endpoint_key, DEFAULT_TTL_SECONDS))),
-	     Value::BIGINT(static_cast<int64_t>(cache.CountFreshDescribedTables(endpoint_key, DEFAULT_TTL_SECONDS)))});
+	     counter(principal_known ? static_cast<int64_t>(cache.CountColumns(endpoint_key)) : 0), counter(fresh_tables),
+	     counter(principal_known
+	                 ? static_cast<int64_t>(cache.CountFreshColumns(endpoint_key, DEFAULT_TTL_SECONDS))
+	                 : 0),
+	     counter(principal_known
+	                 ? static_cast<int64_t>(cache.CountFreshDescribedTables(endpoint_key, DEFAULT_TTL_SECONDS))
+	                 : 0),
+	     principal.empty() ? Value(LogicalType::VARCHAR) : Value(principal)});
 
 	names = {"mode",           "path",          "endpoint",      "cached_tables", "dictionary_tables",
-	         "complete",       "cached_columns", "fresh_tables", "fresh_columns", "described_tables"};
+	         "complete",       "cached_columns", "fresh_tables", "fresh_columns", "described_tables",
+	         "principal"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
 	                LogicalType::BIGINT,  LogicalType::BOOLEAN, LogicalType::BIGINT,  LogicalType::BIGINT,
-	                LogicalType::BIGINT,  LogicalType::BIGINT};
+	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::VARCHAR};
 	return std::move(bind_data);
 }
 

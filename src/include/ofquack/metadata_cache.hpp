@@ -119,4 +119,8 @@ private:
 //! and users with different dictionary visibility do not share metadata.
 std::string EndpointKey(const ofquack::FusionConfig &config);
 
+//! The principal component of EndpointKey, or empty when a browser secret has
+//! no token whose subject can identify the cache owner.
+std::string CachePrincipal(const ofquack::FusionConfig &config);
+
 } // namespace duckdb
