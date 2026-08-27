@@ -235,35 +235,31 @@ void MetadataCache::EnsureSchema() {
 	if (!connection) {
 		return;
 	}
-	try {
-		CheckedQuery(*connection, CREATE_META);
-		auto version = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'schema_version'");
-		const bool matches = version && !version->HasError() && version->RowCount() == 1 &&
-		                     version->GetValue(0, 0).ToString() == SCHEMA_VERSION;
-		if (!matches) {
-			// Everything here can be refetched, so a layout change drops rather
-			// than migrates.
-			connection->BeginTransaction();
-			try {
-				CheckedQuery(*connection, "DROP TABLE IF EXISTS CACHED_TABLES");
-				CheckedQuery(*connection, "DROP TABLE IF EXISTS CACHED_COLUMNS");
-				CheckedQuery(*connection, "DROP TABLE IF EXISTS CACHED_ORDER_KEYS");
-				CheckedQuery(*connection, "DELETE FROM CACHE_META");
-				CheckedQuery(*connection,
-				             std::string("INSERT INTO CACHE_META VALUES ('schema_version', '") + SCHEMA_VERSION + "')");
-				connection->Commit();
-			} catch (const std::exception &) {
-				SafeRollback(*connection);
-				throw;
-			}
+	CheckedQuery(*connection, CREATE_META);
+	auto version = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'schema_version'");
+	const bool matches = version && !version->HasError() && version->RowCount() == 1 &&
+	                     version->GetValue(0, 0).ToString() == SCHEMA_VERSION;
+	if (!matches) {
+		// Everything here can be refetched, so a layout change drops rather
+		// than migrates.
+		connection->BeginTransaction();
+		try {
+			CheckedQuery(*connection, "DROP TABLE IF EXISTS CACHED_TABLES");
+			CheckedQuery(*connection, "DROP TABLE IF EXISTS CACHED_COLUMNS");
+			CheckedQuery(*connection, "DROP TABLE IF EXISTS CACHED_ORDER_KEYS");
+			CheckedQuery(*connection, "DELETE FROM CACHE_META");
+			CheckedQuery(*connection,
+			             std::string("INSERT INTO CACHE_META VALUES ('schema_version', '") + SCHEMA_VERSION + "')");
+			connection->Commit();
+		} catch (const std::exception &) {
+			SafeRollback(*connection);
+			throw;
 		}
-		CheckedQuery(*connection, CREATE_TABLES);
-		CheckedQuery(*connection, CREATE_COLUMNS);
-		CheckedQuery(*connection, CREATE_ORDER_KEYS);
-		CheckedQuery(*connection, "CHECKPOINT");
-	} catch (const std::exception &) {
-		throw;
 	}
+	CheckedQuery(*connection, CREATE_TABLES);
+	CheckedQuery(*connection, CREATE_COLUMNS);
+	CheckedQuery(*connection, CREATE_ORDER_KEYS);
+	CheckedQuery(*connection, "CHECKPOINT");
 }
 
 CacheMode MetadataCache::Mode() {
