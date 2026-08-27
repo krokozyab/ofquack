@@ -148,10 +148,22 @@ std::string EndpointKey(const ofquack::FusionConfig &config) {
 }
 
 MetadataCache &MetadataCache::Get() {
-	static MetadataCache cache;
+	// Deliberately never destroyed. The cache owns a DuckDB instance of its own,
+	// and a function-local static is torn down by exit() alongside DuckDB's own
+	// statics -- the block allocator's thread-local state among them. Ours ran
+	// after those, so BlockAllocator::~BlockAllocator reached into storage that
+	// was already gone and the process died on the way out: intermittently,
+	// after the results had been printed, and taking the buffered output with it
+	// whenever stdout was a pipe. Only the statically linked shell showed it; a
+	// loaded extension is finalised in a different order. This is the same
+	// reasoning that leaves curl_global_cleanup uncalled.
+	//
+	// The cost is that the cache database is not closed. DuckDB commits each
+	// write and replays its WAL on the next open, so nothing is lost by it.
+	static auto *cache = new MetadataCache();
 	static std::once_flag opened;
-	std::call_once(opened, [&]() { cache.Open(DefaultCachePath()); });
-	return cache;
+	std::call_once(opened, [&]() { cache->Open(DefaultCachePath()); });
+	return *cache;
 }
 
 void MetadataCache::ResetForTesting(const std::string &path) {
