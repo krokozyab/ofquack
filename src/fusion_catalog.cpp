@@ -132,7 +132,10 @@ struct FusionAttachedState {
 	//! is a row nothing sorts after, and the seek would skip it.
 	//!
 	//! Empty means there is no key at all, which is answered with ROWID.
-	const std::vector<string> &OrderKey(ClientContext &context, const ofquack::TableInfo &table) {
+	// Return snapshots rather than references into the maps. These lists contain
+	// only tens of values and are read from memory; that small copy prevents a
+	// later revision check from invalidating data already handed to a caller.
+	std::vector<string> OrderKey(ClientContext &context, const ofquack::TableInfo &table) {
 		const auto key = StringUtil::Upper(table.name);
 		SynchronizeColumns(table.name);
 		const auto known = order_keys.find(key);
@@ -175,7 +178,7 @@ struct FusionAttachedState {
 		return order_keys.emplace(key, std::move(as_duckdb)).first->second;
 	}
 
-	const std::vector<ofquack::ColumnInfo> &Columns(ClientContext &context, const ofquack::TableInfo &table) {
+	std::vector<ofquack::ColumnInfo> Columns(ClientContext &context, const ofquack::TableInfo &table) {
 		const auto key = StringUtil::Upper(table.name);
 		SynchronizeColumns(table.name);
 		const auto known = columns_by_table.find(key);
@@ -638,7 +641,7 @@ public:
 			// including its own system tables, so this is the normal answer.
 			return nullptr;
 		}
-		const auto &columns = state->Columns(context, *table);
+		auto columns = state->Columns(context, *table);
 		if (columns.empty()) {
 			// The name *is* in Fusion's dictionary, so reporting that it does
 			// not exist would be a lie that sends the user looking for a typo.
@@ -967,6 +970,36 @@ unique_ptr<TransactionManager> FusionCreateTransactionManager(optional_ptr<Stora
 }
 
 } // namespace
+
+bool CatalogColumnsSurviveInvalidationForTesting(ClientContext &context) {
+	auto &cache = MetadataCache::Get();
+	const std::string endpoint_key = "catalog-retained-columns-test";
+	ofquack::TableInfo table;
+	table.name = "T";
+	table.type = "TABLE";
+	table.table_id = "1";
+
+	ofquack::ColumnInfo before;
+	before.table_name = table.name;
+	before.name = "BEFORE";
+	before.type_name = "VARCHAR2";
+	cache.PutColumns(endpoint_key, table.name, {before});
+
+	FusionAttachedState state;
+	state.endpoint_key = endpoint_key;
+	auto retained = state.Columns(context, table);
+
+	cache.InvalidateColumns(endpoint_key, table.name);
+	ofquack::ColumnInfo after = before;
+	after.name = "AFTER";
+	cache.PutColumns(endpoint_key, table.name, {after});
+	auto refreshed = state.Columns(context, table);
+
+	const bool survived = retained.size() == 1 && retained[0].name == "BEFORE" && refreshed.size() == 1 &&
+	                      refreshed[0].name == "AFTER";
+	cache.InvalidateColumns(endpoint_key, table.name);
+	return survived;
+}
 
 void RegisterFusionCatalog(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());

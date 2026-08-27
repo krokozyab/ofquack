@@ -13,6 +13,7 @@
 #include "ofquack/metadata_cache.hpp"
 #include "ofquack/metadata_fetch.hpp"
 #include "ofquack/metadata_queries.hpp"
+#include "ofquack/fusion_catalog.hpp"
 #include "ofquack/token_cache.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/transport.hpp"
@@ -2083,6 +2084,16 @@ void TestAttachedEntryRejectsInvalidatedMetadata() {
 	CHECK(fresh->RowCount() == 2);
 }
 
+//! SynchronizeColumns erases the old in-memory vector when the cache revision
+//! changes. A caller that retained the previous Columns() result must still be
+//! able to read that snapshot after a repeated lookup observes the new one.
+void TestRetainedCatalogColumnsSurviveInvalidation() {
+	ResetCache();
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CHECK(duckdb::CatalogColumnsSurviveInvalidationForTesting(*connection.context));
+}
+
 void TestFilterPushdownIsOffByDefault() {
 	ResetCache();
 	Script script;
@@ -2683,6 +2694,7 @@ const TestCase TESTS[] = {
     {"table is found after the schema was listed", TestTableIsFoundAfterTheSchemaWasListed},
     {"attached scan orders by the primary key", TestAttachedScanOrdersByThePrimaryKey},
     {"attached entry rejects invalidated metadata", TestAttachedEntryRejectsInvalidatedMetadata},
+    {"retained catalog columns survive invalidation", TestRetainedCatalogColumnsSurviveInvalidation},
     {"filter pushdown is off by default", TestFilterPushdownIsOffByDefault},
     {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},
     {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},
