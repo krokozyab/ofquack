@@ -73,10 +73,10 @@ int64_t IntField(const ReportRow &row, const std::string &name, int64_t fallback
 //! to escape. "Missing SOAP Envelope" is true but useless: it describes the
 //! shape of a response without saying what the response was, and the answer is
 //! usually visible in the first line of it.
-std::vector<ReportRow> Query(FusionTransport &transport, const RequestContext &context, const std::string &sql) {
+ParsedReport QueryReport(FusionTransport &transport, const RequestContext &context, const std::string &sql) {
 	const auto response = transport.Execute(sql, context);
 	try {
-		return ParseRows(ExtractReportXML(response)).rows;
+		return ParseRows(ExtractReportXML(response));
 	} catch (const std::runtime_error &parse_error) {
 		const auto described = DescribeFailure(response);
 		if (!described.empty()) {
@@ -95,23 +95,23 @@ std::vector<ReportRow> Query(FusionTransport &transport, const RequestContext &c
 	}
 }
 
-//! Runs a statement page by page until an empty page is confirmed on a fresh
-//! BI Publisher session.
+std::vector<ReportRow> Query(FusionTransport &transport, const RequestContext &context, const std::string &sql) {
+	auto report = QueryReport(transport, context, sql);
+	return std::move(report.rows);
+}
+
+//! Runs a statement page by page. A complete short page is the end; a short
+//! page whose XML was truncated resumes from the rows that arrived whole.
 std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestContext &context,
                                   const std::string &base_sql) {
 	std::vector<ReportRow> all;
 	uint64_t offset = 0;
 	ReportRow previous_first;
 	for (;;) {
-		auto page = Query(transport, context, metadata::PaginateByOffset(base_sql, offset));
+		auto report = QueryReport(transport, context, metadata::PaginateByOffset(base_sql, offset));
+		auto &page = report.rows;
 		if (page.empty()) {
-			// A spent BI Publisher session can answer with an empty result instead
-			// of an error. Believing it here would cache a partial column list.
-			transport.ResetSession();
-			page = Query(transport, context, metadata::PaginateByOffset(base_sql, offset));
-			if (page.empty()) {
-				return all;
-			}
+			return all;
 		}
 		const auto page_size = page.size();
 		if (offset > 0 && !previous_first.empty() && page.front() == previous_first) {
@@ -123,11 +123,12 @@ std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestConte
 			// OFFSET/FETCH adds no columns of its own, so nothing to strip.
 			all.push_back(std::move(row));
 		}
-		// Stop on an empty page, not on a short one. BI Publisher truncates a
-		// response without saying so, and a truncated page looks exactly like
-		// the last one -- which silently cut the table list off partway
-		// through the alphabet. The cost of being right is one extra request
-		// at the end.
+		// ParseRows distinguishes a server cut-off from a legitimate short page.
+		// Only the former needs another request; the latter is the end and avoids
+		// both a terminal empty request and a session reset.
+		if (!report.truncated && page_size < metadata::PAGE_SIZE) {
+			return all;
+		}
 		offset += page_size;
 		// A server that keeps returning rows without advancing would loop for
 		// ever; the dictionary is large but finite.

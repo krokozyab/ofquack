@@ -884,13 +884,31 @@ void TestMetadataQueriesUseFusionDictionary() {
 	// equality comparison: underscores in it must not become LIKE wildcards.
 	const auto view_columns = ofquack::metadata::ColumnsOfViews("GL_BALANCES_V");
 	CHECK(Contains(view_columns, "FROM all_tab_columns"));
-	CHECK(Contains(view_columns, "UPPER(table_name) = 'GL_BALANCES_V'"));
+	CHECK(Contains(view_columns, "table_name = 'GL_BALANCES_V'"));
+	CHECK(!Contains(view_columns, "UPPER(table_name)"));
 	CHECK(!Contains(view_columns, "table_name LIKE"));
 	CHECK(Contains(ofquack::metadata::PrimaryKeys("T"), "constraint_type = 'P'"));
 	CHECK(Contains(ofquack::metadata::ForeignKeys("T"), "constraint_type = 'R'"));
 	// The predicate, not the CASE in the select list, which is always there.
 	CHECK(Contains(ofquack::metadata::Indexes("T", true), "AND idx.uniqueness = 'UNIQUE'"));
 	CHECK(!Contains(ofquack::metadata::Indexes("T", false), "AND idx.uniqueness = 'UNIQUE'"));
+
+	// Every object-name lookup compares the bare column against an upper-cased
+	// value. Oracle stores dictionary object names in upper case, so UPPER() on
+	// the column matches nothing extra and only costs the index -- and these run
+	// once per attached table, against dictionary views the size of ALL_INDEXES.
+	// The caller's spelling is what gets normalised.
+	CHECK(Contains(ofquack::metadata::PrimaryKeys("gl_je_lines"), "AND c.table_name = 'GL_JE_LINES'"));
+	CHECK(Contains(ofquack::metadata::ForeignKeys("gl_je_lines"), "AND c.table_name = 'GL_JE_LINES'"));
+	CHECK(Contains(ofquack::metadata::Indexes("gl_je_lines", true), "AND idx.table_name = 'GL_JE_LINES'"));
+	CHECK(!Contains(ofquack::metadata::PrimaryKeys("T"), "UPPER("));
+	CHECK(!Contains(ofquack::metadata::ForeignKeys("T"), "UPPER("));
+	CHECK(!Contains(ofquack::metadata::Indexes("T", false), "UPPER("));
+	CHECK(!Contains(ofquack::metadata::ColumnsOfViews("T"), "UPPER("));
+	// The one UPPER that stays: an aggregate over the whole union, not a
+	// predicate. The listing collapses a name that is both a table and a view,
+	// so counting rows would report every complete listing as short.
+	CHECK(Contains(ofquack::metadata::TableCount({}), "COUNT(DISTINCT UPPER(t.table_name))"));
 }
 
 //! These statements are built by concatenation, and the JDBC driver interpolates

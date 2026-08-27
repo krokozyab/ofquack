@@ -169,7 +169,9 @@ std::string ColumnsOfViews(const std::string &table_name) {
 	    << " column_id AS ORDINAL_POSITION"
 	    << " FROM all_tab_columns"
 	    << " WHERE owner = '" << SCHEMA << "'"
-	    << " AND UPPER(table_name) = '" << QuoteLiteral(Upper(table_name)) << "'"
+	    // Oracle dictionary object names are stored in upper case. Keep the
+	    // indexed column bare: this lookup is on the hot path while views warm.
+	    << " AND table_name = '" << QuoteLiteral(Upper(table_name)) << "'"
 	    << " ORDER BY owner, table_name, column_id";
 	return oss.str();
 }
@@ -187,7 +189,9 @@ std::string PrimaryKeys(const std::string &table_name) {
 	    << " AND c.owner = cc.owner AND c.table_name = cc.table_name"
 	    << " WHERE c.constraint_type = 'P'"
 	    << " AND c.owner = '" << SCHEMA << "'"
-	    << " AND UPPER(c.table_name) = '" << QuoteLiteral(Upper(table_name)) << "'"
+	    // Bare column, upper-cased value: Oracle stores dictionary object names in
+	    // upper case, and wrapping the column loses the index on it.
+	    << " AND c.table_name = '" << QuoteLiteral(Upper(table_name)) << "'"
 	    << " ORDER BY c.owner, c.table_name, cc.position";
 	return oss.str();
 }
@@ -209,7 +213,9 @@ std::string ForeignKeys(const std::string &table_name) {
 	    << " WHERE c.constraint_type = 'R'"
 	    << " AND cc.position = rc.position"
 	    << " AND c.owner = '" << SCHEMA << "'"
-	    << " AND UPPER(c.table_name) = '" << QuoteLiteral(Upper(table_name)) << "'"
+	    // Bare column, upper-cased value: Oracle stores dictionary object names in
+	    // upper case, and wrapping the column loses the index on it.
+	    << " AND c.table_name = '" << QuoteLiteral(Upper(table_name)) << "'"
 	    << " ORDER BY c.owner, c.table_name, c.constraint_name, cc.position";
 	return oss.str();
 }
@@ -227,7 +233,9 @@ std::string Indexes(const std::string &table_name, bool unique_only) {
 	    << " FROM all_indexes idx"
 	    << " JOIN all_ind_columns ic ON ic.index_owner = idx.owner AND ic.index_name = idx.index_name"
 	    << " WHERE idx.owner = '" << SCHEMA << "'"
-	    << " AND UPPER(idx.table_name) = '" << QuoteLiteral(Upper(table_name)) << "'";
+	    // Bare column, upper-cased value: Oracle stores dictionary object names in
+	    // upper case, and wrapping the column loses the index on it.
+	    << " AND idx.table_name = '" << QuoteLiteral(Upper(table_name)) << "'";
 	if (unique_only) {
 		oss << " AND idx.uniqueness = 'UNIQUE'";
 	}

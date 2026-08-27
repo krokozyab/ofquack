@@ -88,6 +88,11 @@ If the independent count cannot be obtained, the listing may serve the current
 call but is not persisted. There is no safe way to distinguish its final page
 from a silently truncated BI Publisher response.
 
+Column pages use the parser's truncation marker: a complete short page ends the
+lookup immediately, while a page cut off mid-XML resumes after the complete rows
+that arrived. An exactly full final page still needs one empty request, but that
+empty result is not retried on a new BI Publisher session.
+
 The count is `COUNT(DISTINCT UPPER(table_name))` rather than `COUNT(*)`: a name
 that exists as both a table and a view is one entry in the listing, so counting
 rows of the union would report every complete listing as short.

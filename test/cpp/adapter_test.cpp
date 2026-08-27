@@ -12,6 +12,7 @@
 
 #include "ofquack/metadata_cache.hpp"
 #include "ofquack/metadata_fetch.hpp"
+#include "ofquack/metadata_queries.hpp"
 #include "ofquack/token_cache.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/transport.hpp"
@@ -1486,6 +1487,110 @@ void TestColumnsOfTableAndView() {
 	CHECK(asked_all_tab_columns);
 }
 
+//! A complete short metadata page proves that there is no next page. It must
+//! not pay for an empty probe (and then repeat that probe after ResetSession).
+void TestMetadataShortPageEndsImmediately() {
+	struct ShortPageTransport : FusionTransport {
+		int requests = 0;
+		int resets = 0;
+
+		std::string Execute(const std::string &, const RequestContext &) override {
+			requests++;
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;"
+			    "&lt;COLUMN_NAME&gt;C1&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;"
+			    "&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+
+		void ResetSession() override {
+			resets++;
+		}
+	};
+	ShortPageTransport transport;
+	ofquack::TableInfo table;
+	table.name = "T";
+	table.type = "TABLE";
+	table.table_id = "1";
+
+	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
+	CHECK(columns.size() == 1);
+	CHECK(transport.requests == 1);
+	CHECK(transport.resets == 0);
+}
+
+//! If the last complete page happens to be exactly full, one empty request is
+//! unavoidable. It is already a valid end marker and must not be sent again on
+//! a fresh session.
+void TestMetadataTerminalEmptyPageIsNotRetried() {
+	struct FullPageTransport : FusionTransport {
+		int requests = 0;
+		int resets = 0;
+
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			requests++;
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			std::string rows = "&lt;ROWSET&gt;";
+			for (size_t i = 0; i < ofquack::metadata::PAGE_SIZE; i++) {
+				rows += "&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;C" +
+				        std::to_string(i) +
+				        "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;&lt;ORDINAL_POSITION&gt;" +
+				        std::to_string(i + 1) + "&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;";
+			}
+			return MakeSoapResponse(MakeReportXML(rows + "&lt;/ROWSET&gt;"));
+		}
+
+		void ResetSession() override {
+			resets++;
+		}
+	};
+	FullPageTransport transport;
+	ofquack::TableInfo table;
+	table.name = "T";
+	table.type = "TABLE";
+	table.table_id = "1";
+
+	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
+	CHECK(columns.size() == ofquack::metadata::PAGE_SIZE);
+	CHECK(transport.requests == 2);
+	CHECK(transport.resets == 0);
+}
+
+//! A short page is not the end when ParseRows saw that BI Publisher cut the
+//! XML. Continue from the one complete row that did arrive.
+void TestMetadataTruncatedShortPageContinues() {
+	struct TruncatedPageTransport : FusionTransport {
+		int requests = 0;
+
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			requests++;
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;"
+				    "&lt;COLUMN_NAME&gt;C2&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;"
+				    "&lt;ORDINAL_POSITION&gt;2&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;"
+			    "&lt;COLUMN_NAME&gt;C1&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;"
+			    "&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;"
+			    "&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;cut"));
+		}
+	};
+	TruncatedPageTransport transport;
+	ofquack::TableInfo table;
+	table.name = "T";
+	table.type = "TABLE";
+	table.table_id = "1";
+
+	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
+	CHECK(columns.size() == 2);
+	CHECK(columns[0].name == "C1");
+	CHECK(columns[1].name == "C2");
+	CHECK(transport.requests == 2);
+}
+
 //! Fusion declares its amount columns as a bare NUMBER, with neither precision
 //! nor scale. DECIMAL needs a scale and the only one on offer was zero, so
 //! GL_JE_LINES.ENTERED_DR -- and every amount beside it -- was read as a whole
@@ -2512,6 +2617,9 @@ const TestCase TESTS[] = {
     {"invalidate forces a refetch", TestInvalidateForcesARefetch},
     {"invalidate removes expected count and order keys", TestInvalidateRemovesExpectedCountAndOrderKeys},
     {"columns of table and view", TestColumnsOfTableAndView},
+    {"metadata short page ends immediately", TestMetadataShortPageEndsImmediately},
+    {"metadata terminal empty page is not retried", TestMetadataTerminalEmptyPageIsNotRetried},
+    {"metadata truncated short page continues", TestMetadataTruncatedShortPageContinues},
     {"unconstrained number is double", TestUnconstrainedNumberIsDouble},
     {"unknown table is reported", TestUnknownTableIsReported},
     {"cache status reports mode", TestCacheStatusReportsMode},
