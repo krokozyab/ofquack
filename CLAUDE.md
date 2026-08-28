@@ -148,8 +148,8 @@ SELECT * FROM oracle_fusion_query('SELECT … FROM …', secret := 'fusion', fet
 Secret lookup order: `secret :=` by name → `endpoint :=` by scope → the sole `oracle_fusion`
 secret. Several secrets and no name is an error, not a guess.
 
-`oracle_fusion_wsdl_query` still exists as a stub whose bind throws a migration message. Remove
-it a release after `0.1.0`.
+`oracle_fusion_wsdl_query` still exists as a stub whose bind throws a migration message. It was
+kept through `0.2.0` and is now due for removal.
 
 ## Resilience
 
