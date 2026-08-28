@@ -496,9 +496,16 @@ that you can turn the setting off rather than receive wrong rows.
 ## Secured HR views
 
 With `secured_views := true`, eleven HR tables are rewritten to the
-`*_SECURED_LIST_V` views that apply the data security your user is subject to —
-`PER_ALL_PEOPLE_F` becomes `PER_PERSON_SECURED_LIST_V`, and so on. Off by
-default, because the unsecured tables are what most reporting uses.
+`*_SECURED_LIST_V` views, which are the ones that apply the data security your
+user is subject to — `PER_ALL_PEOPLE_F` becomes `PER_PERSON_SECURED_LIST_V`, and
+so on. Off by default, because the unsecured tables are what most reporting uses.
+
+The substitution happens on this machine, before the statement is sent, and only
+for `oracle_fusion_query()`: a table read through an attached catalog is never
+rewritten. So it makes the secured views convenient to reach; it does not stop
+anyone reaching the base tables. What limits that is who holds the role granting
+the report — see
+[the security notes](CAPABILITIES.md#row-level-security-is-not-inherited).
 
 ---
 

@@ -75,6 +75,37 @@ Equality on text *is* pushed: it does not depend on collation.
 
 ## Security notes
 
+### Row-level security is not inherited
+
+Every request runs as the signed-in user, and Fusion checks that this user may
+run the report. Neither check restricts *which rows* the report returns.
+
+- **Authentication is not data security.** Oracle is explicit that physical SQL
+  against base tables does not necessarily honour Fusion's data-security
+  profiles; for HCM the supported path is the `*_SECURED_LIST_V` views. See
+  [BI Publisher Secured List Views][secured-list-views]. Signing in as a user
+  with a narrow Fusion role does not narrow what this extension can read.
+- **`RP_ARB.xdo` is a privileged channel, not a reporting one.** It accepts an
+  arbitrary `SELECT` and returns what it produces. Whoever can run it can read
+  whatever its execution context can reach, and nothing on this side changes
+  that.
+- **Grant the report through a purpose-made custom role**, held only by the
+  people meant to have that reach, rather than adding it to a broad seeded role.
+  That grant is the real control, because it is enforced on Fusion's side where
+  a client cannot weaken it. Treat access to this report the way you would treat
+  a database account, not a report subscription.
+- **`secured_views := true` is a convenience, not a boundary.** It is a textual
+  rewrite done on this machine before the statement is sent, so anyone who can
+  run a query can simply leave it off. It covers eleven HR tables
+  (`src/secured_views.cpp`), it is **off by default**, and it applies only to
+  statements sent through `oracle_fusion_query()`. A table read through an
+  attached catalog — `SELECT … FROM f.main.PER_ALL_PEOPLE_F` — is never
+  rewritten, whatever the setting says.
+
+[secured-list-views]: https://docs.oracle.com/en/cloud/saas/human-resources/ochus/business-intelligence-publisher-secured-list-views.html
+
+### Credentials on this machine
+
 - `CREATE PERSISTENT SECRET` writes `~/.duckdb/stored_secrets` **unencrypted**.
   Redaction hides a password from `duckdb_secrets()`, not from the disk. A
   temporary secret (the default) is not written at all.
@@ -82,9 +113,6 @@ Equality on text *is* pushed: it does not depend on collation.
   `~/.fusion_scanner/chrome-profile` does persist, and holds the session cookie.
 - JWT signatures are not verified. Fusion authenticates a token when it is
   used; the extension only reads the expiry to know when to ask for another.
-- `secured_views := true` rewrites eleven HR tables to their
-  `*_SECURED_LIST_V` views. It is **off by default**, so querying those base
-  tables directly can return rows the caller is not entitled to see.
 
 ---
 

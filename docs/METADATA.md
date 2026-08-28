@@ -165,8 +165,11 @@ columns and turn a tree refresh into hours of SOAP calls. Use
 ## Secured HR views
 
 `secured_views := true` rewrites eleven HR base tables to their
-`*_SECURED_LIST_V` counterparts so Fusion's row-level security applies. It is
-off by default.
+`*_SECURED_LIST_V` counterparts, which do apply Fusion's row-level security. It
+is off by default, it only rewrites statements passed to `oracle_fusion_query()`,
+and it is a client-side text substitution rather than a control — see
+[the security notes](CAPABILITIES.md#row-level-security-is-not-inherited) for
+what that does and does not buy you.
 
 The JDBC driver lists twelve pairs, but `HR_ALL_ORGANIZATION_UNITS_F` appears
 twice and its map keeps the last, so `PER_DEPARTMENT_SECURED_LIST_V` has never

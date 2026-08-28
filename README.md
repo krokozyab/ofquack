@@ -42,8 +42,12 @@ single file; download it, run it, and you have a SQL prompt.
 **What this means in practice:**
 
 - Everything runs on your laptop. Fusion sees ordinary BI Publisher web service
-  calls made as *you*, subject to the same privileges and data security as when
-  you sign in through the browser.
+  calls made as *you*: the report runs under your credentials, and Fusion checks
+  that you are allowed to run it. That is authentication and function security.
+  It is **not** the row-level data security you get on a Fusion page — a report
+  that runs arbitrary SQL against base tables does not inherit it. Read
+  [the security notes](docs/CAPABILITIES.md#security-notes) before pointing this
+  at a production instance.
 - No third party is involved. Nothing is relayed through anyone's cloud.
 - The result lands locally, so you can join Fusion data to a spreadsheet, write
   it to Parquet, or feed it to whatever comes next.
@@ -106,7 +110,7 @@ LOAD fusion_scanner;
 script, or in your DuckDB startup file.
 
 > **Going to use `ATTACH` and browse tables in a client?** Do
-> [the one-time warm-up](#first-run-warm-the-dictionary) first, or the schema
+> [the one-time name indexing](#first-run-index-the-dictionary-names) first, or the schema
 > will look empty and you will think it is broken.
 
 ---
