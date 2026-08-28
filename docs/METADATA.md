@@ -45,14 +45,12 @@ sort after the last name of the previous page:
 ```sql
 ... WHERE (t.table_name > '<last>'
            OR (t.table_name = '<last>' AND t.table_type > '<last type>'))
-    ORDER BY t.table_name, t.table_type FETCH FIRST 400 ROWS ONLY
+    ORDER BY t.table_name, t.table_type FETCH FIRST 2000 ROWS ONLY
 ```
 
-`OFFSET 20000 ROWS` makes the server sort and discard twenty thousand rows to
-return four hundred, and the cost grows with every page — deep in the alphabet
-the report gives up and answers with nothing, which is indistinguishable from
-the end of the data. Seeking from the last name keeps every page the same
-price, so page five hundred costs what page one did.
+`OFFSET 20000 ROWS` makes the server sort and discard twenty thousand rows
+before returning a page, and that cost grows with every page. Seeking from the
+last name keeps every page the same price however deep the listing runs.
 
 A page the report cut short — it has a limit on how much one response carries
 and says nothing when it is reached — yields the rows that arrived whole, and
@@ -68,12 +66,14 @@ that would be ten times the round trips — and not a hundred: the report
 truncates a response past roughly 500 rows, and ten tables of thirty columns
 stays under that.
 
-Page size is 400 rows and can be lowered when an instance is stingier than that.
-The setting applies to every cold path: direct listing, column lookup, cache
-warming, and an attached catalog's first named-table lookup.
+Table-list pages default to 2,000 rows and can be lowered when an instance is
+stingier than that. The setting applies wherever the name index is first loaded:
+direct listing, cache prefetch, and an attached catalog's first named lookup.
+Column metadata has an independent 400-row page size because its rows are wider;
+changing the table-list setting cannot make that path less reliable.
 
 ```sql
-SET fusion_scanner_metadata_page_size = 200;
+SET fusion_scanner_metadata_page_size = 1000;
 ```
 
 A listing that ends short is never cached. Before listing anything, the fetcher
@@ -138,8 +138,8 @@ listing costs no requests.
 |---|---|
 | `ATTACH` | 0 |
 | `SHOW TABLES` (cold) | 0 — and lists nothing |
-| `SHOW TABLES` (after warming) | 0 |
-| `SELECT … FROM f.main.T`, cold cache | **the whole table listing** — dozens of requests, minutes — plus 1 for that table's columns |
+| `SHOW TABLES` (after a patterned schema prefetch) | 0 |
+| `SELECT … FROM f.main.T`, cold cache | the name index, then 1 request for that table's columns |
 | the same, table list already cached | 1, for that table's columns |
 | the same query again | 0 |
 
@@ -148,13 +148,19 @@ dictionary takes long enough that blocking a tab-completion on it would be
 worse than showing nothing, so `GetDefaultEntries()` answers from the cache and
 never from the network.
 
-The consequence is worth stating plainly, because it is what a first-time user
-meets: on a machine that has never connected to the instance, an attached
-schema appears empty, and the first query that names a table pays for the
-entire dictionary listing inside that query. Both are avoided by warming
-deliberately — `oracle_fusion_tables()` for the names, then
-`fusion_scanner_cache_warm()` for the columns, since a table is listed only once its
-columns are known.
+The name index and the generic tree are deliberately separate. Run
+`oracle_fusion_tables()` once to index every name; after that every named lookup
+can fetch just its own columns. The generic tree contains the tables already
+queried plus modules explicitly prefetched with a required pattern, for example:
+
+```sql
+SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
+```
+
+A complete generic tree is not supported. DuckDB v1.5.5 materialises each table
+entry while enumerating it, so advertising all names would also fetch all
+columns and turn a tree refresh into hours of SOAP calls. Use
+`oracle_fusion_tables()` as the complete browsing surface.
 
 ## Secured HR views
 

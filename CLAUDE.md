@@ -281,13 +281,14 @@ must not be "tidied":
 
 **The table listing seeks, it does not skip.** Each page asks for the names sorting after the
 last name of the previous one. `OFFSET 20000 ROWS` makes the server sort and discard twenty
-thousand rows to return four hundred, and the price climbs with every page until the report gives
-up and answers with nothing — which reads as the end of the dictionary. A `ROWNUM` wrapper is
-worse still: it makes the inner query produce `offset+n` rows and discard the first `offset`, so
-once that inner count passes the report's own row limit the server truncates it, the outer filter
-finds nothing, and the listing appears to end. That stopped a 27,000-table dictionary at 4,000.
+thousand rows before returning a page, whereas seeking keeps the cost independent of depth.
+An earlier, uninstrumented run using a `ROWNUM` wrapper appeared to stop near 4,000 objects; its
+instance, report version and response size were not recorded, so that is not evidence of a fixed
+row limit. A live check on 2026-08-28 with the same projection returned ROWNUM pages at offsets
+0, 4,000 and 26,000, and the complete seek listing returned 28,978 objects in 16 seconds. Seek
+stays because its cost is flat, and the independent count below is the correctness guard.
 Columns still page by `OFFSET`, which is safe because they are asked ten tables at a time and
-never run deep; the report truncates a response past roughly 500 rows.
+never run deep; their wider rows keep a separate conservative page size of 400.
 
 **`FetchTables` asks the instance for its own `COUNT(DISTINCT UPPER(table_name))` first and
 throws if the listing falls short of it.** Inside the fetcher rather than at one call site,
@@ -296,7 +297,7 @@ then misses; the catalog and the cache warmer need that guard as much as `oracle
 does. The count must stay `DISTINCT`: the listing collapses a name that exists as both a table
 and a view, so counting rows of the union would report every complete listing as short. An empty
 page is retried once on a fresh session, since an exhausted BI Publisher session also returns
-nothing. `fusion_scanner_metadata_page_size` (default 400) is the lever when it still stops short.
+nothing. `fusion_scanner_metadata_page_size` (default 2,000) is the lever when it still stops short.
 
 Unlike the JDBC driver, names are escaped before interpolation (`QuoteLiteral`) and non-numeric
 `TABLE_ID`s are dropped rather than concatenated.
@@ -316,7 +317,8 @@ SELECT NAME FROM f.main.GL_JE_HEADERS WHERE ...;
   no schema listing.
 - `GetDefaultEntries()` (the expensive one) answers only from cache and never goes to the
   network, so `SHOW TABLES` on a cold catalog lists nothing rather than blocking for minutes.
-  Warm it with `oracle_fusion_tables()`.
+  `oracle_fusion_tables()` indexes the names; the generic tree lists only tables whose columns
+  were fetched by a named lookup or an explicit patterned `fusion_scanner_cache_warm()`.
 - Column types come from the dictionary here, not from inference.
 
 Things that will bite if changed:

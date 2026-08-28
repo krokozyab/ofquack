@@ -106,14 +106,15 @@ std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestConte
                                   const std::string &base_sql) {
 	std::vector<ReportRow> all;
 	uint64_t offset = 0;
+	constexpr auto page_size = metadata::COLUMN_PAGE_SIZE;
 	ReportRow previous_first;
 	for (;;) {
-		auto report = QueryReport(transport, context, metadata::PaginateByOffset(base_sql, offset));
+		auto report = QueryReport(transport, context, metadata::PaginateByOffset(base_sql, offset, page_size));
 		auto &page = report.rows;
 		if (page.empty()) {
 			return all;
 		}
-		const auto page_size = page.size();
+		const auto rows_received = page.size();
 		if (offset > 0 && !previous_first.empty() && page.front() == previous_first) {
 			throw PermanentError("Oracle Fusion returned the same metadata page for OFFSET " + std::to_string(offset) +
 			                     "; refusing to cache a result that is not advancing");
@@ -126,10 +127,10 @@ std::vector<ReportRow> QueryPaged(FusionTransport &transport, const RequestConte
 		// ParseRows distinguishes a server cut-off from a legitimate short page.
 		// Only the former needs another request; the latter is the end and avoids
 		// both a terminal empty request and a session reset.
-		if (!report.truncated && page_size < metadata::PAGE_SIZE) {
+		if (!report.truncated && rows_received < page_size) {
 			return all;
 		}
-		offset += page_size;
+		offset += rows_received;
 		// A server that keeps returning rows without advancing would loop for
 		// ever; the dictionary is large but finite.
 		if (all.size() > MAX_METADATA_ROWS) {
@@ -158,7 +159,7 @@ int TypePriority(const std::string &type) {
 
 std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
                                    const std::vector<std::string> &types, uint64_t page_size, int64_t *expected_out) {
-	const auto rows_per_page = page_size > 0 ? page_size : metadata::PAGE_SIZE;
+	const auto rows_per_page = page_size > 0 ? page_size : metadata::TABLE_LIST_PAGE_SIZE;
 	// Asked before the listing rather than after, so that a listing which comes
 	// back short is recognised as short by whoever asked for it -- the catalog
 	// and the cache warmer just as much as oracle_fusion_tables().

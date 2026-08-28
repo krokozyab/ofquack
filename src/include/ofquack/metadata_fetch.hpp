@@ -26,7 +26,8 @@ struct ColumnInfo {
 	std::string remarks;
 };
 
-//! Lists tables and views. Cost: one request per PAGE_SIZE rows, plus one.
+//! Lists tables and views. Cost: one request per TABLE_LIST_PAGE_SIZE rows, plus
+//! the independent count and the confirmed terminal page.
 //!
 //! The extra request is the instance's own count, asked first and compared
 //! against what the listing produced. A listing that comes back short throws

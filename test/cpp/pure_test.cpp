@@ -934,17 +934,14 @@ void TestOffsetPagination() {
 }
 
 //! The table listing seeks from the last name instead, because OFFSET paging
-//! gets more expensive with depth and eventually exceeds what the report will
-//! do -- returning nothing, which reads as the end of the dictionary. On a real
-//! instance that happened at 4,000 rows one run and 5,600 the next, out of
-//! 28,978: a moving boundary, which is what marks a cost limit rather than a
-//! row limit.
+//! gets more expensive with depth and is correspondingly more exposed to report
+//! timeouts and resource limits. Seeking keeps every page's cost flat.
 void TestTableListingSeeksRatherThanOffsets() {
 	using ofquack::metadata::TablesAfter;
 
-	const auto first = TablesAfter({"TABLE", "VIEW"}, "", "", 400);
+	const auto first = TablesAfter({"TABLE", "VIEW"}, "", "", ofquack::metadata::TABLE_LIST_PAGE_SIZE);
 	CHECK(!Contains(first, "OFFSET"));
-	CHECK(Contains(first, "FETCH FIRST 400 ROWS ONLY"));
+	CHECK(Contains(first, "FETCH FIRST 2000 ROWS ONLY"));
 	CHECK(Contains(first, "ORDER BY t.table_name, t.table_type"));
 
 	// The seek compares the ordering pair, since Oracle has no row-value

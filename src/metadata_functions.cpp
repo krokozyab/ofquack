@@ -330,11 +330,13 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 	RequireUsableCredentials(config);
 	const auto endpoint_key = EndpointKey(config);
 
-	std::string pattern = "%";
 	const auto pattern_parameter = input.named_parameters.find("pattern");
-	if (pattern_parameter != input.named_parameters.end() && !pattern_parameter->second.IsNull()) {
-		pattern = pattern_parameter->second.ToString();
+	if (pattern_parameter == input.named_parameters.end() || pattern_parameter->second.IsNull() ||
+	    pattern_parameter->second.ToString().empty()) {
+		throw BinderException("pattern is required; name the table family to prefetch, for example pattern := 'AP\\_%%'. "
+		                      "Use pattern := '%%' explicitly only when a broad warm is intentional");
 	}
+	const auto pattern = pattern_parameter->second.ToString();
 	// Bounded by default: Fusion's dictionary runs to tens of thousands of
 	// tables, and warming all of them is hours of SOAP calls.
 	int64_t limit = 200;
@@ -648,7 +650,7 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	    .AddExtensionOption("fusion_scanner_metadata_page_size",
 	                        "Rows per page when listing Oracle Fusion's dictionary. Lower it if a listing "
 	                        "keeps stopping short of the instance's own table count.",
-	                        LogicalType::UBIGINT, Value::UBIGINT(ofquack::metadata::PAGE_SIZE));
+	                        LogicalType::UBIGINT, Value::UBIGINT(ofquack::metadata::TABLE_LIST_PAGE_SIZE));
 
 	TableFunction tables("oracle_fusion_tables", {}, ScanMaterialised, TablesBind, InitMaterialised);
 	AddFusionNamedParameters(tables);

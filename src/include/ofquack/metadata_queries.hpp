@@ -23,14 +23,17 @@ namespace ofquack {
 //!    other turns NUMBER(10,0) into DECIMAL(0,10).
 namespace metadata {
 
-//! Rows are limited by an outer ROWNUM wrapper rather than OFFSET/FETCH: these
-//! statements are built by concatenation and may already end in ORDER BY.
-//!
-//! Kept below the point where BI Publisher truncates a response. It silently
-//! returns fewer rows than asked for rather than reporting anything, so a page
-//! size above that limit does not fail -- it quietly loses the rest of the
-//! dictionary. The same limit is why columns are fetched ten tables at a time.
-constexpr uint64_t PAGE_SIZE = 400;
+//! Table rows are narrow enough that the JDBC driver's proven page size is a
+//! better default than the conservative value used for column metadata. The
+//! setting fusion_scanner_metadata_page_size can still lower it for a Fusion
+//! instance whose report or proxy accepts smaller responses.
+constexpr uint64_t TABLE_LIST_PAGE_SIZE = 2000;
+
+//! Column rows carry types and descriptions and have been observed to hit the
+//! report's response limit around five hundred rows. Keep their paging limit
+//! independent from the table-list setting so making name discovery faster
+//! cannot silently make the wider query less reliable.
+constexpr uint64_t COLUMN_PAGE_SIZE = 400;
 
 //! Columns are fetched for several tables at once, but not too many: the report
 //! truncates a response beyond roughly 500 rows, and ten tables of thirty
@@ -42,17 +45,10 @@ constexpr const char *SCHEMA = "FUSION";
 
 //! Limits a statement to rows (offset, offset + page_size].
 //!
-//! Uses Oracle's row-limiting clause rather than a ROWNUM wrapper. The wrapper
-//! form -- SELECT * FROM (SELECT ROWNUM rn, … WHERE ROWNUM <= offset+n) WHERE
-//! rn > offset -- makes the *inner* query produce offset+n rows and throws away
-//! the first offset of them. Once that inner count passes the report's own row
-//! limit the server truncates it, the outer filter finds nothing, and the
-//! listing appears to have ended: on a real instance that stopped a
-//! 27,000-table dictionary at 4,000.
-//!
-//! OFFSET/FETCH pushes the skipping into the server, so each page costs one
-//! page of rows however deep it is.
-std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint64_t page_size = PAGE_SIZE);
+//! Uses Oracle's row-limiting clause rather than adding another SELECT/ROWNUM
+//! wrapper around statements that already end in ORDER BY. This remains offset
+//! paging because column batches are deliberately small and never run deep.
+std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint64_t page_size);
 
 //! One page of tables and views, ordered by name, starting after the given
 //! one. Pass empty strings for the first page.
@@ -60,11 +56,8 @@ std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint6
 //! This is keyset paging, not OFFSET paging, and the difference is not an
 //! optimisation. `OFFSET 5600` makes the server sort the whole union of
 //! FND_VIEWS and FND_TABLES and then discard the first 5,600 rows, so each
-//! page costs more than the last; past some depth the statement exceeds what
-//! the report will do and comes back empty, which reads as the end of the
-//! dictionary. The depth at which that happened moved between runs -- 4,000
-//! one time, 5,600 another -- which is what gave it away as a cost limit
-//! rather than a row limit.
+//! page costs more than the last and is correspondingly more exposed to report
+//! timeouts and resource limits. Seeking keeps that cost independent of depth.
 //!
 //! Seeking from the last name seen costs the same at any depth.
 std::string TablesAfter(const std::vector<std::string> &types, const std::string &after_name,

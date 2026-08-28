@@ -296,41 +296,34 @@ precision or scale is unaffected and stays exact.
 an explanation, rather than quietly making a local table inside the catalog
 that would shadow the real one.
 
-#### Warm the dictionary before you attach
+#### Index names; prefetch tree schemas only when useful
 
 **On a machine that has never connected to this instance, an attached schema
-looks empty.** `SHOW TABLES` returns nothing, the DBeaver tree has no children,
-autocomplete offers nothing. That is not a failure — the catalog answers a
-listing only from what it has cached, and never goes to the network for it,
-because listing tens of thousands of objects with their columns would be hours
-of SOAP calls.
-
-Two separate things have to be cached, and warming only the first is the usual
-mistake:
+looks empty.** `SHOW TABLES` never goes to the network, because DuckDB would
+materialise the columns of every name it enumerated. Build the complete name
+index once; that is sufficient for every query by name:
 
 ```sql
--- 1. The table names. Minutes, dozens of requests, once per machine.
+-- Complete browsing surface and the index used by named lookups.
 SELECT count(*) FROM oracle_fusion_tables();
 
--- 2. The columns. A table is listed only once its columns are known, so
---    without this the tree is still empty after step 1 succeeded.
+-- Optional: make one module visible in a generic tree.
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
 ```
 
-Both are cached on disk for a week, so a new session — or a new process using
-the same Fusion principal — pays nothing.
+Both kinds of metadata are cached on disk for a week, so a new session — or a
+new process using the same Fusion principal — can reuse whatever was fetched.
 
 What works cold, and what does not:
 
-| | Cold | Warmed |
-|---|---|---|
-| `ATTACH` | instant, 0 requests | instant |
-| `SHOW TABLES`, tree, autocomplete | empty | lists what is warmed |
-| `SELECT … FROM f.T` by name | works; the first one pays the full dictionary listing | seconds |
+| | Cold | Names indexed | Schemas prefetched |
+|---|---|---|---|
+| `ATTACH` | instant | instant | instant |
+| `SHOW TABLES`, tree, autocomplete | empty | still lists only described tables | lists the selected modules |
+| `SELECT … FROM f.T` by name | builds the index, then fetches one schema | fetches one schema | uses cached schema |
 
-A table you name directly always works, listed or not. If the first query on a
-cold machine seems to hang for minutes, that is step 1 happening inside your
-`SELECT`.
+A table you name directly always works, listed or not. Full generic-tree
+enumeration is unsupported; use `oracle_fusion_tables()` to browse all names.
 
 #### When to use `ATTACH` and when to use `oracle_fusion_query`
 
@@ -367,10 +360,11 @@ SELECT * FROM oracle_fusion_tables() WHERE table_name LIKE 'AP\_INVOICE%';
 **Named parameters:** connection parameters, plus `refresh := true` to ignore
 the cache, `cache_ttl_seconds`, and `page_size`.
 
-The first call is expensive — tens of thousands of rows, dozens of requests,
-minutes. Every call after it is instant, including from a new process. The
-extension asks the instance how many objects it holds and refuses a listing
-that comes back short, so a partial dictionary never reaches the cache.
+The first call fetches tens of thousands of names in 2,000-row pages. A measured
+28,978-object instance completed in 16 seconds; instance and report limits can
+vary. Every call after it is instant, including from a new process. The extension
+asks the instance how many objects it holds and refuses a listing that comes
+back short, so a partial dictionary never reaches the cache.
 
 ### `oracle_fusion_columns(table_name)`
 
@@ -388,8 +382,8 @@ Tables are read from `FND_COLUMNS` by their `TABLE_ID`; views are not in
 
 ### `fusion_scanner_cache_warm()`
 
-Fetches columns for many tables in advance, so that autocomplete and
-`SHOW TABLES` have something to work with and later queries do not stop to ask.
+Optionally fetches columns for a named table family so autocomplete and
+`SHOW TABLES` can list that subset. It is not required for queries by name.
 
 ```sql
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%', max_tables := 500);
@@ -398,9 +392,13 @@ SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%', max_tables := 500);
 **Returns** `tables_warmed`, `columns_cached`, `tables_without_columns`,
 `already_cached`, and the nullable `first_error` for an object-specific failure.
 
-**Named parameters:** `pattern` (SQL `LIKE`, with `\` as the escape character),
+**Named parameters:** required `pattern` (SQL `LIKE`, with `\` as the escape character),
 `max_tables` (default 200, zero for no limit), `cache_ttl_seconds`, and
-`page_size`. A negative limit is rejected.
+`page_size` — which sizes the *table listing* this warm may have to fetch first,
+not the column pages. Column metadata keeps its own 400-row pages and does not
+follow this parameter. A missing or empty pattern and a negative limit are
+rejected. A deliberate full prefetch must say `pattern := '%'` and
+`max_tables := 0`.
 
 Bounded by default on purpose: warming every table in the dictionary is hours of calls.
 Columns are fetched and committed ten tables per batch. An empty column result
@@ -479,7 +477,7 @@ Set with `SET`, read with `current_setting()`. They apply to the session.
 |---|---|---|
 | `fusion_scanner_stable_paging` | `true` | Gives a paged statement an order, so its pages partition the result instead of sampling it. Turning it off is faster and lets pages repeat and skip rows. |
 | `fusion_scanner_filter_pushdown` | `false` | Sends `WHERE` predicates on attached tables to Fusion. Off because DuckDB removes a pushed filter from its own plan, so anything not translatable exactly must fail rather than be approximated. |
-| `fusion_scanner_metadata_page_size` | `400` | Rows per page when listing the dictionary. Lower it if a listing keeps stopping short. |
+| `fusion_scanner_metadata_page_size` | `2000` | Rows per page when building the table-name index. Column metadata keeps its separate 400-row page size. |
 
 ```sql
 SET fusion_scanner_filter_pushdown = true;

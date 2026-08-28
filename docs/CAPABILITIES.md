@@ -26,13 +26,12 @@ Consequences worth planning around:
   accumulates them, so requests are serialised deliberately. A join across two
   Fusion tables runs them one after the other.
 - **Reading the dictionary is a query too**, which is why metadata is cached on
-  disk for a week and why `SHOW TABLES` on a freshly attached catalog is empty
-  until something warms it. On a machine that has never connected to the
-  instance this is the first thing you meet: attach, and the schema looks
-  empty. Warm it deliberately — `oracle_fusion_tables()` for the names, then
-  `fusion_scanner_cache_warm()` for the columns, because a table is listed only once
-  its columns are known. See
-  [the README](../README.md#first-run-warm-the-dictionary).
+  disk for a week. `oracle_fusion_tables()` builds the complete name index and
+  is enough for queries by name. DuckDB's generic tree can list only tables
+  whose columns are already cached, so it grows as tables are queried or through
+  an explicit module prefetch such as `fusion_scanner_cache_warm(pattern :=
+  'AP\_%')`. See
+  [the README](../README.md#first-run-index-the-dictionary-names).
 
 ## Result shape
 

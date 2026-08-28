@@ -199,45 +199,43 @@ WHERE vendor_id = 12345;
 Column types come from Fusion's own dictionary, so `NUMBER(10,2)` arrives as
 `DECIMAL` and `DATE` as `DATE`.
 
-### First run: warm the dictionary
+### First run: index the dictionary names
 
 > ⚠️ **Attach without warming and the schema looks empty.** Expand it in
 > DBeaver and there are no tables. Nothing is broken — the catalog shows only
 > what it already knows, and on a fresh install it knows nothing.
 
-Run this once, before you attach anything. It takes **minutes**, it makes tens
-of requests, and you never do it again on this machine:
+Run the name listing once. On the measured 28,978-object instance it took 16
+seconds with the default 2,000-row pages; the result stays on disk for a week:
 
 ```sql
 LOAD fusion_scanner;
 
--- 1. The names. Tens of thousands of them, cached on disk for a week.
+-- The name index. This is enough for every query that names a table.
 SELECT count(*) FROM oracle_fusion_tables();
 
--- 2. The columns, for the tables you actually care about.
---    Without this step the tree stays empty even though step 1 succeeded.
+-- Optional: prefetch schemas for the families you want in a generic tree.
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%',  max_tables := 500);
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%',  max_tables := 500);
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'XLA\_%', max_tables := 500);
 ```
 
-Then attach, and the tables are there — instantly, in this session and every
-session after it.
+Then attach. A table named in SQL works whether or not its columns were
+prefetched; the prefetch controls only what generic catalog browsers can list.
 
 Two things are worth separating, because they fail differently:
 
-| | Cold | After warming |
-|---|---|---|
-| `ATTACH` | instant, no requests | instant |
-| `SHOW TABLES`, the DBeaver tree, autocomplete | **empty** — never asks Fusion | lists the warmed tables |
-| `SELECT … FROM f.AP_INVOICES_ALL` | works, but the **first one pays for the whole dictionary listing** — minutes | seconds |
+| | Cold | Names indexed | Pattern prefetched |
+|---|---|---|---|
+| `ATTACH` | instant | instant | instant |
+| `SHOW TABLES`, DBeaver tree | empty | still empty | lists prefetched and previously queried tables |
+| `SELECT … FROM f.AP_INVOICES_ALL` | indexes names, then fetches this schema | fetches this schema | immediate metadata lookup |
 
-So a table you name directly always works, listed or not. It is the *browsing*
-that needs warming — and the first query on a cold machine that is unexpectedly
-slow, because it is doing step 1 for you in the middle of your `SELECT`.
-
-Warming both steps deliberately, up front, is the difference between "this is
-broken" and "this is a database".
+So a table you name directly always works, listed or not. Full generic-tree
+enumeration is not supported: DuckDB materialises a table's columns while
+enumerating it, which would turn one refresh into tens of thousands of report
+calls. Use `oracle_fusion_tables()` as the complete browsing surface and prefetch
+only the modules you want as tree nodes.
 
 **Why it is not automatic:** a Fusion instance holds tens of thousands of
 objects, and fetching every table's columns is hours of SOAP calls. Which
@@ -265,7 +263,7 @@ fact explains most of the design:
   otherwise leave hundreds of sessions behind;
 - results are **paged**, and a page is a request;
 - dictionary answers are **cached on disk** for a week, because asking again
-  costs minutes;
+  repeats seconds-long SOAP calls;
 - transient failures are **retried** with backoff, and an instance that keeps
   failing trips a breaker instead of being hammered.
 
@@ -298,17 +296,17 @@ More detail: [capabilities and limits](docs/CAPABILITIES.md).
 
 ## Troubleshooting
 
-**The attached schema is empty — no tables in the tree** — the dictionary has
-not been warmed on this machine. See
-[warm the dictionary first](#first-run-warm-the-dictionary). Note
-that `oracle_fusion_tables()` alone is not enough: a table appears in the
-listing only once its *columns* are cached, which is what `fusion_scanner_cache_warm()`
-does. `SELECT * FROM fusion_scanner_cache_status()` shows where you are.
+**The attached schema is empty — no tables in the tree** — the generic tree
+contains only tables whose schemas are already cached. See
+[index the dictionary names](#first-run-index-the-dictionary-names), then query a
+table by name or prefetch a module with `fusion_scanner_cache_warm(pattern :=
+'AP\_%')`. `oracle_fusion_tables()` is the complete name listing, and
+`fusion_scanner_cache_status()` shows how much is cached.
 
-**The first query on a new machine takes minutes** — the same cause. Naming a
-table on a cold cache pays for the whole dictionary listing inside your
-`SELECT`. Warm deliberately and it happens once, visibly, instead of
-unexpectedly.
+**The first query on a new machine is unexpectedly slow** — naming a table on a
+cold cache first builds the name index inside your `SELECT`. Run
+`oracle_fusion_tables()` deliberately and it happens once, visibly, instead of
+inside an unrelated query.
 
 **"Oracle Fusion redirected the request to a sign-in page"** — the credentials
 were not accepted, or the instance uses SSO and you have not run

@@ -835,9 +835,8 @@ private:
 };
 
 //! A page the report cut short is not the end and not an error: the scan
-//! carries on from the rows it did receive. The dictionary listing stopped at
-//! 4,000 of 28,978 tables on a real instance because a cut page was skipped
-//! as unparseable, looked empty, and empty meant the end.
+//! carries on from the rows it did receive. Otherwise an unparseable tail looks
+//! like an empty page and can silently end a listing early.
 void TestTruncatedPageIsContinuedFrom() {
 	Script script;
 	ScopedTransportFactory installed(
@@ -1174,11 +1173,9 @@ void TestTruncatedPageDoesNotEndTheListing() {
 
 //! An empty page is retried on a fresh session before it is believed.
 //!
-//! A BI Publisher session appears to have an allowance: past it, pages come
-//! back empty rather than failing, which is exactly what running out of data
-//! looks like. On a real instance the listing stopped at 4,000 rows, then
-//! 5,600, then 7,200 as the statement got cheaper -- a boundary that moves with
-//! cost, not a boundary in the data.
+//! A BI Publisher session can answer with an empty page rather than an explicit
+//! failure, which is exactly what running out of data looks like. Retrying once
+//! on a fresh session distinguishes that transient state from a real ending.
 void TestEmptyPageIsRetriedOnAFreshSession() {
 	ResetCache();
 	struct ExhaustingTransport : FusionTransport {
@@ -1519,21 +1516,26 @@ void TestMetadataShortPageEndsImmediately() {
 	CHECK(transport.resets == 0);
 }
 
-//! If the last complete page happens to be exactly full, one empty request is
-//! unavoidable. It is already a valid end marker and must not be sent again on
-//! a fresh session.
-void TestMetadataTerminalEmptyPageIsNotRetried() {
+//! The SQL limit and the full-page threshold must be the same constant. If one
+//! followed the table-list default while the other stayed at the column limit,
+//! this would either stop after the first full page or ask for 2,000 wide rows.
+void TestMetadataColumnPageSizeControlsQueryAndCompletion() {
 	struct FullPageTransport : FusionTransport {
 		int requests = 0;
 		int resets = 0;
+		bool used_column_page_size = false;
 
 		std::string Execute(const std::string &sql, const RequestContext &) override {
 			requests++;
+			used_column_page_size =
+			    used_column_page_size ||
+			    sql.find("FETCH NEXT " + std::to_string(ofquack::metadata::COLUMN_PAGE_SIZE) + " ROWS ONLY") !=
+			        std::string::npos;
 			if (AsksForALaterPage(sql)) {
 				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
 			}
 			std::string rows = "&lt;ROWSET&gt;";
-			for (size_t i = 0; i < ofquack::metadata::PAGE_SIZE; i++) {
+			for (size_t i = 0; i < ofquack::metadata::COLUMN_PAGE_SIZE; i++) {
 				rows += "&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;C" +
 				        std::to_string(i) +
 				        "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;VARCHAR2&lt;/TYPE_NAME&gt;&lt;ORDINAL_POSITION&gt;" +
@@ -1553,9 +1555,10 @@ void TestMetadataTerminalEmptyPageIsNotRetried() {
 	table.table_id = "1";
 
 	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
-	CHECK(columns.size() == ofquack::metadata::PAGE_SIZE);
+	CHECK(columns.size() == ofquack::metadata::COLUMN_PAGE_SIZE);
 	CHECK(transport.requests == 2);
 	CHECK(transport.resets == 0);
+	CHECK(transport.used_column_page_size);
 }
 
 //! A short page is not the end when ParseRows saw that BI Publisher cut the
@@ -1872,6 +1875,8 @@ void TestAttachedCatalogHonoursMetadataPageSize() {
 	DuckDB db(nullptr);
 	Connection connection(db);
 	CreateSecret(connection);
+	auto default_size = RunQuery(connection, "SELECT current_setting('fusion_scanner_metadata_page_size')");
+	CHECK(default_size->GetValue(0, 0).GetValue<uint64_t>() == ofquack::metadata::TABLE_LIST_PAGE_SIZE);
 	RunQuery(connection, "SET fusion_scanner_metadata_page_size = 17");
 	Attach(connection);
 	RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
@@ -2254,7 +2259,7 @@ void TestShowTablesListsOnlyDescribableTables() {
 	CHECK(listed->GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	// Warming the columns is what fills the browser in.
-	RunQuery(connection, "SELECT * FROM fusion_scanner_cache_warm()");
+	RunQuery(connection, "SELECT * FROM fusion_scanner_cache_warm(pattern := '%')");
 	RunQuery(connection, "DETACH fus");
 	Attach(connection);
 
@@ -2273,14 +2278,16 @@ void TestCacheWarm() {
 	Connection connection(db);
 	CreateSecret(connection);
 
-	auto first = RunQuery(connection, "SELECT tables_warmed, columns_cached, already_cached FROM fusion_scanner_cache_warm()");
+	auto first = RunQuery(connection, "SELECT tables_warmed, columns_cached, already_cached FROM "
+	                                  "fusion_scanner_cache_warm(pattern := '%')");
 	CHECK(first->GetValue(0, 0).GetValue<int64_t>() == 2); // one table, one view
 	CHECK(first->GetValue(1, 0).GetValue<int64_t>() == 3); // two columns plus one
 	CHECK(first->GetValue(2, 0).GetValue<int64_t>() == 0);
 	const auto after_first = script.executed_sql.size();
 
 	// A second warm has nothing left to do.
-	auto second = RunQuery(connection, "SELECT tables_warmed, already_cached FROM fusion_scanner_cache_warm()");
+	auto second = RunQuery(connection,
+	                       "SELECT tables_warmed, already_cached FROM fusion_scanner_cache_warm(pattern := '%')");
 	CHECK(second->GetValue(0, 0).GetValue<int64_t>() == 0);
 	CHECK(second->GetValue(1, 0).GetValue<int64_t>() == 2);
 	CHECK(script.executed_sql.size() == after_first);
@@ -2301,10 +2308,15 @@ void TestCacheWarmPatternAndLimit() {
 	CHECK(result->GetValue(0, 0).GetValue<int64_t>() == 1);
 
 	ResetCache();
-	auto limited = RunQuery(connection, "SELECT tables_warmed FROM fusion_scanner_cache_warm(max_tables := 1)");
+	auto limited = RunQuery(
+	    connection, "SELECT tables_warmed FROM fusion_scanner_cache_warm(pattern := '%', max_tables := 1)");
 	CHECK(limited->GetValue(0, 0).GetValue<int64_t>() == 1);
 
-	auto invalid = connection.Query("SELECT * FROM fusion_scanner_cache_warm(max_tables := -1)");
+	auto missing_pattern = connection.Query("SELECT * FROM fusion_scanner_cache_warm()");
+	CHECK(missing_pattern->HasError());
+	CHECK(missing_pattern->GetError().find("pattern is required") != std::string::npos);
+
+	auto invalid = connection.Query("SELECT * FROM fusion_scanner_cache_warm(pattern := '%', max_tables := -1)");
 	CHECK(invalid->HasError());
 	CHECK(invalid->GetError().find("max_tables") != std::string::npos);
 }
@@ -2456,7 +2468,7 @@ void TestCacheWarmNamesTheMissingCount() {
 	DuckDB db(nullptr);
 	Connection connection(db);
 	CreateSecret(connection);
-	auto result = connection.Query("SELECT * FROM fusion_scanner_cache_warm()");
+	auto result = connection.Query("SELECT * FROM fusion_scanner_cache_warm(pattern := '%')");
 	CHECK(result->HasError());
 	// Names the count and where it comes from, not the cache.
 	CHECK(result->GetError().find("would not count") != std::string::npos);
@@ -2692,7 +2704,7 @@ const TestCase TESTS[] = {
     {"invalidate removes expected count and order keys", TestInvalidateRemovesExpectedCountAndOrderKeys},
     {"columns of table and view", TestColumnsOfTableAndView},
     {"metadata short page ends immediately", TestMetadataShortPageEndsImmediately},
-    {"metadata terminal empty page is not retried", TestMetadataTerminalEmptyPageIsNotRetried},
+    {"metadata column page size controls query and completion", TestMetadataColumnPageSizeControlsQueryAndCompletion},
     {"metadata truncated short page continues", TestMetadataTruncatedShortPageContinues},
     {"unconstrained number is double", TestUnconstrainedNumberIsDouble},
     {"unknown table is reported", TestUnknownTableIsReported},
