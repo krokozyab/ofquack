@@ -11,7 +11,7 @@
 extension:
   name: fusion_scanner
   description: Query Oracle Fusion from DuckDB through BI Publisher, with SSO, an ATTACH-able catalog and cached metadata
-  version: 0.1.0
+  version: 0.2.0
   language: C++
   build: cmake
   license: MIT
@@ -30,8 +30,8 @@ repo:
   #
   # The commit whose full matrix passed under this name: clang-tidy,
   # linux_amd64, linux_arm64, osx_amd64, osx_arm64 and windows_amd64,
-  # run 32640259584.
-  ref: 114c79c3f339e9cd5dab8ef568e4a7cb8bce2516
+  # run 33165567794. Its duckdb submodule is d8cdaa33fd, which is v1.5.5.
+  ref: 0bb99ecbfdace76e2bc25245767279d2910ff604
 
 docs:
   hello_world: |
