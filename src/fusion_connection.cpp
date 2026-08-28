@@ -23,6 +23,25 @@ std::string SecretString(const KeyValueSecret &secret, const char *key) {
 	return value.IsNull() ? std::string() : value.ToString();
 }
 
+ofquack::NumberMode ParseNumberMode(const std::string &value) {
+	const auto lowered = StringUtil::Lower(value);
+	if (lowered == "double") {
+		return ofquack::NumberMode::DOUBLE;
+	}
+	if (lowered == "decimal") {
+		return ofquack::NumberMode::DECIMAL;
+	}
+	if (lowered == "text") {
+		return ofquack::NumberMode::TEXT;
+	}
+	throw BinderException(
+	    "number_mode must be 'double', 'decimal' or 'text', not '%s'.\n"
+	    "It decides what an Oracle NUMBER with no declared precision becomes -- how Fusion declares its "
+	    "amount columns. 'double' is exact below 2^53, 'decimal' is DECIMAL(38,6), 'text' loses nothing "
+	    "and cannot be summed",
+	    value);
+}
+
 CastErrorMode ParseCastErrorMode(const std::string &value) {
 	const auto lowered = StringUtil::Lower(value);
 	if (lowered == "null") {
@@ -110,6 +129,7 @@ void AddFusionNamedParameters(TableFunction &function) {
 	function.named_parameters["username"] = LogicalType::VARCHAR;
 	function.named_parameters["password"] = LogicalType::VARCHAR;
 	function.named_parameters["fetch_size"] = LogicalType::UBIGINT;
+	function.named_parameters["number_mode"] = LogicalType::VARCHAR;
 	function.named_parameters["on_cast_error"] = LogicalType::VARCHAR;
 	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	function.named_parameters["secured_views"] = LogicalType::BOOLEAN;
@@ -233,6 +253,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 		if (!secret_fetch_size.IsNull()) {
 			options.fetch_size = secret_fetch_size.GetValue<idx_t>();
 		}
+		const auto secret_number_mode = secret.TryGetValue("number_mode");
+		if (!secret_number_mode.IsNull() && !secret_number_mode.ToString().empty()) {
+			options.number_mode = ParseNumberMode(secret_number_mode.ToString());
+		}
 		const auto secret_cast_error = secret.TryGetValue("on_cast_error");
 		if (!secret_cast_error.IsNull() && !secret_cast_error.ToString().empty()) {
 			options.on_cast_error = ParseCastErrorMode(secret_cast_error.ToString());
@@ -266,6 +290,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 	const auto fetch_size_override = NamedParameter(named_parameters, "fetch_size");
 	if (!fetch_size_override.IsNull()) {
 		options.fetch_size = fetch_size_override.GetValue<idx_t>();
+	}
+	const auto number_mode_override = NamedString(named_parameters, "number_mode");
+	if (!number_mode_override.empty()) {
+		options.number_mode = ParseNumberMode(number_mode_override);
 	}
 	const auto cast_error_override = NamedString(named_parameters, "on_cast_error");
 	if (!cast_error_override.empty()) {

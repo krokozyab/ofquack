@@ -210,7 +210,10 @@ Column types come from Fusion's own dictionary, so `NUMBER(10,2)` arrives as
   `DOUBLE`. There is no declared scale for `DECIMAL` to use, and the only one
   available would round every amount to a whole number. `DOUBLE` cannot hold all
   38 digits Oracle allows, so an unconstrained `NUMBER` used as a wide
-  identifier loses its low digits past 2^53.
+  identifier loses its low digits past 2^53. `number_mode := 'decimal'` gives
+  `DECIMAL(38,6)` instead, and `'text'` gives up nothing at all;
+  `SELECT * FROM oracle_fusion_columns('…') WHERE lossy` lists the columns where
+  the choice matters.
 
 A value that turns out not to fit its column reads as NULL. Pass
 `on_cast_error := 'error'` to have the query fail and name it instead.

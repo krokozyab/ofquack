@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 #include "ofquack/browser_auth.hpp"
 #include "ofquack/metadata_queries.hpp"
+#include "ofquack/oracle_type_map.hpp"
 #include "ofquack/transport.hpp"
 
 namespace duckdb {
@@ -35,6 +36,10 @@ struct FusionScanOptions {
 	//! guess from the first page would be wrong for the rest of the data.
 	bool all_varchar = false;
 	CastErrorMode on_cast_error = CastErrorMode::NULLIFY;
+	//! What an unconstrained Oracle NUMBER becomes. Only reaches types that come
+	//! from the dictionary; oracle_fusion_query has no dictionary and infers from
+	//! the data, where a value below one is evidence of a scale on its own.
+	ofquack::NumberMode number_mode = ofquack::NumberMode::DOUBLE;
 	//! Adds an ORDER BY over every column before paging, so that the pages of one
 	//! result partition it rather than sampling it. Off only when Oracle refuses
 	//! the ordering -- see fusion_scanner_stable_paging.

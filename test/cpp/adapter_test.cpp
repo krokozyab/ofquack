@@ -1435,6 +1435,53 @@ void TestCacheIsKeyedByPrincipal() {
 	CHECK(duckdb::EndpointKey(first, "FUSION") != duckdb::EndpointKey(first, "CUSTOM"));
 }
 
+//! An empty report carries no column names at all, so a result that matched
+//! nothing had no schema and could only be an error. A declared schema is the
+//! way out, and the way to pin a type a twenty-row sample gets wrong.
+void TestDeclaredColumns() {
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	// Without it, no rows means no schema.
+	auto no_schema = connection.Query("SELECT * FROM oracle_fusion_query('SELECT ID FROM T WHERE 1=0')");
+	CHECK(no_schema->HasError());
+	CHECK(no_schema->GetError().find("columns :=") != std::string::npos);
+
+	auto declared = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT ID FROM T WHERE 1=0', "
+	                                     "columns := {'ID': 'BIGINT', 'NAME': 'VARCHAR'})");
+	CHECK(declared->RowCount() == 0);
+	CHECK(declared->ColumnCount() == 2);
+	CHECK(declared->names[0] == "ID");
+	CHECK(declared->types[0] == duckdb::LogicalType::BIGINT);
+	CHECK(declared->names[1] == "NAME");
+	CHECK(declared->types[1] == duckdb::LogicalType::VARCHAR);
+
+	// It wins over what the data would have said, always: a column of digits
+	// that is really an identifier stays text because the caller said so.
+	Script with_rows;
+	with_rows.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;ID&gt;42&lt;/ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+	auto reinstalled = InstallFake(with_rows);
+	auto overridden = RunQuery(connection, "SELECT * FROM oracle_fusion_query('SELECT ID FROM T', fetch_size := 0, "
+	                                       "columns := {'ID': 'VARCHAR'})");
+	CHECK(overridden->types[0] == duckdb::LogicalType::VARCHAR);
+	CHECK(overridden->GetValue(0, 0).ToString() == "42");
+
+	// A name the report did not return would be a column of nothing but NULLs,
+	// which is indistinguishable from a column of NULL data. Refused while there
+	// is a page to check against.
+	auto misspelt = connection.Query("SELECT * FROM oracle_fusion_query('SELECT ID FROM T', fetch_size := 0, "
+	                                 "columns := {'IDD': 'BIGINT'})");
+	CHECK(misspelt->HasError());
+	CHECK(misspelt->GetError().find("IDD") != std::string::npos);
+	CHECK(misspelt->GetError().find("It returned: ID") != std::string::npos);
+}
+
 //! A type is a guess about the rest of the data, from a sample of the first
 //! page or from a dictionary the data can contradict. Reading the odd value
 //! that does not fit as NULL keeps the other million rows, and loses the fact
@@ -1778,6 +1825,31 @@ void TestUnconstrainedNumberIsDouble() {
 	// fits BIGINT must not become a float.
 	CHECK(columns->GetValue(0, 1).ToString() == "LINE_ID");
 	CHECK(columns->GetValue(1, 1).ToString() == "BIGINT");
+
+	// The choice is the caller's, and it reaches both the metadata function and
+	// the catalog that builds a table's schema from the same mapping.
+	auto as_decimal = RunQuery(connection, "SELECT duckdb_type, lossy FROM oracle_fusion_columns('AMOUNTS', "
+	                                       "number_mode := 'decimal') ORDER BY column_name");
+	CHECK(as_decimal->GetValue(0, 0).ToString() == "DECIMAL(38,6)");
+	CHECK(as_decimal->GetValue(1, 0).GetValue<bool>());
+	// A declared precision is a fact rather than a choice, so nothing is lost.
+	CHECK(as_decimal->GetValue(0, 1).ToString() == "BIGINT");
+	CHECK(!as_decimal->GetValue(1, 1).GetValue<bool>());
+
+	auto as_text = RunQuery(connection, "SELECT duckdb_type, lossy FROM oracle_fusion_columns('AMOUNTS', "
+	                                    "number_mode := 'text') ORDER BY column_name");
+	CHECK(as_text->GetValue(0, 0).ToString() == "VARCHAR");
+	CHECK(!as_text->GetValue(1, 0).GetValue<bool>());
+
+	RunQuery(connection, "ATTACH 'fusion' AS f (TYPE oracle_fusion, NUMBER_MODE 'decimal')");
+	auto attached = RunQuery(connection, "SELECT data_type FROM duckdb_columns() WHERE table_name = 'AMOUNTS' "
+	                                     "AND column_name = 'ENTERED_DR'");
+	CHECK(attached->RowCount() == 1);
+	CHECK(attached->GetValue(0, 0).ToString() == "DECIMAL(38,6)");
+
+	auto rejected = connection.Query("SELECT * FROM oracle_fusion_columns('AMOUNTS', number_mode := 'float')");
+	CHECK(rejected->HasError());
+	CHECK(rejected->GetError().find("number_mode must be") != std::string::npos);
 }
 
 void TestUnknownTableIsReported() {
@@ -2850,6 +2922,7 @@ const TestCase TESTS[] = {
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
     {"cache is keyed by principal", TestCacheIsKeyedByPrincipal},
     {"secret schema reaches the dictionary queries", TestSecretSchemaReachesTheDictionaryQueries},
+    {"declared columns", TestDeclaredColumns},
     {"cast error mode in query function", TestCastErrorModeInQueryFunction},
     {"cast error mode in attached catalog", TestCastErrorModeInAttachedCatalog},
     {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},

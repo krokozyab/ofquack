@@ -79,6 +79,7 @@ waiting for a person.
 | `ENDPOINT` | both | Your instance, e.g. `https://fa-xxxx-dev1.fa.ocs.oraclecloud.com`. The BI Publisher service path is appended for you; give the full `…/xmlpserver/services/ExternalReportWSSService?WSDL` URL only if yours is non-standard. |
 | `REPORT_PATH` | both | Absolute path of the deployed report, e.g. `/Custom/Financials/RP_ARB.xdo`. |
 | `ON_CAST_ERROR` | both | `null` (default) or `error`: what a value that does not fit its column does. See `on_cast_error` below. |
+| `NUMBER_MODE` | both | `double` (default), `decimal` or `text`: what an unconstrained `NUMBER` becomes. See `number_mode` below. |
 | `SCHEMA` | both | Owner the dictionary queries filter on, and the schema reported for dictionary objects. Defaults to `FUSION`, which is what every instance seen so far uses. Upper-cased before it is compared. Part of the metadata cache key, so two secrets differing only here keep separate caches. |
 | `FETCH_SIZE` | both | Rows per request, 1–10000, or `0` for a single request. Default 500. |
 | `SECURED_VIEWS` | both | `true` rewrites HR tables to their `*_SECURED_LIST_V` equivalents. |
@@ -203,6 +204,8 @@ select list and types inferred from the first page.
 | `fetch_size` | Rows per request, 1–10000. `0` means one request for everything. |
 | `all_varchar` | `true` returns every column as text, skipping type inference. |
 | `on_cast_error` | What a value that does not fit its column does: `null` (default) reads it as NULL, `error` fails the query and names the value. Applies to attached tables too. |
+| `number_mode` | What an Oracle `NUMBER` with no declared precision becomes: `double` (default), `decimal` for `DECIMAL(38,6)`, or `text`. Only reaches types that come from the dictionary — attached tables and `oracle_fusion_columns` — because `oracle_fusion_query` infers from the data instead. |
+| `columns` | `oracle_fusion_query` only. A declared schema, `{'ID': 'BIGINT', 'NAME': 'VARCHAR'}`, in the shape `read_csv` uses. Overrides inference **always**, and is the only way to read a result that came back empty, which carries no column names to infer from. A name the report did not return is refused rather than served as a column of NULLs. |
 | `secured_views` | `true` rewrites HR tables to their secured views. |
 | `stable_paging` | `false` stops the extension adding an `ORDER BY` for paging. Faster, and pages may then repeat and skip rows. |
 
@@ -382,7 +385,19 @@ SELECT * FROM oracle_fusion_columns('AP_INVOICES_ALL');
 ```
 
 **Returns** `column_name`, `oracle_type`, `duckdb_type`, `precision`, `scale`,
-`ordinal`, `nullable`, `remarks`.
+`ordinal`, `nullable`, `remarks`, `lossy`.
+
+`lossy` is `true` when Oracle declared neither precision nor scale, so the
+DuckDB type is this extension's choice rather than something the dictionary
+stated — and, under every `number_mode` but `text`, a choice that cannot hold
+every value the column is allowed to. It is the closest thing to a warning
+available: DuckDB v1.5.5 has no channel an extension can put a notice on.
+
+```sql
+SELECT column_name, oracle_type, duckdb_type
+FROM oracle_fusion_columns('GL_JE_LINES')
+WHERE lossy;
+```
 
 **Named parameters:** connection parameters, `refresh`, `cache_ttl_seconds`.
 

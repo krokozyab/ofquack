@@ -28,7 +28,8 @@ bool StartsWith(const std::string &text, const char *prefix) {
 
 } // namespace
 
-DictionaryColumnType MapOracleType(const std::string &type_name, int64_t precision, int64_t scale) {
+DictionaryColumnType MapOracleType(const std::string &type_name, int64_t precision, int64_t scale,
+                                   NumberMode number_mode) {
 	const auto type = UpperTrimmed(type_name);
 	if (type.empty()) {
 		return {};
@@ -53,12 +54,17 @@ DictionaryColumnType MapOracleType(const std::string &type_name, int64_t precisi
 		// a value below one -- was read as 1. GL_JE_LINES.ENTERED_DR is declared
 		// this way, and so is every amount column beside it.
 		//
-		// DOUBLE cannot hold all 38 digits Oracle allows, so an unconstrained
-		// NUMBER used as a wide integer identifier loses its low digits past
-		// 2^53. That is the trade the alternatives lose worse: DECIMAL(38,0)
-		// rounds every amount, and VARCHAR cannot be summed.
+		// There is no lossless choice, only a choice of loss, so the caller gets
+		// to make it. What each mode gives up is on NumberMode.
 		if (precision <= 0 && scale <= 0) {
-			return {true, InferredType::DOUBLE, 0};
+			switch (number_mode) {
+			case NumberMode::TEXT:
+				return {true, InferredType::VARCHAR, 0, false};
+			case NumberMode::DECIMAL:
+				return {true, InferredType::DECIMAL, UNCONSTRAINED_DECIMAL_SCALE, true};
+			default:
+				return {true, InferredType::DOUBLE, 0, true};
+			}
 		}
 		// A declared scale is exact, and DECIMAL keeps it that way.
 		const auto effective_scale = static_cast<uint8_t>(std::min<int64_t>(std::max<int64_t>(scale, 0), 38));

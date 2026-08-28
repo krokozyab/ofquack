@@ -182,8 +182,9 @@ unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInp
 // oracle_fusion_columns
 // ---------------------------------------------------------------------------
 
-LogicalType DictionaryLogicalType(const ofquack::ColumnInfo &column) {
-	const auto mapped = ofquack::MapOracleType(column.type_name, column.precision, column.scale);
+LogicalType DictionaryLogicalType(const ofquack::ColumnInfo &column, ofquack::NumberMode number_mode, bool &lossy) {
+	const auto mapped = ofquack::MapOracleType(column.type_name, column.precision, column.scale, number_mode);
+	lossy = mapped.lossy;
 	if (!mapped.known) {
 		return LogicalType::VARCHAR;
 	}
@@ -251,15 +252,24 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 
 	auto bind_data = make_uniq<MaterialisedBindData>();
 	for (const auto &column : columns) {
-		bind_data->rows.push_back({Value(column.name), Value(column.type_name),
-		                           Value(DictionaryLogicalType(column).ToString()), Value::BIGINT(column.precision),
-		                           Value::BIGINT(column.scale), Value::BIGINT(column.ordinal),
-		                           Value::BOOLEAN(column.nullable), Value(column.remarks)});
+		// `lossy` is the closest thing to a warning this can give: DuckDB v1.5.5
+		// has no channel an extension can put a notice on, and a column that
+		// cannot hold every value Oracle allows should not be found out about by
+		// reconciling a total.
+		bool lossy = false;
+		const auto type = DictionaryLogicalType(column, options.number_mode, lossy);
+		bind_data->rows.push_back({Value(column.name), Value(column.type_name), Value(type.ToString()),
+		                           Value::BIGINT(column.precision), Value::BIGINT(column.scale),
+		                           Value::BIGINT(column.ordinal), Value::BOOLEAN(column.nullable),
+		                           Value(column.remarks), Value::BOOLEAN(lossy)});
 	}
 
-	names = {"column_name", "oracle_type", "duckdb_type", "precision", "scale", "ordinal", "nullable", "remarks"};
+	names = {"column_name", "oracle_type", "duckdb_type", "precision",
+	         "scale",       "ordinal",     "nullable",    "remarks",
+	         "lossy"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
-	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	                LogicalType::BIGINT,  LogicalType::BIGINT,  LogicalType::BOOLEAN, LogicalType::VARCHAR,
+	                LogicalType::BOOLEAN};
 	return std::move(bind_data);
 }
 

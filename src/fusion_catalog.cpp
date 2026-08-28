@@ -206,8 +206,8 @@ struct FusionAttachedState {
 	}
 };
 
-LogicalType TypeOf(const ofquack::ColumnInfo &column, bool &from_dictionary) {
-	const auto mapped = ofquack::MapOracleType(column.type_name, column.precision, column.scale);
+LogicalType TypeOf(const ofquack::ColumnInfo &column, ofquack::NumberMode number_mode, bool &from_dictionary) {
+	const auto mapped = ofquack::MapOracleType(column.type_name, column.precision, column.scale, number_mode);
 	from_dictionary = mapped.known;
 	if (!mapped.known) {
 		return LogicalType::VARCHAR;
@@ -666,7 +666,7 @@ public:
 		vector<FusionColumn> fusion_columns;
 		for (const auto &column : columns) {
 			bool from_dictionary = false;
-			auto type = TypeOf(column, from_dictionary);
+			auto type = TypeOf(column, state->options.number_mode, from_dictionary);
 			info->columns.AddColumn(ColumnDefinition(column.name, type));
 			fusion_columns.push_back(FusionColumn {column.name, type, column.type_name, from_dictionary});
 		}

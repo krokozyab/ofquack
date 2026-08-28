@@ -788,6 +788,49 @@ void TestTypeInference() {
 	CHECK(InferColumnType({".x"}).type == InferredType::VARCHAR);
 }
 
+//! A NUMBER with nothing declared has no lossless mapping, so the choice of
+//! loss belongs to whoever is going to read the column.
+void TestOracleNumberModes() {
+	using ofquack::InferredType;
+	using ofquack::MapOracleType;
+	using ofquack::NumberMode;
+
+	const auto as_double = MapOracleType("NUMBER", 0, 0, NumberMode::DOUBLE);
+	CHECK(as_double.type == InferredType::DOUBLE);
+	CHECK(as_double.lossy);
+
+	const auto as_decimal = MapOracleType("NUMBER", 0, 0, NumberMode::DECIMAL);
+	CHECK(as_decimal.type == InferredType::DECIMAL);
+	CHECK(as_decimal.scale == ofquack::UNCONSTRAINED_DECIMAL_SCALE);
+	// Not DECIMAL(38,0): that read Oracle's ".84" as 1, which is the bug the
+	// whole mapping exists to avoid.
+	CHECK(as_decimal.scale > 0);
+	CHECK(as_decimal.lossy);
+
+	// Text is the only mode that gives nothing up, which is why it is the only
+	// one not marked lossy.
+	const auto as_text = MapOracleType("NUMBER", 0, 0, NumberMode::TEXT);
+	CHECK(as_text.type == InferredType::VARCHAR);
+	CHECK(!as_text.lossy);
+
+	// A declared precision or scale is a fact, not a choice: the mode has no say
+	// over it and nothing is lost.
+	for (const auto mode : {NumberMode::DOUBLE, NumberMode::DECIMAL, NumberMode::TEXT}) {
+		CHECK(MapOracleType("NUMBER", 18, 0, mode).type == InferredType::BIGINT);
+		CHECK(!MapOracleType("NUMBER", 18, 0, mode).lossy);
+		const auto money = MapOracleType("NUMBER", 12, 2, mode);
+		CHECK(money.type == InferredType::DECIMAL);
+		CHECK(money.scale == 2);
+		CHECK(!money.lossy);
+		// Nor over anything that was never a number.
+		CHECK(MapOracleType("VARCHAR2", 0, 0, mode).type == InferredType::VARCHAR);
+		CHECK(MapOracleType("DATE", 0, 0, mode).type == InferredType::TIMESTAMP);
+	}
+
+	// The binary floating types carry no precision either and follow the mode.
+	CHECK(MapOracleType("BINARY_DOUBLE", 0, 0, NumberMode::TEXT).type == InferredType::VARCHAR);
+}
+
 //! '00123' is an account code, and reading it as 123 loses information the
 //! user cannot get back.
 void TestTypeInferenceKeepsLeadingZeros() {
@@ -1477,6 +1520,7 @@ const TestCase TESTS[] = {
     {"table listing seeks rather than offsets", TestTableListingSeeksRatherThanOffsets},
     {"table count counts distinct names", TestTableCountCountsDistinctNames},
     {"oracle type mapping", TestOracleTypeMapping},
+    {"oracle number modes", TestOracleNumberModes},
     {"jwt claims", TestJwtClaims},
     {"base64url decoding", TestBase64UrlDecoding},
     {"token cache expiry and refresh", TestTokenCacheExpiryAndRefresh},

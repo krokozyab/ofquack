@@ -236,6 +236,46 @@ LogicalType ToLogicalType(const ofquack::InferredColumn &inferred) {
 	}
 }
 
+//! Reads `columns := {'NAME': 'TYPE', …}` into the scan's schema.
+//!
+//! Shaped after read_csv's parameter of the same name, so the spelling is one a
+//! DuckDB user already knows. Declaration order is column order.
+//!
+//! A name that the report did not return is refused when there is a page to
+//! check it against. Accepting it would produce a column of nothing but NULLs --
+//! the row lookup is by name -- which looks exactly like a column of NULL data
+//! and is the harder mistake to find. Nothing can be checked when the result
+//! came back empty, which is the case this parameter exists for.
+void ReadDeclaredColumns(ClientContext &context, const Value &declared, const ofquack::ParsedReport &page,
+                         vector<string> &names, vector<LogicalType> &types) {
+	const auto &type = declared.type();
+	if (type.id() != LogicalTypeId::STRUCT) {
+		throw BinderException("columns must be a struct of name to type, for example "
+		                      "columns := {'INVOICE_ID': 'BIGINT', 'INVOICE_NUM': 'VARCHAR'}");
+	}
+	const auto &children = StructType::GetChildTypes(type);
+	const auto &values = StructValue::GetChildren(declared);
+	if (children.empty()) {
+		throw BinderException("columns is empty; give at least one column, or leave it out to take the schema from "
+		                      "the data");
+	}
+	for (idx_t i = 0; i < children.size(); i++) {
+		const auto &column_name = children[i].first;
+		if (values[i].IsNull()) {
+			throw BinderException("columns entry '%s' has no type", column_name);
+		}
+		if (!page.columns.empty() &&
+		    std::find(page.columns.begin(), page.columns.end(), column_name) == page.columns.end()) {
+			vector<string> returned(page.columns.begin(), page.columns.end());
+			throw BinderException("columns names \"%s\", which the report did not return. It returned: %s.\n"
+			                      "Names are matched exactly against the report's own element names.",
+			                      column_name, StringUtil::Join(returned, ", "));
+		}
+		names.push_back(column_name);
+		types.push_back(TransformStringToLogicalType(values[i].ToString(), context));
+	}
+}
+
 //! Infers a type per column from the first page.
 void InferColumnTypes(const ofquack::ParsedReport &page, const vector<string> &columns,
                       vector<LogicalType> &column_types) {
@@ -295,24 +335,33 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 		    static_cast<uint64_t>(bind_data->first_page.rows.size()),
 		    static_cast<uint64_t>(bind_data->first_page.truncated_at_bytes), bind_data->sql);
 	}
-	bind_data->columns.assign(bind_data->first_page.columns.begin(), bind_data->first_page.columns.end());
-
-	if (bind_data->columns.empty()) {
-		// An empty report carries no schema at all. Guessing column names by
-		// slicing the SQL text -- which is what this used to do -- produced
-		// nonsense on any query with a function call or a subquery in its
-		// select list, and the guess silently became the table's schema.
-		throw IOException(
-		    "Oracle Fusion returned no rows, so the result has no columns and its schema is unknown.\n"
-		    "Add a predicate that matches at least one row, or wrap the query so it always returns one "
-		    "(for example SELECT … FROM DUAL).\nSQL: %s",
-		    bind_data->sql);
-	}
-
-	if (bind_data->options.all_varchar) {
-		bind_data->column_types.assign(bind_data->columns.size(), LogicalType::VARCHAR);
+	const auto declared = input.named_parameters.find("columns");
+	if (declared != input.named_parameters.end() && !declared->second.IsNull()) {
+		// A declared schema wins outright, the way read_csv's does. It is the
+		// only way to read a result that came back empty -- an empty report
+		// carries no column names at all, so there is nothing to infer from --
+		// and the only way to pin a type that a twenty-row sample gets wrong.
+		ReadDeclaredColumns(context, declared->second, bind_data->first_page, bind_data->columns, bind_data->column_types);
 	} else {
-		InferColumnTypes(bind_data->first_page, bind_data->columns, bind_data->column_types);
+		bind_data->columns.assign(bind_data->first_page.columns.begin(), bind_data->first_page.columns.end());
+
+		if (bind_data->columns.empty()) {
+			// An empty report carries no schema at all. Guessing column names by
+			// slicing the SQL text -- which is what this used to do -- produced
+			// nonsense on any query with a function call or a subquery in its
+			// select list, and the guess silently became the table's schema.
+			throw IOException(
+			    "Oracle Fusion returned no rows, so the result has no columns and its schema is unknown.\n"
+			    "Declare it with columns := {'NAME': 'VARCHAR', …}, add a predicate that matches at least one "
+			    "row, or wrap the query so it always returns one (for example SELECT … FROM DUAL).\nSQL: %s",
+			    bind_data->sql);
+		}
+
+		if (bind_data->options.all_varchar) {
+			bind_data->column_types.assign(bind_data->columns.size(), LogicalType::VARCHAR);
+		} else {
+			InferColumnTypes(bind_data->first_page, bind_data->columns, bind_data->column_types);
+		}
 	}
 	// OFFSET/FETCH only partitions a result the server has ordered, and each
 	// page is a separate execution of the statement: Oracle owes no two of them
@@ -489,6 +538,10 @@ void RegisterFusionQueryFunction(ExtensionLoader &loader) {
 	TableFunction query("oracle_fusion_query", {LogicalType::VARCHAR}, FusionQueryScan, FusionQueryBind,
 	                    FusionQueryInitGlobal);
 	AddFusionNamedParameters(query);
+	// Only on this function, deliberately. An attached table's schema comes from
+	// the dictionary, so a `columns` accepted there would be accepted and
+	// ignored -- the shape of hole this codebase has already been caught by once.
+	query.named_parameters["columns"] = LogicalType::ANY;
 	loader.RegisterFunction(query);
 
 	TableFunction removed("oracle_fusion_wsdl_query",
