@@ -2,6 +2,7 @@
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "ofquack/host_throttle.hpp"
 #include "ofquack/token_cache.hpp"
@@ -20,6 +21,20 @@ constexpr idx_t MAX_FETCH_SIZE = 10000;
 std::string SecretString(const KeyValueSecret &secret, const char *key) {
 	const auto value = secret.TryGetValue(key);
 	return value.IsNull() ? std::string() : value.ToString();
+}
+
+CastErrorMode ParseCastErrorMode(const std::string &value) {
+	const auto lowered = StringUtil::Lower(value);
+	if (lowered == "null") {
+		return CastErrorMode::NULLIFY;
+	}
+	if (lowered == "error") {
+		return CastErrorMode::FAIL;
+	}
+	throw BinderException("on_cast_error must be 'null' or 'error', not '%s'.\n"
+	                      "'null' reads a value that does not fit its column as NULL, which is the default; "
+	                      "'error' fails the query and names the value",
+	                      value);
 }
 
 const KeyValueSecret &AsFusionSecret(const SecretEntry &entry, const std::string &name) {
@@ -95,10 +110,24 @@ void AddFusionNamedParameters(TableFunction &function) {
 	function.named_parameters["username"] = LogicalType::VARCHAR;
 	function.named_parameters["password"] = LogicalType::VARCHAR;
 	function.named_parameters["fetch_size"] = LogicalType::UBIGINT;
+	function.named_parameters["on_cast_error"] = LogicalType::VARCHAR;
 	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	function.named_parameters["secured_views"] = LogicalType::BOOLEAN;
 	function.named_parameters["all_varchar"] = LogicalType::BOOLEAN;
 	function.named_parameters["stable_paging"] = LogicalType::BOOLEAN;
+}
+
+void ThrowConversionError(const string &source, const string &column_name, const LogicalType &type, const string &value,
+                          const string &reason) {
+	// The value itself is in the message on purpose. A type that a column mostly
+	// fits is usually wrong because of a handful of rows, and finding them costs
+	// another full scan if the error will not say which they were.
+	throw ConversionException(
+	    "Oracle Fusion returned a value that does not fit column \"%s\" of %s.\nValue: '%s'\nTarget type: %s\n%s\n"
+	    "The type came from a sample of the first page or from the dictionary, so later rows can disagree with it. "
+	    "Use on_cast_error := 'null' to read such values as NULL, or all_varchar := true to take every column as "
+	    "text.",
+	    column_name, source, value, type.ToString(), reason);
 }
 
 void RequireUsableCredentials(const ofquack::FusionConfig &config) {
@@ -204,6 +233,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 		if (!secret_fetch_size.IsNull()) {
 			options.fetch_size = secret_fetch_size.GetValue<idx_t>();
 		}
+		const auto secret_cast_error = secret.TryGetValue("on_cast_error");
+		if (!secret_cast_error.IsNull() && !secret_cast_error.ToString().empty()) {
+			options.on_cast_error = ParseCastErrorMode(secret_cast_error.ToString());
+		}
 		const auto secret_schema = secret.TryGetValue("schema");
 		if (!secret_schema.IsNull() && !secret_schema.ToString().empty()) {
 			options.schema = secret_schema.ToString();
@@ -233,6 +266,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 	const auto fetch_size_override = NamedParameter(named_parameters, "fetch_size");
 	if (!fetch_size_override.IsNull()) {
 		options.fetch_size = fetch_size_override.GetValue<idx_t>();
+	}
+	const auto cast_error_override = NamedString(named_parameters, "on_cast_error");
+	if (!cast_error_override.empty()) {
+		options.on_cast_error = ParseCastErrorMode(cast_error_override);
 	}
 	const auto schema_override = NamedString(named_parameters, "schema");
 	if (!schema_override.empty()) {

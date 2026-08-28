@@ -593,6 +593,12 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 			Value converted;
 			string conversion_error;
 			if (!Value(entry->second).DefaultTryCastAs(type, converted, &conversion_error)) {
+				// The dictionary can disagree with the data -- a NUMBER column
+				// holding something Oracle stored before the type was narrowed,
+				// say. Same choice as the query function, and the same default.
+				if (bind_data.state->options.on_cast_error == CastErrorMode::FAIL) {
+					ThrowConversionError(bind_data.object_name, column_name, type, entry->second, conversion_error);
+				}
 				validity.SetInvalid(row_index);
 				continue;
 			}

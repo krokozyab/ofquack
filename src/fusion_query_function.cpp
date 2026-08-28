@@ -389,7 +389,8 @@ unique_ptr<GlobalTableFunctionState> FusionQueryInitGlobal(ClientContext &contex
 
 //! Writes one column of the current page into the output vector.
 void EmitColumn(Vector &vector, const std::vector<ofquack::ReportRow> &rows, idx_t from, idx_t count,
-                const string &column_name, const LogicalType &type) {
+                const string &column_name, const LogicalType &type, CastErrorMode on_cast_error,
+                const string &source) {
 	auto &validity = FlatVector::Validity(vector);
 	const bool as_varchar = type.id() == LogicalTypeId::VARCHAR;
 	auto entries = as_varchar ? FlatVector::GetData<string_t>(vector) : nullptr;
@@ -413,15 +414,18 @@ void EmitColumn(Vector &vector, const std::vector<ofquack::ReportRow> &rows, idx
 			continue;
 		}
 		// The type was inferred from a sample, so a later row can disagree.
-		// Such a value becomes NULL rather than failing the query: one odd row
-		// in a million should not cost the user the other 999,999. Use
-		// all_varchar := true to see the raw text instead.
+		// What that costs is the caller's choice: NULL by default, because one
+		// odd row in a million should not cost the other 999,999, or an error
+		// when a silently missing value is the more expensive outcome.
 		//
 		// The error string is not optional: passing nullptr makes TryCast
 		// throw rather than report, which is the opposite of what is wanted.
 		Value converted;
 		string conversion_error;
 		if (!Value(entry->second).DefaultTryCastAs(type, converted, &conversion_error)) {
+			if (on_cast_error == CastErrorMode::FAIL) {
+				ThrowConversionError(source, column_name, type, entry->second, conversion_error);
+			}
 			validity.SetInvalid(row_index);
 			continue;
 		}
@@ -453,7 +457,8 @@ void FusionQueryScan(ClientContext &context, TableFunctionInput &data, DataChunk
 	output.SetCardinality(to_emit);
 	for (idx_t column_index = 0; column_index < bind_data.columns.size(); column_index++) {
 		EmitColumn(output.data[column_index], state.page.rows, state.offset_in_page, to_emit,
-		           bind_data.columns[column_index], bind_data.column_types[column_index]);
+		           bind_data.columns[column_index], bind_data.column_types[column_index],
+		           bind_data.options.on_cast_error, bind_data.sql);
 	}
 	state.offset_in_page += to_emit;
 	state.rows_emitted += to_emit;

@@ -1435,6 +1435,95 @@ void TestCacheIsKeyedByPrincipal() {
 	CHECK(duckdb::EndpointKey(first, "FUSION") != duckdb::EndpointKey(first, "CUSTOM"));
 }
 
+//! A type is a guess about the rest of the data, from a sample of the first
+//! page or from a dictionary the data can contradict. Reading the odd value
+//! that does not fit as NULL keeps the other million rows, and loses the fact
+//! that anything was wrong; which of the two costs more is the caller's to say.
+void TestCastErrorModeInQueryFunction() {
+	Script script;
+	// Twenty integers is the whole type sample, so the column infers as a
+	// number; the value after it does not fit and is never seen by inference.
+	std::string rows;
+	for (int i = 0; i < 20; i++) {
+		rows += "&lt;ROW&gt;&lt;N&gt;" + std::to_string(i + 1) + "&lt;/N&gt;&lt;/ROW&gt;";
+	}
+	rows += "&lt;ROW&gt;&lt;N&gt;not a number&lt;/N&gt;&lt;/ROW&gt;";
+	script.response = MakeSoapResponse(MakeReportXML("&lt;ROWSET&gt;" + rows + "&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+
+	auto nullified = RunQuery(connection, "SELECT count(*) AS rows, count(N) AS present FROM "
+	                                      "oracle_fusion_query('SELECT N FROM T', fetch_size := 0)");
+	CHECK(nullified->GetValue(0, 0).GetValue<int64_t>() == 21);
+	CHECK(nullified->GetValue(1, 0).GetValue<int64_t>() == 20);
+
+	auto failed = connection.Query("SELECT * FROM oracle_fusion_query('SELECT N FROM T', fetch_size := 0, "
+	                               "on_cast_error := 'error')");
+	CHECK(failed->HasError());
+	// The value is named: finding it otherwise costs another full scan.
+	CHECK(failed->GetError().find("not a number") != std::string::npos);
+	CHECK(failed->GetError().find("\"N\"") != std::string::npos);
+	CHECK(failed->GetError().find("on_cast_error := 'null'") != std::string::npos);
+}
+
+//! The same choice has to reach the attached catalog, where the type comes from
+//! the dictionary rather than a sample. A setting that silently does not apply
+//! to half the extension is worse than no setting.
+void TestCastErrorModeInAttachedCatalog() {
+	ResetCache();
+	struct MismatchTransport : FusionTransport {
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;1&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (sql.find("FND_COLUMNS") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;COLUMN_NAME&gt;N"
+				    "&lt;/COLUMN_NAME&gt;&lt;TYPE_NAME&gt;NUMBER&lt;/TYPE_NAME&gt;&lt;DECIMAL_DIGITS&gt;18"
+				    "&lt;/DECIMAL_DIGITS&gt;&lt;ORDINAL_POSITION&gt;1&lt;/ORDINAL_POSITION&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (sql.find("FND_VIEWS") != std::string::npos) {
+				// The listing seeks, so a page asking for names after the last
+				// one has to come back empty or the fetcher refuses a listing
+				// that never advances.
+				if (sql.find("t.table_name >") != std::string::npos) {
+					return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+				}
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;T&lt;/TABLE_NAME&gt;&lt;TABLE_TYPE&gt;TABLE"
+				    "&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;1&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			// The dictionary says NUMBER(18,0); the data disagrees.
+			return MakeSoapResponse(
+			    MakeReportXML("&lt;ROWSET&gt;&lt;ROW&gt;&lt;N&gt;not a number&lt;/N&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	auto transport = std::make_shared<MismatchTransport>();
+	ScopedTransportFactory installed([transport](const FusionConfig &) { return transport; });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	RunQuery(connection, "ATTACH 'fusion' AS f (TYPE oracle_fusion, FETCH_SIZE 0)");
+	auto nullified = RunQuery(connection, "SELECT N FROM f.main.T");
+	CHECK(nullified->RowCount() == 1);
+	CHECK(nullified->GetValue(0, 0).IsNull());
+
+	RunQuery(connection, "DETACH f");
+	RunQuery(connection, "ATTACH 'fusion' AS g (TYPE oracle_fusion, FETCH_SIZE 0, ON_CAST_ERROR 'error')");
+	auto failed = connection.Query("SELECT N FROM g.main.T");
+	CHECK(failed->HasError());
+	CHECK(failed->GetError().find("not a number") != std::string::npos);
+	CHECK(failed->GetError().find("\"N\"") != std::string::npos);
+}
+
 //! SCHEMA was accepted by CREATE SECRET and read by nothing: the owner the
 //! dictionary queries filter on was a compile-time constant, so a deployment
 //! that did not use FUSION had no way to say so and got an empty catalogue.
@@ -2761,6 +2850,8 @@ const TestCase TESTS[] = {
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
     {"cache is keyed by principal", TestCacheIsKeyedByPrincipal},
     {"secret schema reaches the dictionary queries", TestSecretSchemaReachesTheDictionaryQueries},
+    {"cast error mode in query function", TestCastErrorModeInQueryFunction},
+    {"cast error mode in attached catalog", TestCastErrorModeInAttachedCatalog},
     {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},
     {"secured views is off by default", TestSecuredViewsIsOffByDefault},
     {"attach options reach the scan", TestAttachOptionsReachTheScan},

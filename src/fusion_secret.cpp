@@ -12,7 +12,7 @@ namespace {
 const char *const SECRET_KEYS[] = {
     "endpoint",    "report_path", "auth",         "username",     "password",
     "token",       "schema",      "fetch_size",   "secured_views", "connect_timeout",
-    "read_timeout",
+    "read_timeout", "on_cast_error",
 };
 
 unique_ptr<BaseSecret> CreateFusionSecretFromConfig(ClientContext &, CreateSecretInput &input) {
@@ -50,6 +50,7 @@ void AddCommonParameters(CreateSecretFunction &function) {
 	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	function.named_parameters["fetch_size"] = LogicalType::UBIGINT;
 	function.named_parameters["secured_views"] = LogicalType::BOOLEAN;
+	function.named_parameters["on_cast_error"] = LogicalType::VARCHAR;
 	function.named_parameters["connect_timeout"] = LogicalType::UBIGINT;
 	function.named_parameters["read_timeout"] = LogicalType::UBIGINT;
 }

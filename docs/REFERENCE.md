@@ -78,6 +78,7 @@ waiting for a person.
 |---|---|---|
 | `ENDPOINT` | both | Your instance, e.g. `https://fa-xxxx-dev1.fa.ocs.oraclecloud.com`. The BI Publisher service path is appended for you; give the full `…/xmlpserver/services/ExternalReportWSSService?WSDL` URL only if yours is non-standard. |
 | `REPORT_PATH` | both | Absolute path of the deployed report, e.g. `/Custom/Financials/RP_ARB.xdo`. |
+| `ON_CAST_ERROR` | both | `null` (default) or `error`: what a value that does not fit its column does. See `on_cast_error` below. |
 | `SCHEMA` | both | Owner the dictionary queries filter on, and the schema reported for dictionary objects. Defaults to `FUSION`, which is what every instance seen so far uses. Upper-cased before it is compared. Part of the metadata cache key, so two secrets differing only here keep separate caches. |
 | `FETCH_SIZE` | both | Rows per request, 1–10000, or `0` for a single request. Default 500. |
 | `SECURED_VIEWS` | both | `true` rewrites HR tables to their `*_SECURED_LIST_V` equivalents. |
@@ -201,6 +202,7 @@ select list and types inferred from the first page.
 | `username`, `password` | Override the secret's. Puts the password into the SQL text — prefer a secret. |
 | `fetch_size` | Rows per request, 1–10000. `0` means one request for everything. |
 | `all_varchar` | `true` returns every column as text, skipping type inference. |
+| `on_cast_error` | What a value that does not fit its column does: `null` (default) reads it as NULL, `error` fails the query and names the value. Applies to attached tables too. |
 | `secured_views` | `true` rewrites HR tables to their secured views. |
 | `stable_paging` | `false` stops the extension adding an `ORDER BY` for paging. Faster, and pages may then repeat and skip rows. |
 
