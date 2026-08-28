@@ -117,7 +117,7 @@ private:
 
 //! Identifies one Fusion report and authenticated principal, so environments
 //! and users with different dictionary visibility do not share metadata.
-std::string EndpointKey(const ofquack::FusionConfig &config);
+std::string EndpointKey(const ofquack::FusionConfig &config, const std::string &schema);
 
 //! The principal component of EndpointKey, or empty when a browser secret has
 //! no token whose subject can identify the cache owner.

@@ -90,7 +90,7 @@ struct FusionAttachedState {
 			tables.clear();
 			if (!cache.TryGetTables(endpoint_key, CATALOG_CACHE_TTL_SECONDS, tables)) {
 				int64_t expected = -1;
-				tables = ofquack::FetchTables(*transport, RequestContextFor(context), {"TABLE", "VIEW"},
+				tables = ofquack::FetchTables(*transport, RequestContextFor(context), options.schema, {"TABLE", "VIEW"},
 				                              MetadataPageSize(context, {}), &expected);
 				cache.PutTables(endpoint_key, tables, expected);
 			}
@@ -150,7 +150,7 @@ struct FusionAttachedState {
 			columns.clear();
 			if (!cache.TryGetOrderKey(endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns)) {
 				const auto request_context = RequestContextFor(context);
-				columns = ofquack::FetchPrimaryKey(*transport, request_context, table.name);
+				columns = ofquack::FetchPrimaryKey(*transport, request_context, options.schema, table.name);
 				if (columns.empty()) {
 					std::unordered_set<string> nullable;
 					for (const auto &column : Columns(context, table)) {
@@ -158,7 +158,7 @@ struct FusionAttachedState {
 							nullable.insert(StringUtil::Upper(column.name));
 						}
 					}
-					for (const auto &index : ofquack::FetchUniqueIndexes(*transport, request_context, table.name)) {
+					for (const auto &index : ofquack::FetchUniqueIndexes(*transport, request_context, options.schema, table.name)) {
 						bool usable = true;
 						for (const auto &column : index.columns) {
 							usable = usable && nullable.count(StringUtil::Upper(column)) == 0;
@@ -196,8 +196,8 @@ struct FusionAttachedState {
 				const auto request_context = RequestContextFor(context);
 				// Views are not in FND_COLUMNS; tables are looked up by TABLE_ID.
 				columns = StringUtil::CIEquals(table.type, "VIEW") || table.table_id.empty()
-				              ? ofquack::FetchColumnsOfView(*transport, request_context, table.name)
-				              : ofquack::FetchColumnsOfTables(*transport, request_context, {table});
+				              ? ofquack::FetchColumnsOfView(*transport, request_context, options.schema, table.name)
+				              : ofquack::FetchColumnsOfTables(*transport, request_context, options.schema, {table});
 				cache.PutColumns(endpoint_key, table.name, columns);
 			}
 		}
@@ -940,7 +940,7 @@ unique_ptr<Catalog> FusionAttach(optional_ptr<StorageExtensionInfo>, ClientConte
 
 	state->config = ResolveFusionConfig(context, parameters, state->options);
 	RequireUsableCredentials(state->config);
-	state->endpoint_key = EndpointKey(state->config);
+	state->endpoint_key = EndpointKey(state->config, state->options.schema);
 	state->transport = ofquack::CreateTransport(state->config);
 
 	// DuckDB builds a local StorageManager for a DuckCatalog from info.path,

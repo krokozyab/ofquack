@@ -78,12 +78,12 @@ std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint6
 	return oss.str();
 }
 
-std::string TablesAfter(const std::vector<std::string> &types, const std::string &after_name,
-                        const std::string &after_type, uint64_t page_size) {
+std::string TablesAfter(const std::string &schema, const std::vector<std::string> &types,
+                        const std::string &after_name, const std::string &after_type, uint64_t page_size) {
 	const auto type_list = types.empty() ? std::string("'TABLE','VIEW'") : JoinQuoted(types);
 	std::ostringstream oss;
 	oss << "SELECT CAST(NULL AS VARCHAR2(1)) AS TABLE_CAT,"
-	    << " '" << SCHEMA << "' AS TABLE_SCHEM,"
+	    << " '" << QuoteLiteral(Upper(schema)) << "' AS TABLE_SCHEM,"
 	    << " t.table_name, t.table_type,"
 	    << " t.description AS REMARKS,"
 	    << " t.table_id AS TABLE_ID"
@@ -123,10 +123,10 @@ std::string TableCount(const std::vector<std::string> &types) {
 	return oss.str();
 }
 
-std::string ColumnsByTableIds(const std::vector<std::string> &table_ids) {
+std::string ColumnsByTableIds(const std::string &schema, const std::vector<std::string> &table_ids) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS TABLE_CAT,"
-	    << " '" << SCHEMA << "' AS TABLE_SCHEM,"
+	    << " '" << QuoteLiteral(Upper(schema)) << "' AS TABLE_SCHEM,"
 	    << " t.table_name AS TABLE_NAME,"
 	    // user_column_name is the display name and is not always populated;
 	    // falling back to the physical name keeps a table from arriving with
@@ -153,7 +153,7 @@ std::string ColumnsByTableIds(const std::vector<std::string> &table_ids) {
 	return oss.str();
 }
 
-std::string ColumnsOfViews(const std::string &table_name) {
+std::string ColumnsOfViews(const std::string &schema, const std::string &table_name) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS TABLE_CAT,"
 	    << " owner AS TABLE_SCHEM,"
@@ -168,7 +168,7 @@ std::string ColumnsOfViews(const std::string &table_name) {
 	    << " CASE WHEN nullable = 'Y' THEN 1 ELSE 0 END AS NULLABLE,"
 	    << " column_id AS ORDINAL_POSITION"
 	    << " FROM all_tab_columns"
-	    << " WHERE owner = '" << SCHEMA << "'"
+	    << " WHERE owner = '" << QuoteLiteral(Upper(schema)) << "'"
 	    // Oracle dictionary object names are stored in upper case. Keep the
 	    // indexed column bare: this lookup is on the hot path while views warm.
 	    << " AND table_name = '" << QuoteLiteral(Upper(table_name)) << "'"
@@ -176,7 +176,7 @@ std::string ColumnsOfViews(const std::string &table_name) {
 	return oss.str();
 }
 
-std::string PrimaryKeys(const std::string &table_name) {
+std::string PrimaryKeys(const std::string &schema, const std::string &table_name) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS TABLE_CAT,"
 	    << " c.owner AS TABLE_SCHEM,"
@@ -188,7 +188,7 @@ std::string PrimaryKeys(const std::string &table_name) {
 	    << " JOIN all_cons_columns cc ON c.constraint_name = cc.constraint_name"
 	    << " AND c.owner = cc.owner AND c.table_name = cc.table_name"
 	    << " WHERE c.constraint_type = 'P'"
-	    << " AND c.owner = '" << SCHEMA << "'"
+	    << " AND c.owner = '" << QuoteLiteral(Upper(schema)) << "'"
 	    // Bare column, upper-cased value: Oracle stores dictionary object names in
 	    // upper case, and wrapping the column loses the index on it.
 	    << " AND c.table_name = '" << QuoteLiteral(Upper(table_name)) << "'"
@@ -196,7 +196,7 @@ std::string PrimaryKeys(const std::string &table_name) {
 	return oss.str();
 }
 
-std::string ForeignKeys(const std::string &table_name) {
+std::string ForeignKeys(const std::string &schema, const std::string &table_name) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS PKTABLE_CAT,"
 	    << " r.owner AS PKTABLE_SCHEM, r.table_name AS PKTABLE_NAME, rc.column_name AS PKCOLUMN_NAME,"
@@ -212,7 +212,7 @@ std::string ForeignKeys(const std::string &table_name) {
 	    << " JOIN all_cons_columns rc ON r.constraint_name = rc.constraint_name AND r.owner = rc.owner"
 	    << " WHERE c.constraint_type = 'R'"
 	    << " AND cc.position = rc.position"
-	    << " AND c.owner = '" << SCHEMA << "'"
+	    << " AND c.owner = '" << QuoteLiteral(Upper(schema)) << "'"
 	    // Bare column, upper-cased value: Oracle stores dictionary object names in
 	    // upper case, and wrapping the column loses the index on it.
 	    << " AND c.table_name = '" << QuoteLiteral(Upper(table_name)) << "'"
@@ -220,7 +220,7 @@ std::string ForeignKeys(const std::string &table_name) {
 	return oss.str();
 }
 
-std::string Indexes(const std::string &table_name, bool unique_only) {
+std::string Indexes(const std::string &schema, const std::string &table_name, bool unique_only) {
 	std::ostringstream oss;
 	oss << "SELECT NULL AS TABLE_CAT,"
 	    << " idx.owner AS TABLE_SCHEM, idx.table_name AS TABLE_NAME,"
@@ -232,7 +232,7 @@ std::string Indexes(const std::string &table_name, bool unique_only) {
 	    << " NULL AS CARDINALITY, NULL AS PAGES, NULL AS FILTER_CONDITION"
 	    << " FROM all_indexes idx"
 	    << " JOIN all_ind_columns ic ON ic.index_owner = idx.owner AND ic.index_name = idx.index_name"
-	    << " WHERE idx.owner = '" << SCHEMA << "'"
+	    << " WHERE idx.owner = '" << QuoteLiteral(Upper(schema)) << "'"
 	    // Bare column, upper-cased value: Oracle stores dictionary object names in
 	    // upper case, and wrapping the column loses the index on it.
 	    << " AND idx.table_name = '" << QuoteLiteral(Upper(table_name)) << "'";

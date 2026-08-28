@@ -141,7 +141,7 @@ std::string CachePrincipal(const ofquack::FusionConfig &config) {
 	return subject.empty() ? std::string() : "bearer:" + subject;
 }
 
-std::string EndpointKey(const ofquack::FusionConfig &config) {
+std::string EndpointKey(const ofquack::FusionConfig &config, const std::string &schema) {
 	auto principal = CachePrincipal(config);
 	if (principal.empty()) {
 		principal = "bearer:unknown";
@@ -149,7 +149,9 @@ std::string EndpointKey(const ofquack::FusionConfig &config) {
 	const auto part = [](const std::string &value) {
 		return std::to_string(value.size()) + ":" + value;
 	};
-	return part(config.endpoint) + part(config.report_path) + part(principal);
+	// The schema decides which objects the dictionary queries can see, so two
+	// secrets that differ only there describe different catalogues.
+	return part(config.endpoint) + part(config.report_path) + part(principal) + part(schema);
 }
 
 MetadataCache &MetadataCache::Get() {

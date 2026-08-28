@@ -78,7 +78,7 @@ waiting for a person.
 |---|---|---|
 | `ENDPOINT` | both | Your instance, e.g. `https://fa-xxxx-dev1.fa.ocs.oraclecloud.com`. The BI Publisher service path is appended for you; give the full `…/xmlpserver/services/ExternalReportWSSService?WSDL` URL only if yours is non-standard. |
 | `REPORT_PATH` | both | Absolute path of the deployed report, e.g. `/Custom/Financials/RP_ARB.xdo`. |
-| `SCHEMA` | both | Schema name reported for dictionary objects. Defaults to `FUSION`. |
+| `SCHEMA` | both | Owner the dictionary queries filter on, and the schema reported for dictionary objects. Defaults to `FUSION`, which is what every instance seen so far uses. Upper-cased before it is compared. Part of the metadata cache key, so two secrets differing only here keep separate caches. |
 | `FETCH_SIZE` | both | Rows per request, 1–10000, or `0` for a single request. Default 500. |
 | `SECURED_VIEWS` | both | `true` rewrites HR tables to their `*_SECURED_LIST_V` equivalents. |
 | `CONNECT_TIMEOUT` | both | Seconds to wait for the connection. Default 30. |

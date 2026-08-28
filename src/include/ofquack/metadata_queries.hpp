@@ -40,8 +40,14 @@ constexpr uint64_t COLUMN_PAGE_SIZE = 400;
 //! columns stays under that.
 constexpr size_t COLUMN_BATCH_SIZE = 10;
 
-//! Fusion's dictionary presents everything under one schema.
-constexpr const char *SCHEMA = "FUSION";
+//! The owner Fusion's dictionary objects live under. Every instance seen so far
+//! uses this one, which is why it is a default rather than a required setting --
+//! but the view and constraint queries filter on it, so a deployment that
+//! differs has to be able to say so. `SCHEMA` on the secret overrides it.
+//!
+//! Not DEFAULT_SCHEMA: DuckDB defines that as a macro for "main"
+//! (duckdb/common/constants.hpp), and this header is reached through duckdb.hpp.
+constexpr const char *DICTIONARY_SCHEMA = "FUSION";
 
 //! Limits a statement to rows (offset, offset + page_size].
 //!
@@ -60,8 +66,8 @@ std::string PaginateByOffset(const std::string &base_sql, uint64_t offset, uint6
 //! timeouts and resource limits. Seeking keeps that cost independent of depth.
 //!
 //! Seeking from the last name seen costs the same at any depth.
-std::string TablesAfter(const std::vector<std::string> &types, const std::string &after_name,
-                        const std::string &after_type, uint64_t page_size);
+std::string TablesAfter(const std::string &schema, const std::vector<std::string> &types,
+                        const std::string &after_name, const std::string &after_type, uint64_t page_size);
 
 //! How many tables and views the dictionary holds.
 //!
@@ -72,16 +78,16 @@ std::string TableCount(const std::vector<std::string> &types);
 
 //! Columns of the given tables, looked up by the TABLE_ID that TablesByTypes
 //! returned.
-std::string ColumnsByTableIds(const std::vector<std::string> &table_ids);
+std::string ColumnsByTableIds(const std::string &schema, const std::vector<std::string> &table_ids);
 
 //! Columns of one view. Views are not in FND_COLUMNS, so ALL_TAB_COLUMNS is the
 //! only source. The name is compared exactly: underscores in Oracle object
 //! names must not become LIKE wildcards and merge several schemas together.
-std::string ColumnsOfViews(const std::string &table_name);
+std::string ColumnsOfViews(const std::string &schema, const std::string &table_name);
 
-std::string PrimaryKeys(const std::string &table_name);
-std::string ForeignKeys(const std::string &table_name);
-std::string Indexes(const std::string &table_name, bool unique_only);
+std::string PrimaryKeys(const std::string &schema, const std::string &table_name);
+std::string ForeignKeys(const std::string &schema, const std::string &table_name);
+std::string Indexes(const std::string &schema, const std::string &table_name, bool unique_only);
 
 //! Escapes a value for embedding in a single-quoted Oracle literal.
 //!

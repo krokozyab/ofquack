@@ -95,6 +95,7 @@ void AddFusionNamedParameters(TableFunction &function) {
 	function.named_parameters["username"] = LogicalType::VARCHAR;
 	function.named_parameters["password"] = LogicalType::VARCHAR;
 	function.named_parameters["fetch_size"] = LogicalType::UBIGINT;
+	function.named_parameters["schema"] = LogicalType::VARCHAR;
 	function.named_parameters["secured_views"] = LogicalType::BOOLEAN;
 	function.named_parameters["all_varchar"] = LogicalType::BOOLEAN;
 	function.named_parameters["stable_paging"] = LogicalType::BOOLEAN;
@@ -203,6 +204,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 		if (!secret_fetch_size.IsNull()) {
 			options.fetch_size = secret_fetch_size.GetValue<idx_t>();
 		}
+		const auto secret_schema = secret.TryGetValue("schema");
+		if (!secret_schema.IsNull() && !secret_schema.ToString().empty()) {
+			options.schema = secret_schema.ToString();
+		}
 		const auto secret_secured_views = secret.TryGetValue("secured_views");
 		if (!secret_secured_views.IsNull()) {
 			options.secured_views = secret_secured_views.GetValue<bool>();
@@ -228,6 +233,10 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 	const auto fetch_size_override = NamedParameter(named_parameters, "fetch_size");
 	if (!fetch_size_override.IsNull()) {
 		options.fetch_size = fetch_size_override.GetValue<idx_t>();
+	}
+	const auto schema_override = NamedString(named_parameters, "schema");
+	if (!schema_override.empty()) {
+		options.schema = schema_override;
 	}
 	const auto secured_views_override = NamedParameter(named_parameters, "secured_views");
 	if (!secured_views_override.IsNull()) {

@@ -157,13 +157,13 @@ int TypePriority(const std::string &type) {
 
 } // namespace
 
-std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context,
+std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestContext &context, const std::string &schema,
                                    const std::vector<std::string> &types, uint64_t page_size, int64_t *expected_out) {
 	const auto rows_per_page = page_size > 0 ? page_size : metadata::TABLE_LIST_PAGE_SIZE;
 	// Asked before the listing rather than after, so that a listing which comes
 	// back short is recognised as short by whoever asked for it -- the catalog
 	// and the cache warmer just as much as oracle_fusion_tables().
-	const auto expected = FetchTableCount(transport, context, types);
+	const auto expected = FetchTableCount(transport, context, schema, types);
 	if (expected_out) {
 		*expected_out = expected;
 	}
@@ -173,7 +173,7 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 	std::string after_name;
 	std::string after_type;
 	for (;;) {
-		auto page = Query(transport, context, metadata::TablesAfter(types, after_name, after_type, rows_per_page));
+		auto page = Query(transport, context, metadata::TablesAfter(schema, types, after_name, after_type, rows_per_page));
 		if (page.empty()) {
 			// An empty page is how the end of the data looks. Before the end is
 			// believed, the same page is asked once more on a fresh session --
@@ -184,7 +184,7 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 			// stays because it is cheap and the failure it guards against is
 			// silent.)
 			transport.ResetSession();
-			page = Query(transport, context, metadata::TablesAfter(types, after_name, after_type, rows_per_page));
+			page = Query(transport, context, metadata::TablesAfter(schema, types, after_name, after_type, rows_per_page));
 			if (page.empty()) {
 				break;
 			}
@@ -263,7 +263,7 @@ std::vector<TableInfo> FetchTables(FusionTransport &transport, const RequestCont
 	return tables;
 }
 
-int64_t FetchTableCount(FusionTransport &transport, const RequestContext &context,
+int64_t FetchTableCount(FusionTransport &transport, const RequestContext &context, const std::string &schema,
                         const std::vector<std::string> &types) {
 	try {
 		const auto rows = Query(transport, context, metadata::TableCount(types));
@@ -291,7 +291,7 @@ int64_t FetchTableCount(FusionTransport &transport, const RequestContext &contex
 	}
 }
 
-std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const RequestContext &context,
+std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const RequestContext &context, const std::string &schema,
                                              const std::vector<TableInfo> &tables) {
 	// Maps the FND id back to the name, so a batched response can be split up.
 	std::unordered_map<std::string, std::string> name_by_id;
@@ -310,7 +310,7 @@ std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const R
 		const std::vector<std::string> batch(ids.begin() + static_cast<std::ptrdiff_t>(start),
 		                                     ids.begin() + static_cast<std::ptrdiff_t>(end));
 
-		for (const auto &row : QueryPaged(transport, context, metadata::ColumnsByTableIds(batch))) {
+		for (const auto &row : QueryPaged(transport, context, metadata::ColumnsByTableIds(schema, batch))) {
 			ColumnInfo column;
 			column.table_name = Field(row, "TABLE_NAME");
 			if (column.table_name.empty()) {
@@ -347,11 +347,11 @@ std::vector<ColumnInfo> FetchColumnsOfTables(FusionTransport &transport, const R
 	return columns;
 }
 
-std::vector<ColumnInfo> FetchColumnsOfView(FusionTransport &transport, const RequestContext &context,
+std::vector<ColumnInfo> FetchColumnsOfView(FusionTransport &transport, const RequestContext &context, const std::string &schema,
                                            const std::string &view_name) {
 	std::vector<ColumnInfo> columns;
 	std::unordered_set<std::string> seen;
-	for (const auto &row : QueryPaged(transport, context, metadata::ColumnsOfViews(view_name))) {
+	for (const auto &row : QueryPaged(transport, context, metadata::ColumnsOfViews(schema, view_name))) {
 		ColumnInfo column;
 		column.table_name = Field(row, "TABLE_NAME");
 		column.name = Field(row, "COLUMN_NAME");
@@ -374,9 +374,9 @@ std::vector<ColumnInfo> FetchColumnsOfView(FusionTransport &transport, const Req
 	return columns;
 }
 
-std::vector<IndexInfo> FetchUniqueIndexes(FusionTransport &transport, const RequestContext &context,
+std::vector<IndexInfo> FetchUniqueIndexes(FusionTransport &transport, const RequestContext &context, const std::string &schema,
                                           const std::string &table_name) {
-	auto rows = Query(transport, context, metadata::Indexes(table_name, true));
+	auto rows = Query(transport, context, metadata::Indexes(schema, table_name, true));
 	std::sort(rows.begin(), rows.end(), [](const ReportRow &a, const ReportRow &b) {
 		const auto name_a = Field(a, "INDEX_NAME");
 		const auto name_b = Field(b, "INDEX_NAME");
@@ -405,9 +405,9 @@ std::vector<IndexInfo> FetchUniqueIndexes(FusionTransport &transport, const Requ
 	return indexes;
 }
 
-std::vector<std::string> FetchPrimaryKey(FusionTransport &transport, const RequestContext &context,
+std::vector<std::string> FetchPrimaryKey(FusionTransport &transport, const RequestContext &context, const std::string &schema,
                                          const std::string &table_name) {
-	auto rows = Query(transport, context, metadata::PrimaryKeys(table_name));
+	auto rows = Query(transport, context, metadata::PrimaryKeys(schema, table_name));
 	std::sort(rows.begin(), rows.end(),
 	          [](const ReportRow &a, const ReportRow &b) { return IntField(a, "KEY_SEQ") < IntField(b, "KEY_SEQ"); });
 

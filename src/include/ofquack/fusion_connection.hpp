@@ -2,6 +2,7 @@
 
 #include "duckdb.hpp"
 #include "ofquack/browser_auth.hpp"
+#include "ofquack/metadata_queries.hpp"
 #include "ofquack/transport.hpp"
 
 namespace duckdb {
@@ -12,6 +13,9 @@ struct FusionScanOptions {
 	ofquack::BrowserAuthSettings sso;
 	//! Rows per request. 0 disables paging: one request, whatever comes back.
 	idx_t fetch_size = 500;
+	//! The owner the dictionary queries filter on. Part of the metadata cache
+	//! key, so two secrets that differ only here do not share cached rows.
+	std::string schema = ofquack::metadata::DICTIONARY_SCHEMA;
 	bool secured_views = false;
 	//! Skips type inference and returns every column as VARCHAR, for when a
 	//! guess from the first page would be wrong for the rest of the data.

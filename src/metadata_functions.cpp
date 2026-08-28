@@ -109,7 +109,8 @@ int64_t TtlFor(const named_parameter_map_t &named_parameters) {
 }
 
 std::vector<ofquack::TableInfo> LoadTables(ClientContext &context, MetadataCache &cache,
-                                           const std::string &endpoint_key, ofquack::FusionTransport &transport,
+                                           const std::string &endpoint_key, const std::string &schema,
+                                           ofquack::FusionTransport &transport,
                                            const ofquack::RequestContext &request_context, int64_t ttl_seconds,
                                            uint64_t page_size, bool refresh, bool *stored_out = nullptr,
                                            int64_t *expected_out = nullptr) {
@@ -134,7 +135,7 @@ std::vector<ofquack::TableInfo> LoadTables(ClientContext &context, MetadataCache
 
 	int64_t expected = -1;
 	tables = WithTranslatedErrors(
-	    [&]() { return ofquack::FetchTables(transport, request_context, {"TABLE", "VIEW"}, page_size, &expected); });
+	    [&]() { return ofquack::FetchTables(transport, request_context, schema, {"TABLE", "VIEW"}, page_size, &expected); });
 	const auto stored = cache.PutTables(endpoint_key, tables, expected);
 	if (stored_out) {
 		*stored_out = stored;
@@ -158,13 +159,13 @@ unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInp
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	RequireUsableCredentials(config);
-	const auto endpoint_key = EndpointKey(config);
+	const auto endpoint_key = EndpointKey(config, options.schema);
 
 	auto &cache = MetadataCache::Get();
 	const bool refresh = WantsRefresh(input.named_parameters);
 	auto transport = ofquack::CreateTransport(config);
 	const auto request_context = ContextFor(context);
-	auto tables = LoadTables(context, cache, endpoint_key, *transport, request_context, TtlFor(input.named_parameters),
+	auto tables = LoadTables(context, cache, endpoint_key, options.schema, *transport, request_context, TtlFor(input.named_parameters),
 	                         MetadataPageSize(context, input.named_parameters), refresh);
 
 	auto bind_data = make_uniq<MaterialisedBindData>();
@@ -213,7 +214,7 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	RequireUsableCredentials(config);
-	const auto endpoint_key = EndpointKey(config);
+	const auto endpoint_key = EndpointKey(config, options.schema);
 
 	auto &cache = MetadataCache::Get();
 	std::vector<ofquack::ColumnInfo> columns;
@@ -231,15 +232,15 @@ unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindIn
 				// Columns of a table are looked up by its FND id, which means the
 				// table list is needed first; the list is itself cached, so this is
 				// usually free.
-				auto tables = LoadTables(context, cache, endpoint_key, *transport, request_context, ttl,
+				auto tables = LoadTables(context, cache, endpoint_key, options.schema, *transport, request_context, ttl,
 				                         MetadataPageSize(context, input.named_parameters), refresh);
 				for (const auto &table : tables) {
 					if (StringUtil::CIEquals(table.name, table_name)) {
 						// Views are not in FND_COLUMNS at all.
 						if (StringUtil::CIEquals(table.type, "VIEW") || table.table_id.empty()) {
-							return ofquack::FetchColumnsOfView(*transport, request_context, table.name);
+							return ofquack::FetchColumnsOfView(*transport, request_context, options.schema, table.name);
 						}
-						return ofquack::FetchColumnsOfTables(*transport, request_context, {table});
+						return ofquack::FetchColumnsOfTables(*transport, request_context, options.schema, {table});
 					}
 				}
 				throw BinderException("Oracle Fusion has no table or view named '%s'", table_name);
@@ -328,7 +329,7 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	RequireUsableCredentials(config);
-	const auto endpoint_key = EndpointKey(config);
+	const auto endpoint_key = EndpointKey(config, options.schema);
 
 	const auto pattern_parameter = input.named_parameters.find("pattern");
 	if (pattern_parameter == input.named_parameters.end() || pattern_parameter->second.IsNull() ||
@@ -362,7 +363,7 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 	const auto ttl = TtlFor(input.named_parameters);
 	bool tables_stored = false;
 	int64_t tables_expected = -1;
-	auto tables = LoadTables(context, cache, endpoint_key, *transport, request_context, ttl,
+	auto tables = LoadTables(context, cache, endpoint_key, options.schema, *transport, request_context, ttl,
 	                         MetadataPageSize(context, input.named_parameters), false, &tables_stored,
 	                         &tables_expected);
 	if (!tables_stored) {
@@ -429,7 +430,7 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 		for (const auto &table : wanted) {
 			if (StringUtil::CIEquals(table.type, "VIEW") || table.table_id.empty()) {
 				try {
-					auto columns = ofquack::FetchColumnsOfView(*transport, request_context, table.name);
+					auto columns = ofquack::FetchColumnsOfView(*transport, request_context, options.schema, table.name);
 					columns_written += static_cast<int64_t>(columns.size());
 					warmed += columns.empty() ? 0 : 1;
 					failed += columns.empty() ? 1 : 0;
@@ -475,7 +476,7 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 		                                            batchable.begin() + static_cast<std::ptrdiff_t>(end));
 		std::vector<ofquack::ColumnInfo> columns;
 		try {
-			columns = ofquack::FetchColumnsOfTables(*transport, request_context, batch);
+			columns = ofquack::FetchColumnsOfTables(*transport, request_context, options.schema, batch);
 		} catch (const ofquack::CancelledError &) {
 			throw InterruptException();
 		} catch (const ofquack::AuthenticationError &error) {
@@ -558,7 +559,7 @@ unique_ptr<FunctionData> CacheStatusBind(ClientContext &context, TableFunctionBi
 		display_endpoint = config.endpoint;
 		principal = CachePrincipal(config);
 		if (!principal.empty()) {
-			endpoint_key = EndpointKey(config);
+			endpoint_key = EndpointKey(config, options.schema);
 		}
 	} catch (const std::exception &) {
 		endpoint_key.clear();
@@ -606,7 +607,7 @@ unique_ptr<FunctionData> CacheInvalidateBind(ClientContext &context, TableFuncti
                                              vector<LogicalType> &return_types, vector<string> &names) {
 	FusionScanOptions options;
 	const auto config = ResolveFusionConfig(context, input.named_parameters, options);
-	const auto endpoint_key = EndpointKey(config);
+	const auto endpoint_key = EndpointKey(config, options.schema);
 
 	std::string table_name;
 	const auto table_name_parameter = input.named_parameters.find("table_name");

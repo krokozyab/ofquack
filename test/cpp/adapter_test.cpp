@@ -1428,7 +1428,54 @@ void TestCacheIsKeyedByPrincipal() {
 	first.username = "alice";
 	FusionConfig second = first;
 	second.username = "bob";
-	CHECK(duckdb::EndpointKey(first) != duckdb::EndpointKey(second));
+	CHECK(duckdb::EndpointKey(first, ofquack::metadata::DICTIONARY_SCHEMA) !=
+	      duckdb::EndpointKey(second, ofquack::metadata::DICTIONARY_SCHEMA));
+	// The schema decides which objects the dictionary queries can see, so the
+	// same instance under two owners is two catalogues, not one.
+	CHECK(duckdb::EndpointKey(first, "FUSION") != duckdb::EndpointKey(first, "CUSTOM"));
+}
+
+//! SCHEMA was accepted by CREATE SECRET and read by nothing: the owner the
+//! dictionary queries filter on was a compile-time constant, so a deployment
+//! that did not use FUSION had no way to say so and got an empty catalogue.
+void TestSecretSchemaReachesTheDictionaryQueries() {
+	ResetCache();
+	Script script;
+	struct RecordingTransport : FusionTransport {
+		Script &script;
+		explicit RecordingTransport(Script &script_p) : script(script_p) {
+		}
+		std::string Execute(const std::string &sql, const RequestContext &) override {
+			script.executed_sql.push_back(sql);
+			if (sql.find("COUNT(DISTINCT") != std::string::npos) {
+				return MakeSoapResponse(MakeReportXML(
+				    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_COUNT&gt;1&lt;/TABLE_COUNT&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+			}
+			if (AsksForALaterPage(sql)) {
+				return MakeSoapResponse(MakeReportXML("&lt;ROWSET/&gt;"));
+			}
+			return MakeSoapResponse(MakeReportXML(
+			    "&lt;ROWSET&gt;&lt;ROW&gt;&lt;TABLE_NAME&gt;SOME_V&lt;/TABLE_NAME&gt;"
+			    "&lt;TABLE_TYPE&gt;VIEW&lt;/TABLE_TYPE&gt;&lt;TABLE_ID&gt;&lt;/TABLE_ID&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
+		}
+	};
+	ScopedTransportFactory installed(
+	    [&script](const FusionConfig &) { return std::make_shared<RecordingTransport>(script); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	RunQuery(connection, "CREATE OR REPLACE SECRET fusion (TYPE oracle_fusion, ENDPOINT 'https://fusion.example.com', "
+	                     "REPORT_PATH '/Custom/RP_ARB.xdo', USERNAME 'u', PASSWORD 'p', SCHEMA 'custom_owner')");
+	RunQuery(connection, "SELECT * FROM oracle_fusion_columns('SOME_V')");
+
+	bool asked_custom_owner = false;
+	bool asked_fusion = false;
+	for (const auto &sql : script.executed_sql) {
+		asked_custom_owner = asked_custom_owner || sql.find("owner = 'CUSTOM_OWNER'") != std::string::npos;
+		asked_fusion = asked_fusion || sql.find("owner = 'FUSION'") != std::string::npos;
+	}
+	CHECK(asked_custom_owner);
+	CHECK(!asked_fusion);
 }
 
 //! Unknown completeness is not complete. The status must also distinguish
@@ -1510,7 +1557,7 @@ void TestMetadataShortPageEndsImmediately() {
 	table.type = "TABLE";
 	table.table_id = "1";
 
-	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
+	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), ofquack::metadata::DICTIONARY_SCHEMA, {table});
 	CHECK(columns.size() == 1);
 	CHECK(transport.requests == 1);
 	CHECK(transport.resets == 0);
@@ -1554,7 +1601,7 @@ void TestMetadataColumnPageSizeControlsQueryAndCompletion() {
 	table.type = "TABLE";
 	table.table_id = "1";
 
-	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
+	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), ofquack::metadata::DICTIONARY_SCHEMA, {table});
 	CHECK(columns.size() == ofquack::metadata::COLUMN_PAGE_SIZE);
 	CHECK(transport.requests == 2);
 	CHECK(transport.resets == 0);
@@ -1588,7 +1635,7 @@ void TestMetadataTruncatedShortPageContinues() {
 	table.type = "TABLE";
 	table.table_id = "1";
 
-	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), {table});
+	const auto columns = ofquack::FetchColumnsOfTables(transport, RequestContext::None(), ofquack::metadata::DICTIONARY_SCHEMA, {table});
 	CHECK(columns.size() == 2);
 	CHECK(columns[0].name == "C1");
 	CHECK(columns[1].name == "C2");
@@ -1966,7 +2013,7 @@ void TestUniqueIndexesArriveGroupedAndNarrowestFirst() {
 	    "&lt;/ROWSET&gt;"));
 	FakeTransport transport(script, FusionConfig());
 
-	const auto indexes = ofquack::FetchUniqueIndexes(transport, RequestContext(), "AP_INVOICES_ALL");
+	const auto indexes = ofquack::FetchUniqueIndexes(transport, RequestContext(), ofquack::metadata::DICTIONARY_SCHEMA, "AP_INVOICES_ALL");
 
 	CHECK(indexes.size() == 2);
 	CHECK(indexes[0].name == "AP_INVOICES_U1");
@@ -2713,6 +2760,7 @@ const TestCase TESTS[] = {
     {"cache status does not call unknown complete", TestCacheStatusDoesNotCallUnknownComplete},
     {"cache is keyed by endpoint", TestCacheIsKeyedByEndpoint},
     {"cache is keyed by principal", TestCacheIsKeyedByPrincipal},
+    {"secret schema reaches the dictionary queries", TestSecretSchemaReachesTheDictionaryQueries},
     {"secured views rewrite is applied", TestSecuredViewsRewriteIsApplied},
     {"secured views is off by default", TestSecuredViewsIsOffByDefault},
     {"attach options reach the scan", TestAttachOptionsReachTheScan},

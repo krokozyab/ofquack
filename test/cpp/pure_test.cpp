@@ -856,7 +856,7 @@ void TestApplySecuredViews() {
 // ---------------------------------------------------------------------------
 
 void TestMetadataQueriesUseFusionDictionary() {
-	const auto tables = ofquack::metadata::TablesAfter({"TABLE", "VIEW"}, "", "", 400);
+	const auto tables = ofquack::metadata::TablesAfter(ofquack::metadata::DICTIONARY_SCHEMA, {"TABLE", "VIEW"}, "", "", 400);
 	// FND_VIEWS and FND_TABLES, not ALL_TABLES: only Fusion's own dictionary
 	// carries TABLE_ID, and TABLE_ID is how columns are found.
 	CHECK(Contains(tables, "FROM FND_VIEWS"));
@@ -864,7 +864,7 @@ void TestMetadataQueriesUseFusionDictionary() {
 	CHECK(Contains(tables, "t.table_id AS TABLE_ID"));
 	CHECK(Contains(tables, "'TABLE','VIEW'"));
 
-	const auto columns = ofquack::metadata::ColumnsByTableIds({"101", "102"});
+	const auto columns = ofquack::metadata::ColumnsByTableIds(ofquack::metadata::DICTIONARY_SCHEMA, {"101", "102"});
 	CHECK(Contains(columns, "FROM FND_COLUMNS c"));
 	CHECK(Contains(columns, "JOIN FND_TABLES t ON c.table_id = t.table_id"));
 	CHECK(Contains(columns, "IN (101,102)"));
@@ -877,34 +877,34 @@ void TestMetadataQueriesUseFusionDictionary() {
 	CHECK(Contains(columns, "c.\"PRECISION\" AS DECIMAL_DIGITS"));
 	CHECK(Contains(columns, "c.\"SCALE\" AS NUM_PREC_RADIX"));
 	CHECK(!Contains(columns, "THEN 10 ELSE NULL END AS NUM_PREC_RADIX"));
-	CHECK(Contains(ofquack::metadata::ColumnsOfViews("V"), "data_precision AS DECIMAL_DIGITS"));
-	CHECK(Contains(ofquack::metadata::ColumnsOfViews("V"), "data_scale AS NUM_PREC_RADIX"));
+	CHECK(Contains(ofquack::metadata::ColumnsOfViews(ofquack::metadata::DICTIONARY_SCHEMA, "V"), "data_precision AS DECIMAL_DIGITS"));
+	CHECK(Contains(ofquack::metadata::ColumnsOfViews(ofquack::metadata::DICTIONARY_SCHEMA, "V"), "data_scale AS NUM_PREC_RADIX"));
 
 	// Views are not in FND_COLUMNS at all, and a concrete object name is an
 	// equality comparison: underscores in it must not become LIKE wildcards.
-	const auto view_columns = ofquack::metadata::ColumnsOfViews("GL_BALANCES_V");
+	const auto view_columns = ofquack::metadata::ColumnsOfViews(ofquack::metadata::DICTIONARY_SCHEMA, "GL_BALANCES_V");
 	CHECK(Contains(view_columns, "FROM all_tab_columns"));
 	CHECK(Contains(view_columns, "table_name = 'GL_BALANCES_V'"));
 	CHECK(!Contains(view_columns, "UPPER(table_name)"));
 	CHECK(!Contains(view_columns, "table_name LIKE"));
-	CHECK(Contains(ofquack::metadata::PrimaryKeys("T"), "constraint_type = 'P'"));
-	CHECK(Contains(ofquack::metadata::ForeignKeys("T"), "constraint_type = 'R'"));
+	CHECK(Contains(ofquack::metadata::PrimaryKeys(ofquack::metadata::DICTIONARY_SCHEMA, "T"), "constraint_type = 'P'"));
+	CHECK(Contains(ofquack::metadata::ForeignKeys(ofquack::metadata::DICTIONARY_SCHEMA, "T"), "constraint_type = 'R'"));
 	// The predicate, not the CASE in the select list, which is always there.
-	CHECK(Contains(ofquack::metadata::Indexes("T", true), "AND idx.uniqueness = 'UNIQUE'"));
-	CHECK(!Contains(ofquack::metadata::Indexes("T", false), "AND idx.uniqueness = 'UNIQUE'"));
+	CHECK(Contains(ofquack::metadata::Indexes(ofquack::metadata::DICTIONARY_SCHEMA, "T", true), "AND idx.uniqueness = 'UNIQUE'"));
+	CHECK(!Contains(ofquack::metadata::Indexes(ofquack::metadata::DICTIONARY_SCHEMA, "T", false), "AND idx.uniqueness = 'UNIQUE'"));
 
 	// Every object-name lookup compares the bare column against an upper-cased
 	// value. Oracle stores dictionary object names in upper case, so UPPER() on
 	// the column matches nothing extra and only costs the index -- and these run
 	// once per attached table, against dictionary views the size of ALL_INDEXES.
 	// The caller's spelling is what gets normalised.
-	CHECK(Contains(ofquack::metadata::PrimaryKeys("gl_je_lines"), "AND c.table_name = 'GL_JE_LINES'"));
-	CHECK(Contains(ofquack::metadata::ForeignKeys("gl_je_lines"), "AND c.table_name = 'GL_JE_LINES'"));
-	CHECK(Contains(ofquack::metadata::Indexes("gl_je_lines", true), "AND idx.table_name = 'GL_JE_LINES'"));
-	CHECK(!Contains(ofquack::metadata::PrimaryKeys("T"), "UPPER("));
-	CHECK(!Contains(ofquack::metadata::ForeignKeys("T"), "UPPER("));
-	CHECK(!Contains(ofquack::metadata::Indexes("T", false), "UPPER("));
-	CHECK(!Contains(ofquack::metadata::ColumnsOfViews("T"), "UPPER("));
+	CHECK(Contains(ofquack::metadata::PrimaryKeys(ofquack::metadata::DICTIONARY_SCHEMA, "gl_je_lines"), "AND c.table_name = 'GL_JE_LINES'"));
+	CHECK(Contains(ofquack::metadata::ForeignKeys(ofquack::metadata::DICTIONARY_SCHEMA, "gl_je_lines"), "AND c.table_name = 'GL_JE_LINES'"));
+	CHECK(Contains(ofquack::metadata::Indexes(ofquack::metadata::DICTIONARY_SCHEMA, "gl_je_lines", true), "AND idx.table_name = 'GL_JE_LINES'"));
+	CHECK(!Contains(ofquack::metadata::PrimaryKeys(ofquack::metadata::DICTIONARY_SCHEMA, "T"), "UPPER("));
+	CHECK(!Contains(ofquack::metadata::ForeignKeys(ofquack::metadata::DICTIONARY_SCHEMA, "T"), "UPPER("));
+	CHECK(!Contains(ofquack::metadata::Indexes(ofquack::metadata::DICTIONARY_SCHEMA, "T", false), "UPPER("));
+	CHECK(!Contains(ofquack::metadata::ColumnsOfViews(ofquack::metadata::DICTIONARY_SCHEMA, "T"), "UPPER("));
 	// The one UPPER that stays: an aggregate over the whole union, not a
 	// predicate. The listing collapses a name that is both a table and a view,
 	// so counting rows would report every complete listing as short.
@@ -916,11 +916,11 @@ void TestMetadataQueriesUseFusionDictionary() {
 //! could carry more than a name.
 void TestMetadataQueriesEscapeLiterals() {
 	CHECK(ofquack::metadata::QuoteLiteral("O'Brien") == "O''Brien");
-	const auto sql = ofquack::metadata::PrimaryKeys("T' OR '1'='1");
+	const auto sql = ofquack::metadata::PrimaryKeys(ofquack::metadata::DICTIONARY_SCHEMA, "T' OR '1'='1");
 	CHECK(Contains(sql, "T'' OR ''1''=''1"));
 
 	// A non-numeric TABLE_ID never reaches the statement.
-	const auto columns = ofquack::metadata::ColumnsByTableIds({"1", "2); DROP TABLE x--", "3"});
+	const auto columns = ofquack::metadata::ColumnsByTableIds(ofquack::metadata::DICTIONARY_SCHEMA, {"1", "2); DROP TABLE x--", "3"});
 	CHECK(Contains(columns, "IN (1,3)"));
 	CHECK(!Contains(columns, "DROP TABLE"));
 }
@@ -939,20 +939,51 @@ void TestOffsetPagination() {
 void TestTableListingSeeksRatherThanOffsets() {
 	using ofquack::metadata::TablesAfter;
 
-	const auto first = TablesAfter({"TABLE", "VIEW"}, "", "", ofquack::metadata::TABLE_LIST_PAGE_SIZE);
+	const auto first = TablesAfter(ofquack::metadata::DICTIONARY_SCHEMA, {"TABLE", "VIEW"}, "", "", ofquack::metadata::TABLE_LIST_PAGE_SIZE);
 	CHECK(!Contains(first, "OFFSET"));
 	CHECK(Contains(first, "FETCH FIRST 2000 ROWS ONLY"));
 	CHECK(Contains(first, "ORDER BY t.table_name, t.table_type"));
 
 	// The seek compares the ordering pair, since Oracle has no row-value
 	// comparison outside IN.
-	const auto next = TablesAfter({"TABLE", "VIEW"}, "GL_JE_HEADERS", "TABLE", 400);
+	const auto next = TablesAfter(ofquack::metadata::DICTIONARY_SCHEMA, {"TABLE", "VIEW"}, "GL_JE_HEADERS", "TABLE", 400);
 	CHECK(Contains(next, "t.table_name > 'GL_JE_HEADERS'"));
 	CHECK(Contains(next, "t.table_name = 'GL_JE_HEADERS' AND t.table_type > 'TABLE'"));
 	CHECK(!Contains(next, "OFFSET"));
 
 	// A name with an apostrophe must not break out of the literal.
-	CHECK(Contains(TablesAfter({}, "O'BRIEN", "TABLE", 10), "'O''BRIEN'"));
+	CHECK(Contains(TablesAfter(ofquack::metadata::DICTIONARY_SCHEMA, {}, "O'BRIEN", "TABLE", 10), "'O''BRIEN'"));
+}
+
+//! The owner was a compile-time constant, so a deployment whose dictionary does
+//! not live under FUSION could not be reached at all. It is a secret parameter
+//! now, which also means it is user input in a statement built by concatenation.
+void TestMetadataQueriesTakeTheSchema() {
+	using namespace ofquack::metadata;
+
+	// The predicates -- these decide what the query can see.
+	CHECK(Contains(ColumnsOfViews("CUSTOM", "V"), "WHERE owner = 'CUSTOM'"));
+	CHECK(Contains(PrimaryKeys("CUSTOM", "T"), "AND c.owner = 'CUSTOM'"));
+	CHECK(Contains(ForeignKeys("CUSTOM", "T"), "AND c.owner = 'CUSTOM'"));
+	CHECK(Contains(Indexes("CUSTOM", "T", true), "WHERE idx.owner = 'CUSTOM'"));
+	// And the reported schema, which would otherwise claim FUSION for rows that
+	// did not come from it.
+	CHECK(Contains(TablesAfter("CUSTOM", {}, "", "", 10), "'CUSTOM' AS TABLE_SCHEM"));
+	CHECK(Contains(ColumnsByTableIds("CUSTOM", {"1"}), "'CUSTOM' AS TABLE_SCHEM"));
+
+	// Oracle stores object owners in upper case, and the predicates compare the
+	// bare column, so the caller's spelling is what gets normalised.
+	CHECK(Contains(PrimaryKeys("custom", "T"), "AND c.owner = 'CUSTOM'"));
+
+	// It reaches the statement by concatenation like every other name here.
+	CHECK(Contains(ColumnsOfViews("O'BRIEN", "V"), "WHERE owner = 'O''BRIEN'"));
+	// The apostrophe is doubled, so the tail stays inside the literal instead of
+	// closing it and becoming another predicate.
+	CHECK(Contains(Indexes("X' OR 1=1--", "T", false), "idx.owner = 'X'' OR 1=1--'"));
+
+	// Nothing quietly falls back to the default once a schema is given.
+	CHECK(!Contains(PrimaryKeys("CUSTOM", "T"), "FUSION"));
+	CHECK(Contains(PrimaryKeys(DICTIONARY_SCHEMA, "T"), "AND c.owner = 'FUSION'"));
 }
 
 //! The count exists to be compared against what a listing produced, so it has
@@ -1440,6 +1471,7 @@ const TestCase TESTS[] = {
     {"secured view mappings", TestSecuredViewMappings},
     {"apply secured views", TestApplySecuredViews},
     {"metadata queries use fusion dictionary", TestMetadataQueriesUseFusionDictionary},
+    {"metadata queries take the schema", TestMetadataQueriesTakeTheSchema},
     {"metadata queries escape literals", TestMetadataQueriesEscapeLiterals},
     {"offset pagination", TestOffsetPagination},
     {"table listing seeks rather than offsets", TestTableListingSeeksRatherThanOffsets},
