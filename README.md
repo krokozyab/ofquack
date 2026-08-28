@@ -201,7 +201,19 @@ WHERE vendor_id = 12345;
 ```
 
 Column types come from Fusion's own dictionary, so `NUMBER(10,2)` arrives as
-`DECIMAL` and `DATE` as `DATE`.
+`DECIMAL`. Two mappings are worth knowing before you total a column:
+
+- Oracle's `DATE` carries a time of day, so it arrives as `TIMESTAMP`. DuckDB's
+  `DATE` would drop half of it.
+- A `NUMBER` that declares neither precision nor scale — which is how Fusion
+  declares its amount columns, `GL_JE_LINES.ENTERED_DR` among them — arrives as
+  `DOUBLE`. There is no declared scale for `DECIMAL` to use, and the only one
+  available would round every amount to a whole number. `DOUBLE` cannot hold all
+  38 digits Oracle allows, so an unconstrained `NUMBER` used as a wide
+  identifier loses its low digits past 2^53.
+
+A value that turns out not to fit its column reads as NULL. Pass
+`on_cast_error := 'error'` to have the query fail and name it instead.
 
 ### First run: index the dictionary names
 

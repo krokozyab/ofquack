@@ -294,6 +294,13 @@ all 38 digits Oracle allows, so an unconstrained `NUMBER` used as a wide
 integer identifier loses its low digits past 2^53. A column with a declared
 precision or scale is unaffected and stays exact.
 
+Oracle's `DATE` is a date *and* a time to the second, so it becomes a
+`TIMESTAMP`. DuckDB's `DATE` would silently drop the time.
+
+A value that does not fit the type its column was given reads as NULL, because
+one odd row should not cost the rest. `on_cast_error := 'error'` fails the query
+and names the value instead.
+
 **Writes are refused.** `INSERT`, `CREATE TABLE`, `DROP` and the rest fail with
 an explanation, rather than quietly making a local table inside the catalog
 that would shadow the real one.
