@@ -252,7 +252,7 @@ query so that it always returns a row.
 ### `oracle_fusion_wsdl_query(…)` — removed
 
 The old positional form. It exists only to fail with a message explaining how
-to migrate. It was kept through 0.2.0 and is due for deletion in the next
+to migrate. It was kept through 0.3.0 and is due for deletion in the next
 release.
 
 ---
@@ -481,7 +481,7 @@ A scalar function, so no `FROM`:
 
 ```sql
 SELECT fusion_scanner_version();
--- 0.2.0 (built Aug 28 2026 15:00:34)
+-- 0.3.0 (built Aug 29 2026 09:06:47)
 ```
 
 The build stamp is there for a reason: a loaded extension stays in the process,

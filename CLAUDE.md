@@ -149,7 +149,7 @@ Secret lookup order: `secret :=` by name → `endpoint :=` by scope → the sole
 secret. Several secrets and no name is an error, not a guess.
 
 `oracle_fusion_wsdl_query` still exists as a stub whose bind throws a migration message. It was
-kept through `0.2.0` and is now due for removal.
+kept through `0.3.0` and is now due for removal.
 
 ## Resilience
 
