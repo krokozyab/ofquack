@@ -392,18 +392,6 @@ void TestFetchSizeIsValidated() {
 	CHECK(result->GetError().find("fetch_size") != std::string::npos);
 }
 
-//! The removed positional function explains the migration rather than saying
-//! "function does not exist", which reads as a broken install.
-void TestRemovedFunctionExplainsMigration() {
-	DuckDB db(nullptr);
-	Connection connection(db);
-
-	auto result = connection.Query("SELECT * FROM oracle_fusion_wsdl_query('https://h/x?WSDL', 'u', 'p', "
-	                               "'/r.xdo', 'SELECT 1 FROM DUAL')");
-	CHECK(result->HasError());
-	CHECK(result->GetError().find("oracle_fusion_query") != std::string::npos);
-	CHECK(result->GetError().find("CREATE SECRET") != std::string::npos);
-}
 
 //! A secret naming only the instance is completed to the service URL. The
 //! path is the same on every Fusion instance, and getting it slightly wrong
@@ -2883,7 +2871,6 @@ const TestCase TESTS[] = {
     {"named secret is selected", TestNamedSecretIsSelected},
     {"unknown secret is reported", TestUnknownSecretIsReported},
     {"fetch size is validated", TestFetchSizeIsValidated},
-    {"removed function explains migration", TestRemovedFunctionExplainsMigration},
     {"unknown auth mode is reported", TestUnknownAuthModeIsReported},
     {"secret with no credential names both possibilities", TestSecretWithNoCredentialNamesBothPossibilities},
     {"metadata failure shows what arrived", TestMetadataFailureShowsWhatArrived},

@@ -249,13 +249,6 @@ The result carries no columns, so its schema is unknown and there is nothing to
 describe the table with. Add a predicate that matches something, or wrap the
 query so that it always returns a row.
 
-### `oracle_fusion_wsdl_query(…)` — removed
-
-The old positional form. It exists only to fail with a message explaining how
-to migrate. It was kept through 0.3.0 and is due for deletion in the next
-release.
-
----
 
 ## Attaching Fusion as a schema
 

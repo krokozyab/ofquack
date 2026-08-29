@@ -513,25 +513,6 @@ void FusionQueryScan(ClientContext &context, TableFunctionInput &data, DataChunk
 	state.rows_emitted += to_emit;
 }
 
-//! The removed positional function, kept for one release so the old call site
-//! gets an explanation instead of "function does not exist".
-unique_ptr<FunctionData> RemovedWsdlQueryBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &,
-                                              vector<string> &) {
-	throw BinderException(
-	    "oracle_fusion_wsdl_query() has been replaced by oracle_fusion_query(), which takes the "
-	    "connection from a secret so credentials never appear in SQL text or query history:\n\n"
-	    "  CREATE SECRET fusion (\n"
-	    "      TYPE oracle_fusion,\n"
-	    "      ENDPOINT 'https://<host>/xmlpserver/services/ExternalReportWSSService?WSDL',\n"
-	    "      REPORT_PATH '/Custom/Financials/RP_ARB.xdo',\n"
-	    "      USERNAME '<user>', PASSWORD '<password>');\n\n"
-	    "  SELECT * FROM oracle_fusion_query('SELECT … FROM …');");
-}
-
-void RemovedWsdlQueryScan(ClientContext &, TableFunctionInput &, DataChunk &) {
-	throw InternalException("oracle_fusion_wsdl_query should have failed to bind");
-}
-
 } // namespace
 
 void RegisterFusionQueryFunction(ExtensionLoader &loader) {
@@ -543,12 +524,6 @@ void RegisterFusionQueryFunction(ExtensionLoader &loader) {
 	// ignored -- the shape of hole this codebase has already been caught by once.
 	query.named_parameters["columns"] = LogicalType::ANY;
 	loader.RegisterFunction(query);
-
-	TableFunction removed("oracle_fusion_wsdl_query",
-	                      {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                       LogicalType::VARCHAR},
-	                      RemovedWsdlQueryScan, RemovedWsdlQueryBind);
-	loader.RegisterFunction(removed);
 }
 
 } // namespace duckdb

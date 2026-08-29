@@ -93,12 +93,13 @@ SELECT * FROM oracle_fusion_query('SELECT 1 FROM DUAL', no_such_parameter := 'x'
 ----
 no_such_parameter
 
-# The removed positional function explains the migration instead of reporting
-# that it does not exist, which would read as a broken install.
-statement error
-SELECT * FROM oracle_fusion_wsdl_query('https://h/x?WSDL', 'u', 'p', '/r.xdo', 'SELECT 1 FROM DUAL');
+# The positional function is gone. It stood for two releases only to explain the
+# migration; by now anyone calling it has had ample warning, and a stub kept
+# past its purpose is one more thing the reader has to be told to ignore.
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'oracle_fusion_wsdl_query';
 ----
-oracle_fusion_query
+0
 
 # ---------------------------------------------------------------------------
 # Secret selection
