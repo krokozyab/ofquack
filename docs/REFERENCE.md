@@ -302,34 +302,42 @@ and names the value instead.
 an explanation, rather than quietly making a local table inside the catalog
 that would shadow the real one.
 
-#### Index names; prefetch tree schemas only when useful
+#### Load the table list once
 
 **On a machine that has never connected to this instance, an attached schema
-looks empty.** `SHOW TABLES` never goes to the network, because DuckDB would
-materialise the columns of every name it enumerated. Build the complete name
-index once; that is sufficient for every query by name:
+looks empty.** The catalog is answered from the cache and never from the
+network — the listing callback has no `ClientContext`, so a fetch there could
+not be cancelled. One statement fills it:
 
 ```sql
--- Complete browsing surface and the index used by named lookups.
-SELECT count(*) FROM oracle_fusion_tables();
-
--- Optional: make one module visible in a generic tree.
-SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
+SELECT * FROM oracle_fusion_tables();
 ```
 
-Both kinds of metadata are cached on disk and do not expire, so a new session — or a
-new process using the same Fusion principal — can reuse whatever was fetched.
+After that the catalog lists **every table and view in the dictionary**, and
+every query that names one works. Columns are not part of the list: a table's
+columns are fetched the first time it is queried, and cached with it.
 
-What works cold, and what does not:
+| | Before the list is loaded | After |
+|---|---|---|
+| `ATTACH` | instant | instant |
+| `SHOW TABLES`, tree, autocomplete | empty | every table and view |
+| `SELECT … FROM f.T` by name | loads the list, then this table's columns | this table's columns |
+| the same query again | — | no requests |
 
-| | Cold | Names indexed | Schemas prefetched |
-|---|---|---|---|
-| `ATTACH` | instant | instant | instant |
-| `SHOW TABLES`, tree, autocomplete | empty | still lists only described tables | lists the selected modules |
-| `SELECT … FROM f.T` by name | builds the index, then fetches one schema | fetches one schema | uses cached schema |
+Metadata is cached on disk and does not expire, so a new session — or a new
+process using the same Fusion principal — reuses whatever was fetched.
 
-A table you name directly always works, listed or not. Full generic-tree
-enumeration is unsupported; use `oracle_fusion_tables()` to browse all names.
+**What a listed-but-unqueried table shows.** Listing a name must not cost that
+table's columns, or `SHOW TABLES` would spend one request per table across tens
+of thousands of them. So an entry is created with a single placeholder column
+and resolves its real ones when the table is first queried — from
+`GetScanFunction`, which the binder calls before it reads the column list, so a
+query always sees the true schema.
+
+Anything that reads the column list *without* a scan — `duckdb_columns()`,
+`DESCRIBE`, a client expanding a table nobody has queried — sees the
+placeholder until that table is used once. `TableCatalogEntry::GetColumns` is
+not virtual, so there is no hook that would let those paths resolve first.
 
 #### When to use `ATTACH` and when to use `oracle_fusion_query`
 
@@ -401,8 +409,12 @@ Tables are read from `FND_COLUMNS` by their `TABLE_ID`; views are not in
 
 ### `fusion_scanner_cache_warm()`
 
-Optionally fetches columns for a named table family so autocomplete and
-`SHOW TABLES` can list that subset. It is not required for queries by name.
+Fetches the columns of a family of tables up front. Nothing needs it: an
+attached catalog lists every table once the table list is loaded, and a table's
+columns arrive when it is first queried. Its remaining use is to make
+`duckdb_columns()` and `DESCRIBE` show real columns for tables nobody has
+queried yet, and to get the waiting over with for a module you are about to work
+through.
 
 ```sql
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%', max_tables := 500);

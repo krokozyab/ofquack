@@ -109,9 +109,9 @@ LOAD fusion_scanner;
 `INSTALL` downloads it once. `LOAD` is per session — put it at the top of your
 script, or in your DuckDB startup file.
 
-> **Going to use `ATTACH` and browse tables in a client?** Do
-> [the one-time name indexing](#first-run-index-the-dictionary-names) first, or the schema
-> will look empty and you will think it is broken.
+> **Going to use `ATTACH` and browse tables in a client?** Load
+> [the table list once](#first-run-load-the-table-list) first, or the schema will look
+> empty and you will think it is broken.
 
 ---
 
@@ -218,59 +218,45 @@ Column types come from Fusion's own dictionary, so `NUMBER(10,2)` arrives as
 A value that turns out not to fit its column reads as NULL. Pass
 `on_cast_error := 'error'` to have the query fail and name it instead.
 
-### First run: index the dictionary names
+### First run: load the table list
 
-> ⚠️ **Attach without warming and the schema looks empty.** Expand it in
-> DBeaver and there are no tables. Nothing is broken — the catalog shows only
-> what it already knows, and on a fresh install it knows nothing.
+> ⚠️ **Attach before loading the list and the schema looks empty.** Expand it in
+> DBeaver and there are no tables. Nothing is broken — the catalog is answered
+> from the cache, and on a fresh install the cache is empty.
 
-Run the name listing once. On the measured 28,978-object instance it took 16
-seconds with the default 2,000-row pages; the result stays on disk for a week:
+One statement fixes it:
 
 ```sql
 LOAD fusion_scanner;
 
--- The name index. This is enough for every query that names a table.
-SELECT count(*) FROM oracle_fusion_tables();
-
--- Optional: prefetch schemas for the families you want in a generic tree.
-SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%',  max_tables := 500);
-SELECT * FROM fusion_scanner_cache_warm(pattern := 'GL\_%',  max_tables := 500);
-SELECT * FROM fusion_scanner_cache_warm(pattern := 'XLA\_%', max_tables := 500);
+SELECT * FROM oracle_fusion_tables();
 ```
 
-Then attach. A table named in SQL works whether or not its columns were
-prefetched; the prefetch controls only what generic catalog browsers can list.
+That fetches every table and view in the instance and saves the list to
+`~/.fusion_scanner/metadata.duckdb`. It takes seconds; later runs read the file.
+After it, an attached catalog lists **all of them** and every query that names a
+table works.
 
-Two things are worth separating, because they fail differently:
+Columns are not part of the list and do not need to be: a table's columns are
+fetched the first time it is queried, and cached with it. So you pay once for
+the list, and after that only for the tables you actually read.
 
-| | Cold | Names indexed | Pattern prefetched |
-|---|---|---|---|
-| `ATTACH` | instant | instant | instant |
-| `SHOW TABLES`, DBeaver tree | empty | still empty | lists prefetched and previously queried tables |
-| `SELECT … FROM f.AP_INVOICES_ALL` | indexes names, then fetches this schema | fetches this schema | immediate metadata lookup |
+| | Before the list is loaded | After |
+|---|---|---|
+| `ATTACH` | instant | instant |
+| `SHOW TABLES`, DBeaver tree | empty | every table and view |
+| `SELECT … FROM f.AP_INVOICES_ALL` | loads the list, then this table's columns | this table's columns |
+| the same query again | — | no requests |
 
-So a table you name directly always works, listed or not. Full generic-tree
-enumeration is not supported: DuckDB materialises a table's columns while
-enumerating it, which would turn one refresh into tens of thousands of report
-calls. Use `oracle_fusion_tables()` as the complete browsing surface and prefetch
-only the modules you want as tree nodes.
+**One wrinkle in the tree.** A table that is listed but has never been queried
+carries a placeholder column until it is. Expanding it in a client shows that
+placeholder rather than its real columns; querying it once replaces them.
+DuckDB reads a table's column list without any hook the extension could use to
+fetch it first, so listing a name and describing it cannot both be lazy.
 
-**Why it is not automatic:** a Fusion instance holds tens of thousands of
-objects, and fetching every table's columns is hours of SOAP calls. Which
-families you need is your decision, not one this extension should make for you.
-`fusion_scanner_cache_status()` shows what is currently cached.
-
-If you warm after the catalog has already been attached and browsed, `DETACH`
-and `ATTACH` it once more. DuckDB treats a completed schema listing as immutable,
-so the existing catalog tree cannot acquire newly warmed entries in place.
-
-**Which to use.** `ATTACH` for browsing and for straightforward reads;
-`oracle_fusion_query` when you want Oracle to do the work — a join, an analytic
-function, a hint. The [reference](docs/REFERENCE.md#when-to-use-attach-and-when-to-use-oracle_fusion_query)
-has the comparison.
-
----
+Nothing expires by age. `oracle_fusion_tables(refresh := true)` refetches the
+list, and deleting `~/.fusion_scanner/metadata.duckdb` clears everything.
+`fusion_scanner_cache_status()` shows what is cached.
 
 ## What to expect from it
 
@@ -281,8 +267,8 @@ fact explains most of the design:
 - requests to one instance are **serialised** — a few parallel scans would
   otherwise leave hundreds of sessions behind;
 - results are **paged**, and a page is a request;
-- dictionary answers are **cached on disk** for a week, because asking again
-  repeats seconds-long SOAP calls;
+- dictionary answers are **cached on disk** and do not expire, because asking
+  again repeats seconds-long SOAP calls;
 - transient failures are **retried** with backoff, and an instance that keeps
   failing trips a breaker instead of being hammered.
 
@@ -315,12 +301,10 @@ More detail: [capabilities and limits](docs/CAPABILITIES.md).
 
 ## Troubleshooting
 
-**The attached schema is empty — no tables in the tree** — the generic tree
-contains only tables whose schemas are already cached. See
-[index the dictionary names](#first-run-index-the-dictionary-names), then query a
-table by name or prefetch a module with `fusion_scanner_cache_warm(pattern :=
-'AP\_%')`. `oracle_fusion_tables()` is the complete name listing, and
-`fusion_scanner_cache_status()` shows how much is cached.
+**The attached schema is empty — no tables in the tree** — the table list has
+not been loaded on this machine yet. `SELECT * FROM oracle_fusion_tables();`
+once, and the tree fills with every table and view.
+`fusion_scanner_cache_status()` shows what is cached.
 
 **The first query on a new machine is unexpectedly slow** — naming a table on a
 cold cache first builds the name index inside your `SELECT`. Run
