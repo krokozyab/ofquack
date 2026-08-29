@@ -2444,7 +2444,11 @@ void TestUnknownTableInAttachedCatalog() {
 //! of objects with no rows in FND_COLUMNS. Listing a table before its columns
 //! are known therefore risks taking down every catalog browser, so the list is
 //! restricted to what can actually be described.
-void TestShowTablesListsOnlyDescribableTables() {
+//! A schema tree is expected to hold the schema's tables. Listing only the ones
+//! whose columns had already been read meant a freshly attached catalog looked
+//! empty on an instance with 28,978 objects, and no amount of querying made it
+//! look otherwise except one table at a time.
+void TestShowTablesListsEveryTableInTheDictionary() {
 	ResetCache();
 	Script script;
 	auto installed = InstallCatalog(script);
@@ -2454,26 +2458,28 @@ void TestShowTablesListsOnlyDescribableTables() {
 	CreateSecret(connection);
 	Attach(connection);
 
+	// ATTACH still costs nothing, and a cold catalog lists nothing: the tree is
+	// answered from the cache, never from the network.
+	CHECK(script.executed_sql.empty());
 	auto cold = RunQuery(connection, "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fus'");
 	CHECK(cold->GetValue(0, 0).GetValue<int64_t>() == 0);
-	CHECK(script.executed_sql.empty());
 
-	// The table list alone is not enough: the columns are what make a name safe
-	// to offer.
+	// One call puts the dictionary on disk. That is all the tree needs.
 	RunQuery(connection, "SELECT * FROM oracle_fusion_tables()");
-	RunQuery(connection, "DETACH fus");
-	Attach(connection);
-	auto listed = RunQuery(connection, "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fus'");
-	CHECK(listed->GetValue(0, 0).GetValue<int64_t>() == 0);
+	const auto after_listing = script.executed_sql.size();
 
-	// Warming the columns is what fills the browser in.
-	RunQuery(connection, "SELECT * FROM fusion_scanner_cache_warm(pattern := '%')");
-	RunQuery(connection, "DETACH fus");
-	Attach(connection);
+	auto listed = RunQuery(connection, "SELECT table_name FROM duckdb_tables() WHERE database_name = 'fus'");
+	CHECK(listed->RowCount() == 1);
+	CHECK(listed->GetValue(0, 0).ToString() == "GL_JE_HEADERS");
 
-	auto warm = RunQuery(connection, "SELECT table_name FROM duckdb_tables() WHERE database_name = 'fus'");
-	CHECK(warm->RowCount() == 1);
-	CHECK(warm->GetValue(0, 0).ToString() == "GL_JE_HEADERS");
+	// Listing must not have fetched anybody's columns -- that is one request per
+	// table, and there are tens of thousands of them on a real instance.
+	CHECK(script.executed_sql.size() == after_listing);
+
+	// And a listed table is queryable: its real columns arrive when it is used.
+	auto rows = RunQuery(connection, "SELECT NAME FROM fus.main.GL_JE_HEADERS");
+	CHECK(rows->RowCount() == 2);
+	CHECK(rows->names[0] == "NAME");
 }
 
 //! Warming reports what it did, and does not refetch what it already has.
@@ -2944,7 +2950,7 @@ const TestCase TESTS[] = {
     {"attached catalog is read-only", TestAttachedCatalogIsReadOnly},
     {"listed but undescribable table is explained", TestListedButUndescribableTableIsExplained},
     {"unknown table in attached catalog", TestUnknownTableInAttachedCatalog},
-    {"show tables lists only describable tables", TestShowTablesListsOnlyDescribableTables},
+    {"show tables lists every table in the dictionary", TestShowTablesListsEveryTableInTheDictionary},
     {"cache warm", TestCacheWarm},
     {"cache warm pattern and limit", TestCacheWarmPatternAndLimit},
     {"cache warm pattern escape and page size", TestCacheWarmPatternEscapeAndPageSize},

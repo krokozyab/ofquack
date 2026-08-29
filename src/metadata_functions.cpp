@@ -30,10 +30,16 @@ uint64_t MetadataPageSize(ClientContext &context, const named_parameter_map_t &n
 
 namespace {
 
-//! Default lifetime of a cached row: a week. Fusion's dictionary changes when
-//! someone deploys, not continuously, and a stale name costs one puzzled look
-//! whereas refetching costs minutes.
-constexpr int64_t DEFAULT_TTL_SECONDS = INT64_C(7) * 24 * 60 * 60;
+//! Cached metadata does not expire on its own.
+//!
+//! Nothing but Oracle changes a Fusion dictionary, and Oracle does it on its
+//! quarterly update, so an age-based rule mostly threw away work that was still
+//! correct -- and did it invisibly, in the middle of somebody's session. The
+//! refresh is deliberate instead: `refresh := true`, or delete the cache file.
+//!
+//! Zero means "never stale" to FreshnessPredicate; `cache_ttl_seconds` is still
+//! accepted for a caller who wants an age limit of their own.
+constexpr int64_t DEFAULT_TTL_SECONDS = 0;
 
 //! Metadata results are small and are produced in one go, so the scan is just
 //! a cursor over rows that bind already assembled.

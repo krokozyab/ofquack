@@ -324,7 +324,7 @@ SELECT count(*) FROM oracle_fusion_tables();
 SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
 ```
 
-Both kinds of metadata are cached on disk for a week, so a new session — or a
+Both kinds of metadata are cached on disk and do not expire, so a new session — or a
 new process using the same Fusion principal — can reuse whatever was fetched.
 
 What works cold, and what does not:
@@ -358,7 +358,8 @@ both and joins locally, which is usually the wrong way round for large tables.
 
 Every question about Fusion's dictionary is answered by a report call measured
 in seconds, so answers are cached on disk at `~/.fusion_scanner/metadata.duckdb`,
-keyed by endpoint, report path, and authenticated principal, for a week.
+keyed by endpoint, report path, and authenticated principal. Nothing expires on
+its own; `refresh := true` or deleting the file is what refetches.
 
 ### `oracle_fusion_tables()`
 

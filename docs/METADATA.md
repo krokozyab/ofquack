@@ -79,7 +79,7 @@ SET fusion_scanner_metadata_page_size = 1000;
 A listing that ends short is never cached. Before listing anything, the fetcher
 asks the instance how many distinct tables and views it holds, and refuses a
 listing that returned fewer — a partial dictionary that looks complete is worse
-than an error, because it is cached for a week and every later lookup misses
+than an error, because it stays cached and every later lookup misses
 with nothing to show for it. The check lives in the fetcher rather than in
 `oracle_fusion_tables()`, so `ATTACH`, `oracle_fusion_columns()` and
 `fusion_scanner_cache_warm()` are covered by it too.
@@ -105,8 +105,13 @@ your catalog, and is shared between connections.
 
 Rows are keyed by endpoint + report path + authenticated principal, so a
 development and a production instance — or two users with different metadata
-visibility — never share metadata. The default lifetime is a week: Fusion's
-dictionary changes when someone deploys, not continuously.
+visibility — never share metadata.
+
+Nothing expires by age. Only Oracle changes a Fusion dictionary, on its
+unannounced quarterly update, so an age limit mostly discarded work that was
+still correct — and did it invisibly, mid-session. Refreshing is deliberate:
+`refresh := true`, `fusion_scanner_cache_invalidate()`, or deleting the file.
+`cache_ttl_seconds` still imposes an age limit for a caller who wants one.
 
 ```sql
 SELECT * FROM fusion_scanner_cache_status();
@@ -137,30 +142,35 @@ listing costs no requests.
 | Action | Requests |
 |---|---|
 | `ATTACH` | 0 |
-| `SHOW TABLES` (cold) | 0 — and lists nothing |
-| `SHOW TABLES` (after a patterned schema prefetch) | 0 |
-| `SELECT … FROM f.main.T`, cold cache | the name index, then 1 request for that table's columns |
-| the same, table list already cached | 1, for that table's columns |
+| `SHOW TABLES`, cold cache | 0 — and lists nothing |
+| `SHOW TABLES`, name index cached | 0 — and lists every table and view |
+| `SELECT … FROM f.main.T`, cold cache | the name index, then 1 for that table's columns |
+| the same, name index already cached | 1, for that table's columns |
 | the same query again | 0 |
 
-`SHOW TABLES` on a cold catalog is empty rather than slow. Listing the whole
-dictionary takes long enough that blocking a tab-completion on it would be
-worse than showing nothing, so `GetDefaultEntries()` answers from the cache and
-never from the network.
+**Listing a name does not read its columns.** `GetDefaultEntries()` offers every
+name the cached dictionary holds, and `CreateDefaultEntry` builds those entries
+with a single placeholder column rather than asking Fusion — otherwise a
+`SHOW TABLES` would spend one request per table, tens of thousands of them.
+The real columns arrive in `ResolveColumns`, called from `GetScanFunction`,
+which DuckDB invokes before it reads `GetColumns()`
+(`planner/binder/tableref/bind_basetableref.cpp`). A query therefore always sees
+the true schema.
 
-The name index and the generic tree are deliberately separate. Run
-`oracle_fusion_tables()` once to index every name; after that every named lookup
-can fetch just its own columns. The generic tree contains the tables already
-queried plus modules explicitly prefetched with a required pattern, for example:
+The cost is that anything reading the column list *without* a scan —
+`duckdb_columns()`, `DESCRIBE`, a client expanding a table it has never queried —
+sees the placeholder until that table is queried once. `TableCatalogEntry::GetColumns`
+is not virtual, so there is no hook that would let those paths resolve first.
 
-```sql
-SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\_%', max_tables := 500);
-```
+`GetDefaultEntries()` still answers from the cache and never from the network:
+it has no `ClientContext`, so a fetch there could not be cancelled. A cold
+catalog therefore lists nothing until the dictionary is loaded — one
+`oracle_fusion_tables()` call, or any named lookup, does that.
 
-A complete generic tree is not supported. DuckDB v1.5.5 materialises each table
-entry while enumerating it, so advertising all names would also fetch all
-columns and turn a tree refresh into hours of SOAP calls. Use
-`oracle_fusion_tables()` as the complete browsing surface.
+`ScanSchemas` clears `created_all_entries` for the same reason `LookupSchema`
+does. `duckdb_tables()` and `SHOW TABLES` do not arrive through a schema lookup,
+and without the reset a listing made before the dictionary was cached would
+freeze the catalog empty for the rest of the session.
 
 ## Secured HR views
 

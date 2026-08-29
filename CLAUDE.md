@@ -256,7 +256,10 @@ than failing the query — `all_varchar := true` turns inference off entirely.
 same report as everything else, so **every metadata question costs a SOAP call measured in
 seconds**. That is the constraint the whole design answers: results are cached in a DuckDB
 database of its own at `~/.fusion_scanner/metadata.duckdb`, keyed by endpoint + report path so a
-development and a production instance never share rows, with a one-week TTL.
+development and a production instance never share rows. Nothing expires by age: only Oracle
+changes a Fusion dictionary, on its unannounced quarterly update, so an age rule discarded work
+that was still correct and did it mid-session. `refresh := true` and deleting the file are the
+refresh; `cache_ttl_seconds` still imposes an age limit for a caller who asks for one.
 
 The cache is a separate database rather than tables in the user's: it has to work for an
 in-memory session, must not appear in the user's catalog, and is shared between connections.
@@ -292,7 +295,7 @@ never run deep; their wider rows keep a separate conservative page size of 400.
 
 **`FetchTables` asks the instance for its own `COUNT(DISTINCT UPPER(table_name))` first and
 throws if the listing falls short of it.** Inside the fetcher rather than at one call site,
-because a partial dictionary that looks complete gets cached for a week and every later lookup
+because a partial dictionary that looks complete stays cached and every later lookup
 then misses; the catalog and the cache warmer need that guard as much as `oracle_fusion_tables()`
 does. The count must stay `DISTINCT`: the listing collapses a name that exists as both a table
 and a view, so counting rows of the union would report every complete listing as short. An empty
@@ -315,10 +318,19 @@ SELECT NAME FROM f.main.GL_JE_HEADERS WHERE ...;
 - **`ATTACH` costs zero requests.** The schema is fixed and the secret is already known.
 - `SELECT … FROM f.main.T` resolves through `CreateDefaultEntry(name)` — one table's columns,
   no schema listing.
-- `GetDefaultEntries()` (the expensive one) answers only from cache and never goes to the
-  network, so `SHOW TABLES` on a cold catalog lists nothing rather than blocking for minutes.
-  `oracle_fusion_tables()` indexes the names; the generic tree lists only tables whose columns
-  were fetched by a named lookup or an explicit patterned `fusion_scanner_cache_warm()`.
+- **`GetDefaultEntries()` offers every name the cached dictionary holds**, and
+  `CreateDefaultEntry` builds those entries *lazily* — one placeholder column, no request.
+  A schema tree is expected to contain the schema's tables, and this is how it can: listing
+  a name must not cost that table's columns, or `SHOW TABLES` would spend one request per
+  table across tens of thousands of them.
+- `ResolveColumns` fetches the real columns from `GetScanFunction`, which the binder calls
+  *before* it reads `GetColumns()` (`planner/binder/tableref/bind_basetableref.cpp`), so a
+  query always sees the true schema. The price: `duckdb_columns()`, `DESCRIBE` and a client
+  expanding a never-queried table see the placeholder, because `GetColumns()` is not virtual
+  and offers no hook to resolve first.
+- `GetDefaultEntries()` still answers from cache and never from the network — it has no
+  `ClientContext`, so a fetch there could not be cancelled. A cold catalog lists nothing
+  until `oracle_fusion_tables()` or any named lookup has loaded the dictionary.
 - Column types come from the dictionary here, not from inference.
 
 Things that will bite if changed:
@@ -326,12 +338,14 @@ Things that will bite if changed:
 - `Create()` returns `nullptr` for an unknown name. That is not an error — DuckDB asks every
   attached catalog about names belonging to none of them, and a catalog that throws breaks
   those lookups.
-- **`LookupSchema` clears `created_all_entries` on the generator before every lookup.** After
+- **`LookupSchema` and `ScanSchemas` both clear `created_all_entries` on the generator.** After
   any full scan of the table set (`SHOW TABLES`, a client expanding the tree, the "did you mean"
   search after a miss) `CatalogSet` sets that flag and never offers an unknown name to the
-  generator again. With a deliberately partial listing that froze the catalog: `PO_LINES_ALL`
-  "did not exist" on a live instance right after `XLA_AE_LINES` had worked. The cost is that a
-  scan re-runs `GetDefaultEntries()` each time, which is a cache read.
+  generator again. That froze the catalog twice over: `PO_LINES_ALL` "did not exist" on a live
+  instance right after `XLA_AE_LINES` had worked, and a listing made before the dictionary was
+  cached left the tree empty for the rest of the session. `duckdb_tables()` and `SHOW TABLES`
+  arrive through `ScanSchemas`, not through a schema lookup, which is why both need the reset.
+  The cost is that a scan re-runs `GetDefaultEntries()` each time, which is a cache read.
 - `GetStorage()` must throw `NotImplementedException`. The base implementation throws
   `InternalException`, which marks the database invalid and kills the connection.
 - `GetVirtualColumns()`/`GetRowIdColumns()` return empty. A report has no rowid, and the

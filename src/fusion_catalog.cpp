@@ -38,7 +38,13 @@ namespace duckdb {
 namespace {
 
 constexpr const char *STORAGE_TYPE = "oracle_fusion";
-constexpr int64_t CATALOG_CACHE_TTL_SECONDS = INT64_C(7) * 24 * 60 * 60;
+//! Zero: cached metadata does not go stale by itself. See DEFAULT_TTL_SECONDS
+//! in metadata_functions.cpp for why.
+constexpr int64_t CATALOG_CACHE_TTL_SECONDS = 0;
+
+//! Stands in for a listed table's columns until it is first queried. Not a
+//! legal Oracle column name, so it cannot collide with a real one.
+constexpr const char *UNRESOLVED_COLUMN = "!ofquack:columns-not-read-yet";
 
 //! Everything one ATTACH knows, shared by the catalog, every table entry it
 //! produces, and every scan those tables start.
@@ -110,6 +116,18 @@ struct FusionAttachedState {
 		columns_by_table.erase(key);
 		order_keys.erase(key);
 		column_revisions[key] = current;
+	}
+
+	//! True when this table's columns can be had without asking Fusion.
+	//! Reads memory and the cache file only -- never the network.
+	bool ColumnsAreCached(const ofquack::TableInfo &table) {
+		const auto key = StringUtil::Upper(table.name);
+		SynchronizeColumns(table.name);
+		if (columns_by_table.find(key) != columns_by_table.end()) {
+			return true;
+		}
+		std::vector<ofquack::ColumnInfo> columns;
+		return MetadataCache::Get().TryGetColumns(endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns);
 	}
 
 	optional_ptr<const ofquack::TableInfo> FindTable(ClientContext &context, const string &name) {
@@ -637,15 +655,35 @@ public:
 	//! That is not an error: DuckDB asks every attached catalog about names
 	//! that may belong to none of them, and a catalog that throws on an unknown
 	//! name breaks those lookups.
+	//! `lazy` means "do not go to Fusion for this table's columns".
+	//!
+	//! Listing a schema materialises every name it offers, so a catalog that
+	//! fetched columns there would spend one request per table on `SHOW TABLES`
+	//! -- tens of thousands of them. A lazily created entry carries a single
+	//! placeholder column instead, and fills in the real ones the moment the
+	//! table is actually queried; see ResolveColumns.
 	static unique_ptr<FusionTableEntry> Create(ClientContext &context, Catalog &catalog, SchemaCatalogEntry &schema,
 	                                           const std::shared_ptr<FusionAttachedState> &state,
-	                                           const string &object_name) {
+	                                           const string &object_name, bool lazy = false) {
 		std::lock_guard<std::mutex> guard(state->metadata_lock);
 		auto table = state->FindTable(context, object_name);
 		if (!table) {
 			// Not ours. DuckDB asks every attached catalog about every name,
 			// including its own system tables, so this is the normal answer.
 			return nullptr;
+		}
+		if (lazy && !state->ColumnsAreCached(*table)) {
+			auto info = make_uniq<CreateTableInfo>();
+			info->schema = schema.name;
+			info->table = table->name;
+			info->columns.AddColumn(ColumnDefinition(UNRESOLVED_COLUMN, LogicalType::VARCHAR));
+			info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
+			auto &cache = MetadataCache::Get();
+			auto entry = make_uniq<FusionTableEntry>(catalog, schema, *info, state, table->name,
+			                                         vector<FusionColumn> {},
+			                                         cache.TablesRevision(state->endpoint_key), 0);
+			entry->unresolved = true;
+			return entry;
 		}
 		auto columns = state->Columns(context, *table);
 		if (columns.empty()) {
@@ -677,7 +715,50 @@ public:
 		                                   cache.ColumnsRevision(state->endpoint_key, table->name));
 	}
 
+	//! Fetches this table's real columns, replacing the placeholder a lazily
+	//! listed entry was created with.
+	//!
+	//! Called from GetScanFunction, which the binder invokes before it reads
+	//! GetColumns() (planner/binder/tableref/bind_basetableref.cpp), so a query
+	//! always sees the real schema. Anything that reads the column list without
+	//! going through a scan -- duckdb_columns(), DESCRIBE -- sees the
+	//! placeholder until the table has been queried once.
+	void ResolveColumns(ClientContext &context) {
+		if (!unresolved) {
+			return;
+		}
+		std::lock_guard<std::mutex> guard(state->metadata_lock);
+		auto table = state->FindTable(context, object_name);
+		if (!table) {
+			throw BinderException("Oracle Fusion no longer lists \"%s\"", object_name);
+		}
+		auto fetched = state->Columns(context, *table);
+		if (fetched.empty()) {
+			throw BinderException(
+			    "Oracle Fusion lists \"%s\" but returned no column information for it, so it cannot be "
+			    "queried through the catalog.\nSELECT * FROM oracle_fusion_columns('%s') shows what the "
+			    "dictionary says. Querying it directly still works:\n"
+			    "  SELECT * FROM oracle_fusion_query('SELECT * FROM %s WHERE ROWNUM <= 100');",
+			    object_name, object_name, object_name);
+		}
+		ColumnList resolved;
+		vector<FusionColumn> described;
+		for (const auto &column : fetched) {
+			bool from_dictionary = false;
+			auto type = TypeOf(column, state->options.number_mode, from_dictionary);
+			resolved.AddColumn(ColumnDefinition(column.name, type));
+			described.push_back(FusionColumn {column.name, type, column.type_name, from_dictionary});
+		}
+		// `columns` is TableCatalogEntry's own protected member; replacing it
+		// here is what turns a listed name into a queryable table.
+		columns = std::move(resolved);
+		fusion_columns = std::move(described);
+		columns_revision = MetadataCache::Get().ColumnsRevision(state->endpoint_key, object_name);
+		unresolved = false;
+	}
+
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override {
+		ResolveColumns(context);
 		auto &cache = MetadataCache::Get();
 		if (tables_revision != cache.TablesRevision(state->endpoint_key) ||
 		    columns_revision != cache.ColumnsRevision(state->endpoint_key, object_name)) {
@@ -745,6 +826,8 @@ private:
 	vector<FusionColumn> fusion_columns;
 	uint64_t tables_revision;
 	uint64_t columns_revision;
+	//! True while this entry holds the placeholder column rather than Fusion's.
+	bool unresolved = false;
 };
 
 //! Materialises table entries on demand.
@@ -791,31 +874,24 @@ public:
 			}
 		}
 
+		// Every name the dictionary holds, whether or not its columns have been
+		// read. That is what a person expects a schema tree to contain, and it
+		// is what the JDBC driver's getTables() gives DBeaver. The columns are
+		// not needed to say a table exists, and CreateDefaultEntry is told not
+		// to fetch them.
 		vector<string> names;
+		names.reserve(state->tables.size());
 		for (const auto &table : state->tables) {
-			const auto key = StringUtil::Upper(table.name);
-			state->SynchronizeColumns(table.name);
-			const auto known = state->columns_by_table.find(key);
-			if (known != state->columns_by_table.end()) {
-				if (!known->second.empty()) {
-					names.push_back(table.name);
-				}
-				continue;
-			}
-			// Reading the cache is cheap and local; asking Fusion is not, and
-			// is not done here.
-			std::vector<ofquack::ColumnInfo> columns;
-			if (cache.TryGetColumns(state->endpoint_key, table.name, CATALOG_CACHE_TTL_SECONDS, columns) &&
-			    !columns.empty()) {
-				state->columns_by_table.emplace(key, std::move(columns));
-				names.push_back(table.name);
-			}
+			names.push_back(table.name);
 		}
 		return names;
 	}
 
+	//! Called once per name offered by GetDefaultEntries, and once for a name
+	//! looked up directly. Both must be cheap, so neither fetches columns: a
+	//! query resolves them in GetScanFunction instead.
 	unique_ptr<CatalogEntry> CreateDefaultEntry(ClientContext &context, const string &entry_name) override {
-		return FusionTableEntry::Create(context, catalog, schema, state, entry_name);
+		return FusionTableEntry::Create(context, catalog, schema, state, entry_name, /* lazy */ true);
 	}
 
 private:
@@ -863,6 +939,17 @@ public:
 			generator->created_all_entries = false;
 		}
 		return DuckCatalog::LookupSchema(transaction, schema_lookup, if_not_found);
+	}
+
+	//! duckdb_tables() and SHOW TABLES arrive here rather than through a schema
+	//! lookup, and they carry the same hazard: a listing made before the
+	//! dictionary was cached returned nothing and set created_all_entries, after
+	//! which the tree stayed empty however many tables were cached later.
+	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override {
+		if (generator) {
+			generator->created_all_entries = false;
+		}
+		DuckCatalog::ScanSchemas(context, std::move(callback));
 	}
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override {
