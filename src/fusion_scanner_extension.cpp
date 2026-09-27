@@ -7,6 +7,7 @@
 #include "ofquack/fusion_query_function.hpp"
 #include "ofquack/fusion_secret.hpp"
 #include "ofquack/fusion_catalog.hpp"
+#include "ofquack/function_docs.hpp"
 #include "ofquack/metadata_functions.hpp"
 #include "ofquack/sso_functions.hpp"
 
@@ -51,7 +52,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	EnsureCurlInitialized();
 	loader.SetDescription("Query Oracle Fusion via BI Publisher SOAP calls");
 
-	loader.RegisterFunction(ScalarFunction("fusion_scanner_version", {}, LogicalType::VARCHAR, OfquackVersion));
+	RegisterDocumented(loader, ScalarFunction("fusion_scanner_version", {}, LogicalType::VARCHAR, OfquackVersion), {},
+	                   {"Returns the loaded fusion_scanner version and the date and time it was built.",
+	                    "fusion_scanner_version()",
+	                    {"oracle_fusion", "system"}});
 
 	RegisterFusionSecrets(loader);
 	RegisterFusionQueryFunction(loader);

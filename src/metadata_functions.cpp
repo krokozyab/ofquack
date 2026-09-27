@@ -4,6 +4,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
+#include "ofquack/function_docs.hpp"
 #include "ofquack/metadata_cache.hpp"
 #include "ofquack/metadata_fetch.hpp"
 #include "ofquack/metadata_queries.hpp"
@@ -674,14 +675,22 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	tables.named_parameters["refresh"] = LogicalType::BOOLEAN;
 	tables.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
 	tables.named_parameters["page_size"] = LogicalType::UBIGINT;
-	loader.RegisterFunction(tables);
+	RegisterDocumented(loader, std::move(tables), {},
+	                   {"Lists the tables and views in Oracle Fusion's dictionary, caching the list on disk after the "
+	                    "first call.",
+	                    "SELECT * FROM oracle_fusion_tables()",
+	                    {"oracle_fusion", "metadata"}});
 
 	TableFunction columns("oracle_fusion_columns", {LogicalType::VARCHAR}, ScanMaterialised, ColumnsBind,
 	                      InitMaterialised);
 	AddFusionNamedParameters(columns);
 	columns.named_parameters["refresh"] = LogicalType::BOOLEAN;
 	columns.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
-	loader.RegisterFunction(columns);
+	RegisterDocumented(loader, std::move(columns), {"table_name"},
+	                   {"Lists the columns of a Fusion table or view with their Oracle type, the DuckDB type they map "
+	                    "to, and whether that mapping can lose values.",
+	                    "SELECT * FROM oracle_fusion_columns('AP_INVOICES_ALL')",
+	                    {"oracle_fusion", "metadata"}});
 
 	TableFunction warm("fusion_scanner_cache_warm", {}, ScanMaterialised, CacheWarmBind, InitMaterialised);
 	AddFusionNamedParameters(warm);
@@ -689,18 +698,30 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	warm.named_parameters["max_tables"] = LogicalType::BIGINT;
 	warm.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
 	warm.named_parameters["page_size"] = LogicalType::UBIGINT;
-	loader.RegisterFunction(warm);
+	RegisterDocumented(loader, std::move(warm), {},
+	                   {"Fetches into the metadata cache the columns of Fusion tables whose names match pattern, a "
+	                    "case-insensitive LIKE, up to max_tables of them (200 by default, 0 for no limit).",
+	                    "SELECT * FROM fusion_scanner_cache_warm(pattern := 'AP\\_%')",
+	                    {"oracle_fusion", "cache"}});
 
 	TableFunction status("fusion_scanner_cache_status", {}, ScanMaterialised, CacheStatusBind, InitMaterialised);
 	AddFusionNamedParameters(status);
-	loader.RegisterFunction(status);
+	RegisterDocumented(loader, std::move(status), {},
+	                   {"Reports where the Oracle Fusion metadata cache lives, whether it can be written, and how much "
+	                    "of an instance's dictionary it holds.",
+	                    "SELECT * FROM fusion_scanner_cache_status()",
+	                    {"oracle_fusion", "cache"}});
 
 	TableFunction invalidate("fusion_scanner_cache_invalidate", {}, ScanMaterialised, CacheInvalidateBind,
 	                         InitMaterialised);
 	AddFusionNamedParameters(invalidate);
 	invalidate.named_parameters["table"] = LogicalType::VARCHAR;
 	invalidate.named_parameters["table_name"] = LogicalType::VARCHAR;
-	loader.RegisterFunction(invalidate);
+	RegisterDocumented(loader, std::move(invalidate), {},
+	                   {"Removes an instance's dictionary from the metadata cache, or only one table's columns when "
+	                    "table_name is given.",
+	                    "SELECT * FROM fusion_scanner_cache_invalidate(table_name := 'AP_INVOICES_ALL')",
+	                    {"oracle_fusion", "cache"}});
 }
 
 } // namespace duckdb

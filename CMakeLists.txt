@@ -32,6 +32,7 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
         src/fusion_scanner_extension.cpp
+        src/function_docs.cpp
         src/fusion_secret.cpp
         src/fusion_connection.cpp
         src/fusion_query_function.cpp

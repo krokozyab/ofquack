@@ -8,6 +8,7 @@
 #include "ofquack/error_decoder.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
+#include "ofquack/function_docs.hpp"
 #include "ofquack/secured_views.hpp"
 #include "ofquack/sql_rewrite.hpp"
 #include "ofquack/sql_text.hpp"
@@ -523,7 +524,12 @@ void RegisterFusionQueryFunction(ExtensionLoader &loader) {
 	// the dictionary, so a `columns` accepted there would be accepted and
 	// ignored -- the shape of hole this codebase has already been caught by once.
 	query.named_parameters["columns"] = LogicalType::ANY;
-	loader.RegisterFunction(query);
+	RegisterDocumented(loader, std::move(query), {"sql"},
+	                   {"Runs a SQL query in Oracle Fusion through the BI Publisher report and returns its rows, "
+	                    "paging the result and inferring column types from the first page.",
+	                    "SELECT * FROM oracle_fusion_query('SELECT invoice_num, invoice_amount FROM ap_invoices_all "
+	                    "FETCH FIRST 10 ROWS ONLY')",
+	                    {"oracle_fusion", "query"}});
 }
 
 } // namespace duckdb

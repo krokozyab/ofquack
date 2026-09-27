@@ -3,6 +3,7 @@
 #include "ofquack/browser_auth.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
+#include "ofquack/function_docs.hpp"
 #include "ofquack/host_throttle.hpp"
 #include "ofquack/jwt.hpp"
 #include "ofquack/sso_functions.hpp"
@@ -178,15 +179,27 @@ void RegisterFusionSsoFunctions(ExtensionLoader &loader) {
 	TableFunction login("fusion_scanner_sso_login", {}, ScanSso, SsoLoginBind, InitSso);
 	AddFusionNamedParameters(login);
 	login.named_parameters["force"] = LogicalType::BOOLEAN;
-	loader.RegisterFunction(login);
+	RegisterDocumented(loader, std::move(login), {},
+	                   {"Signs in to Oracle Fusion through a browser window and caches the token for the host, "
+	                    "reusing a still-valid token unless force := true.",
+	                    "SELECT * FROM fusion_scanner_sso_login()",
+	                    {"oracle_fusion", "sso"}});
 
 	TableFunction status("fusion_scanner_sso_status", {}, ScanSso, SsoStatusBind, InitSso);
 	AddFusionNamedParameters(status);
-	loader.RegisterFunction(status);
+	RegisterDocumented(loader, std::move(status), {},
+	                   {"Reports whether a sign-in token is cached for the Fusion host and when it expires, "
+	                    "without ever returning the token itself.",
+	                    "SELECT * FROM fusion_scanner_sso_status()",
+	                    {"oracle_fusion", "sso"}});
 
 	TableFunction logout("fusion_scanner_sso_logout", {}, ScanSso, SsoLogoutBind, InitSso);
 	AddFusionNamedParameters(logout);
-	loader.RegisterFunction(logout);
+	RegisterDocumented(loader, std::move(logout), {},
+	                   {"Forgets the sign-in token this process holds for the Fusion host; the browser profile, and "
+	                    "the session it keeps, is left alone.",
+	                    "SELECT * FROM fusion_scanner_sso_logout()",
+	                    {"oracle_fusion", "sso"}});
 }
 
 } // namespace duckdb

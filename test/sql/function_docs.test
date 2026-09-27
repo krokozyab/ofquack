@@ -1,0 +1,102 @@
+# name: test/sql/function_docs.test
+# description: every function carries the documentation duckdb_functions() shows
+# group: [fusion_scanner]
+
+require fusion_scanner
+
+statement ok
+CREATE TABLE documented AS SELECT * FROM (VALUES
+    ('fusion_scanner_version', 'scalar'),
+    ('oracle_fusion_query', 'table'),
+    ('oracle_fusion_tables', 'table'),
+    ('oracle_fusion_columns', 'table'),
+    ('fusion_scanner_cache_warm', 'table'),
+    ('fusion_scanner_cache_status', 'table'),
+    ('fusion_scanner_cache_invalidate', 'table'),
+    ('fusion_scanner_sso_login', 'table'),
+    ('fusion_scanner_sso_status', 'table'),
+    ('fusion_scanner_sso_logout', 'table')
+) t(fn, kind);
+
+# Each says what it does, with one example and at least one category.
+query I
+SELECT count(*) FROM documented d JOIN duckdb_functions() f ON f.function_name = d.fn
+WHERE f.function_type = d.kind AND f.description IS NOT NULL AND len(f.examples) = 1 AND len(f.categories) > 0;
+----
+10
+
+# A table function used as an expression is a binder error, so its example is a
+# whole statement; a scalar function's example is an expression.
+query I
+SELECT count(*) FROM documented d JOIN duckdb_functions() f ON f.function_name = d.fn
+WHERE (d.kind = 'table') <> starts_with(f.examples[1], 'SELECT * FROM ' || d.fn || '(');
+----
+0
+
+# No parameter is shown as col0, col1, ...
+query I
+SELECT count(*) FROM (
+    SELECT unnest(f.parameters) AS parameter
+    FROM documented d JOIN duckdb_functions() f ON f.function_name = d.fn
+) WHERE regexp_full_match(parameter, 'col[0-9]+');
+----
+0
+
+# Names are taken from the description by position, and the named parameters
+# come in the order the stored map iterates -- which differs between standard
+# libraries. A name listed out of that order lands on another parameter's type,
+# so every name has to arrive paired with its own.
+statement ok
+CREATE TABLE shared_parameter AS SELECT * FROM (VALUES
+    ('secret', 'VARCHAR'),
+    ('endpoint', 'VARCHAR'),
+    ('report_path', 'VARCHAR'),
+    ('username', 'VARCHAR'),
+    ('password', 'VARCHAR'),
+    ('fetch_size', 'UBIGINT'),
+    ('number_mode', 'VARCHAR'),
+    ('on_cast_error', 'VARCHAR'),
+    ('schema', 'VARCHAR'),
+    ('secured_views', 'BOOLEAN'),
+    ('all_varchar', 'BOOLEAN'),
+    ('stable_paging', 'BOOLEAN')
+) t(name, type);
+
+statement ok
+CREATE TABLE expected_parameter AS
+SELECT d.fn, s.name, s.type FROM documented d CROSS JOIN shared_parameter s WHERE d.kind = 'table'
+UNION ALL
+SELECT * FROM (VALUES
+    ('oracle_fusion_query', 'sql', 'VARCHAR'),
+    ('oracle_fusion_query', 'columns', 'ANY'),
+    ('oracle_fusion_tables', 'refresh', 'BOOLEAN'),
+    ('oracle_fusion_tables', 'cache_ttl_seconds', 'BIGINT'),
+    ('oracle_fusion_tables', 'page_size', 'UBIGINT'),
+    ('oracle_fusion_columns', 'table_name', 'VARCHAR'),
+    ('oracle_fusion_columns', 'refresh', 'BOOLEAN'),
+    ('oracle_fusion_columns', 'cache_ttl_seconds', 'BIGINT'),
+    ('fusion_scanner_cache_warm', 'pattern', 'VARCHAR'),
+    ('fusion_scanner_cache_warm', 'max_tables', 'BIGINT'),
+    ('fusion_scanner_cache_warm', 'cache_ttl_seconds', 'BIGINT'),
+    ('fusion_scanner_cache_warm', 'page_size', 'UBIGINT'),
+    ('fusion_scanner_cache_invalidate', 'table', 'VARCHAR'),
+    ('fusion_scanner_cache_invalidate', 'table_name', 'VARCHAR'),
+    ('fusion_scanner_sso_login', 'force', 'BOOLEAN')
+) t(fn, name, type);
+
+statement ok
+CREATE TABLE reported_parameter AS
+SELECT f.function_name AS fn, unnest(f.parameters) AS name, unnest(f.parameter_types) AS type
+FROM documented d JOIN duckdb_functions() f ON f.function_name = d.fn;
+
+query III
+(SELECT * FROM expected_parameter EXCEPT SELECT * FROM reported_parameter)
+UNION ALL
+(SELECT * FROM reported_parameter EXCEPT SELECT * FROM expected_parameter);
+----
+
+# EXCEPT is a set operation, so a name listed twice needs the count as well.
+query I
+SELECT (SELECT count(*) FROM reported_parameter) = (SELECT count(*) FROM expected_parameter);
+----
+true
