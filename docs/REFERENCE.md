@@ -480,13 +480,27 @@ than reporting a successful no-op.
 
 ## Housekeeping
 
+### Finding the functions from SQL
+
+Every function carries a description, one runnable example and its parameter
+names, so the functions on this page can be looked up where you are already typing:
+
+```sql
+SELECT function_name, description, examples[1] AS example
+FROM duckdb_functions()
+WHERE list_contains(categories, 'oracle_fusion');
+```
+
+The second category narrows it: `query`, `metadata`, `cache`, `sso` or
+`system`.
+
 ### `fusion_scanner_version()`
 
 A scalar function, so no `FROM`:
 
 ```sql
 SELECT fusion_scanner_version();
--- 0.3.0 (built Aug 29 2026 09:06:47)
+-- 0.3.1 (built Sep 27 2026 20:46:43)
 ```
 
 The build stamp is there for a reason: a loaded extension stays in the process,

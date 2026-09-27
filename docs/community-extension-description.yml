@@ -60,7 +60,8 @@ docs:
 
     That detour requires a report deployed on the Fusion side — `DM_ARB.xdm`
     and `RP_ARB.xdo`, taking a `p_sql` parameter. The extension cannot work
-    against a stock instance. See the repository for the catalog archives.
+    against a stock instance. The repository's README links the catalog
+    archives, which live in the ofjdbc repository.
 
     Read-only by construction: BI Publisher cannot write.
 
