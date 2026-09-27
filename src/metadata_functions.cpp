@@ -336,11 +336,12 @@ bool MatchesPattern(const std::string &name, const std::string &pattern) {
 //! Fetches the columns of many tables at once, so a catalog browser has
 //! something to show.
 //!
-//! An attached catalog only lists tables whose columns it already knows --
-//! offering a name it might then fail to describe is an internal error in
-//! DuckDB, not a warning. This is how that knowledge is acquired deliberately,
-//! in batches, rather than one slow table at a time or all thirty thousand of
-//! them at once.
+//! An attached catalog lists every table in the cached dictionary, but a table
+//! whose columns are not cached is built with a placeholder column, and
+//! `DESCRIBE`, `duckdb_columns()` and a client expanding it see only that
+//! until a query resolves it. This is how a family of tables gets its real
+//! columns ahead of time, in batches, rather than one slow table at a time or
+//! all thirty thousand of them at once.
 unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBindInput &input,
                                        vector<LogicalType> &return_types, vector<string> &names) {
 	FusionScanOptions options;
