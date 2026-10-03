@@ -17,7 +17,7 @@
 
 namespace duckdb {
 
-uint64_t MetadataPageSize(ClientContext &context, const named_parameter_map_t &named_parameters) {
+uint64_t MetadataPageSize(ClientContext &context, const named_argument_map_t &named_parameters) {
 	const auto entry = named_parameters.find("page_size");
 	if (entry != named_parameters.end() && !entry->second.IsNull()) {
 		return entry->second.GetValue<uint64_t>();
@@ -65,15 +65,15 @@ void ScanMaterialised(ClientContext &, TableFunctionInput &data, DataChunk &outp
 	auto &state = data.global_state->Cast<MaterialisedState>();
 
 	if (state.offset >= bind_data.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t to_emit = MinValue<idx_t>(STANDARD_VECTOR_SIZE, bind_data.rows.size() - state.offset);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 	for (idx_t row = 0; row < to_emit; row++) {
 		const auto &values = bind_data.rows[state.offset + row];
 		for (idx_t column = 0; column < values.size(); column++) {
-			output.SetValue(column, row, values[column]);
+			output.data[column].SetValue(row, values[column]);
 		}
 	}
 	state.offset += to_emit;
@@ -82,7 +82,7 @@ void ScanMaterialised(ClientContext &, TableFunctionInput &data, DataChunk &outp
 ofquack::RequestContext ContextFor(ClientContext &context) {
 	ofquack::RequestContext request_context;
 	request_context.is_cancelled = [&context]() {
-		return context.interrupted.load();
+		return context.IsInterrupted();
 	};
 	return request_context;
 }
@@ -102,12 +102,12 @@ auto WithTranslatedErrors(Callable &&callable) -> decltype(callable()) {
 	}
 }
 
-bool WantsRefresh(const named_parameter_map_t &named_parameters) {
+bool WantsRefresh(const named_argument_map_t &named_parameters) {
 	const auto entry = named_parameters.find("refresh");
 	return entry != named_parameters.end() && !entry->second.IsNull() && entry->second.GetValue<bool>();
 }
 
-int64_t TtlFor(const named_parameter_map_t &named_parameters) {
+int64_t TtlFor(const named_argument_map_t &named_parameters) {
 	const auto entry = named_parameters.find("cache_ttl_seconds");
 	if (entry == named_parameters.end() || entry->second.IsNull()) {
 		return DEFAULT_TTL_SECONDS;
@@ -162,7 +162,7 @@ std::vector<ofquack::TableInfo> LoadTables(ClientContext &context, MetadataCache
 // ---------------------------------------------------------------------------
 
 unique_ptr<FunctionData> TablesBind(ClientContext &context, TableFunctionBindInput &input,
-                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	RequireUsableCredentials(config);
@@ -214,7 +214,7 @@ LogicalType DictionaryLogicalType(const ofquack::ColumnInfo &column, ofquack::Nu
 }
 
 unique_ptr<FunctionData> ColumnsBind(ClientContext &context, TableFunctionBindInput &input,
-                                     vector<LogicalType> &return_types, vector<string> &names) {
+                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const auto table_name = input.inputs[0].GetValue<string>();
 	if (table_name.empty()) {
 		throw BinderException("oracle_fusion_columns requires a table name");
@@ -343,7 +343,7 @@ bool MatchesPattern(const std::string &name, const std::string &pattern) {
 //! columns ahead of time, in batches, rather than one slow table at a time or
 //! all thirty thousand of them at once.
 unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBindInput &input,
-                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	RequireUsableCredentials(config);
@@ -563,7 +563,7 @@ const char *ModeName(CacheMode mode) {
 }
 
 unique_ptr<FunctionData> CacheStatusBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto &cache = MetadataCache::Get();
 
 	// The endpoint is optional here: without a secret the status still says
@@ -622,7 +622,7 @@ unique_ptr<FunctionData> CacheStatusBind(ClientContext &context, TableFunctionBi
 }
 
 unique_ptr<FunctionData> CacheInvalidateBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FusionScanOptions options;
 	const auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	const auto endpoint_key = EndpointKey(config, options.schema);
@@ -673,9 +673,9 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 
 	TableFunction tables("oracle_fusion_tables", {}, ScanMaterialised, TablesBind, InitMaterialised);
 	AddFusionNamedParameters(tables);
-	tables.named_parameters["refresh"] = LogicalType::BOOLEAN;
-	tables.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
-	tables.named_parameters["page_size"] = LogicalType::UBIGINT;
+	AddNamedParameter(tables, "refresh", LogicalType::BOOLEAN);
+	AddNamedParameter(tables, "cache_ttl_seconds", LogicalType::BIGINT);
+	AddNamedParameter(tables, "page_size", LogicalType::UBIGINT);
 	RegisterDocumented(loader, std::move(tables), {},
 	                   {"Lists the tables and views in Oracle Fusion's dictionary, caching the list on disk after the "
 	                    "first call.",
@@ -685,8 +685,8 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	TableFunction columns("oracle_fusion_columns", {LogicalType::VARCHAR}, ScanMaterialised, ColumnsBind,
 	                      InitMaterialised);
 	AddFusionNamedParameters(columns);
-	columns.named_parameters["refresh"] = LogicalType::BOOLEAN;
-	columns.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
+	AddNamedParameter(columns, "refresh", LogicalType::BOOLEAN);
+	AddNamedParameter(columns, "cache_ttl_seconds", LogicalType::BIGINT);
 	RegisterDocumented(loader, std::move(columns), {"table_name"},
 	                   {"Lists the columns of a Fusion table or view with their Oracle type, the DuckDB type they map "
 	                    "to, and whether that mapping can lose values.",
@@ -695,10 +695,10 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 
 	TableFunction warm("fusion_scanner_cache_warm", {}, ScanMaterialised, CacheWarmBind, InitMaterialised);
 	AddFusionNamedParameters(warm);
-	warm.named_parameters["pattern"] = LogicalType::VARCHAR;
-	warm.named_parameters["max_tables"] = LogicalType::BIGINT;
-	warm.named_parameters["cache_ttl_seconds"] = LogicalType::BIGINT;
-	warm.named_parameters["page_size"] = LogicalType::UBIGINT;
+	AddNamedParameter(warm, "pattern", LogicalType::VARCHAR);
+	AddNamedParameter(warm, "max_tables", LogicalType::BIGINT);
+	AddNamedParameter(warm, "cache_ttl_seconds", LogicalType::BIGINT);
+	AddNamedParameter(warm, "page_size", LogicalType::UBIGINT);
 	RegisterDocumented(loader, std::move(warm), {},
 	                   {"Fetches into the metadata cache the columns of Fusion tables whose names match pattern, a "
 	                    "case-insensitive LIKE, up to max_tables of them (200 by default, 0 for no limit).",
@@ -716,8 +716,8 @@ void RegisterFusionMetadataFunctions(ExtensionLoader &loader) {
 	TableFunction invalidate("fusion_scanner_cache_invalidate", {}, ScanMaterialised, CacheInvalidateBind,
 	                         InitMaterialised);
 	AddFusionNamedParameters(invalidate);
-	invalidate.named_parameters["table"] = LogicalType::VARCHAR;
-	invalidate.named_parameters["table_name"] = LogicalType::VARCHAR;
+	AddNamedParameter(invalidate, "table", LogicalType::VARCHAR);
+	AddNamedParameter(invalidate, "table_name", LogicalType::VARCHAR);
 	RegisterDocumented(loader, std::move(invalidate), {},
 	                   {"Removes an instance's dictionary from the metadata cache, or only one table's columns when "
 	                    "table_name is given.",

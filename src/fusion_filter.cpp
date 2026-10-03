@@ -2,11 +2,15 @@
 
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/planner/filter/conjunction_filter.hpp"
-#include "duckdb/planner/filter/constant_filter.hpp"
-#include "duckdb/planner/filter/in_filter.hpp"
-#include "duckdb/planner/filter/null_filter.hpp"
-#include "duckdb/planner/filter/optional_filter.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 
 namespace duckdb {
 
@@ -23,7 +27,7 @@ constexpr idx_t MAX_IN_LIST = 1000;
 }
 
 string QuoteIdentifier(const string &name) {
-	return KeywordHelper::WriteQuoted(name, '"');
+	return KeywordHelper::WriteQuotedAndEscaped(name, '"');
 }
 
 bool IsTextType(const LogicalType &type) {
@@ -129,83 +133,175 @@ string ComparisonOperator(ExpressionType comparison, const FusionColumn &column)
 	}
 }
 
-string TranslateFilter(const TableFilter &filter, const FusionColumn &column, const string &quoted_name);
+// DuckDB 2.0 hands a scan one kind of filter: an ExpressionFilter wrapping a
+// bound expression tree. The legacy filter classes still exist, but LogicalGet
+// converts every one of them through ExpressionFilter::FromTableFilter before a
+// scan sees it, so this is the only shape there is to translate:
+//
+//   col = C            BoundFunctionExpression whose GetExpressionType() is a
+//                      COMPARE_*; operands via BoundComparisonExpression::Left/Right
+//   col IS [NOT] NULL  BoundOperatorExpression(OPERATOR_IS_[NOT_]NULL), one child
+//   col IN (C, ...)    BoundOperatorExpression(COMPARE_IN), children [col, C, C, ...]
+//   a AND b / a OR b   BoundConjunctionExpression
+//   optional(f)        BoundFunctionExpression named OptionalFilterScalarFun::NAME,
+//                      the real predicate in its BindInfo()->child_filter_expr
+//
+// The column is a BoundReferenceExpression. A single-column filter refers to
+// index 0; anything else is a predicate over several columns, which this
+// translator does not attempt.
+
+bool IsOptionalWrapper(const Expression &expression) {
+	if (expression.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	const auto &name = expression.Cast<BoundFunctionExpression>().Function().GetName();
+	return name == OptionalFilterScalarFun::NAME || name == SelectivityOptionalFilterScalarFun::NAME;
+}
+
+//! The predicate an optional wrapper carries, or null when it carries none.
+const Expression *OptionalChild(const Expression &expression) {
+	const auto &function = expression.Cast<BoundFunctionExpression>();
+	if (!function.BindInfo()) {
+		return nullptr;
+	}
+	if (function.Function().GetName() == OptionalFilterScalarFun::NAME) {
+		return function.BindInfo()->Cast<OptionalFilterFunctionData>().child_filter_expr.get();
+	}
+	return function.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>().child_filter_expr.get();
+}
+
+void RequireColumnReference(const Expression &expression) {
+	if (expression.GetExpressionClass() != ExpressionClass::BOUND_REF) {
+		Refuse("a predicate whose subject is not the column itself");
+	}
+	if (expression.Cast<BoundReferenceExpression>().Index() != 0) {
+		// A filter over several columns binds them as references 0, 1, ...;
+		// this is handed one column and proves things about that column only.
+		Refuse("a predicate over more than one column");
+	}
+}
+
+const Value &RequireConstant(const Expression &expression) {
+	if (expression.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		Refuse("a comparison with something other than a constant");
+	}
+	return expression.Cast<BoundConstantExpression>().GetValue();
+}
+
+string TranslateExpression(const Expression &expression, const FusionColumn &column, const string &quoted_name);
+
+string TranslateComparison(const BoundFunctionExpression &comparison, const FusionColumn &column,
+                           const string &quoted_name) {
+	// The planner puts the column on the left of a pushed filter. A constant on
+	// the left would need the operator flipped, and nothing observed produces
+	// that shape, so it is refused rather than guessed at.
+	RequireColumnReference(BoundComparisonExpression::Left(comparison));
+	const auto &constant = RequireConstant(BoundComparisonExpression::Right(comparison));
+	return quoted_name + " " + ComparisonOperator(comparison.GetExpressionType(), column) + " " +
+	       OracleLiteral(constant, column);
+}
+
+string TranslateExpression(const Expression &expression, const FusionColumn &column, const string &quoted_name) {
+	if (IsOptionalWrapper(expression)) {
+		// Reached only beneath a required predicate, where dropping it is not
+		// allowed, so here it must translate or refuse like any other.
+		const auto *child = OptionalChild(expression);
+		if (!child) {
+			Refuse("an optional filter");
+		}
+		return TranslateExpression(*child, column, quoted_name);
+	}
+	switch (expression.GetExpressionClass()) {
+	case ExpressionClass::BOUND_FUNCTION:
+		if (!BoundComparisonExpression::IsComparison(expression)) {
+			// A dynamic or bloom filter is completed at run time from a join's
+			// build side, so there is nothing to render at bind time at all.
+			Refuse("a function call");
+		}
+		return TranslateComparison(expression.Cast<BoundFunctionExpression>(), column, quoted_name);
+	case ExpressionClass::BOUND_OPERATOR: {
+		const auto &op = expression.Cast<BoundOperatorExpression>();
+		const auto &children = op.GetChildren();
+		switch (op.GetExpressionType()) {
+		case ExpressionType::OPERATOR_IS_NULL:
+		case ExpressionType::OPERATOR_IS_NOT_NULL:
+			if (children.size() != 1) {
+				Refuse("a malformed null test");
+			}
+			RequireColumnReference(*children[0]);
+			return quoted_name +
+			       (op.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL ? " IS NULL" : " IS NOT NULL");
+		case ExpressionType::COMPARE_IN: {
+			if (children.size() < 2) {
+				Refuse("an empty IN list");
+			}
+			RequireColumnReference(*children[0]);
+			const auto value_count = children.size() - 1;
+			if (value_count > MAX_IN_LIST) {
+				Refuse("an IN list of " + std::to_string(value_count) + " values (Oracle allows " +
+				       std::to_string(MAX_IN_LIST) + ")");
+			}
+			string values;
+			for (idx_t index = 1; index < children.size(); index++) {
+				if (!values.empty()) {
+					values += ", ";
+				}
+				// One untranslatable element refuses the whole list: applying
+				// part of an IN would drop rows that belong in the result.
+				values += OracleLiteral(RequireConstant(*children[index]), column);
+			}
+			return quoted_name + " IN (" + values + ")";
+		}
+		default:
+			Refuse("operator " + ExpressionTypeToString(op.GetExpressionType()));
+		}
+	}
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		const auto &conjunction = expression.Cast<BoundConjunctionExpression>();
+		const char *joiner = conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_AND ? " AND " : " OR ";
+		string combined;
+		for (const auto &child : conjunction.GetChildren()) {
+			if (!combined.empty()) {
+				combined += joiner;
+			}
+			combined += TranslateExpression(*child, column, quoted_name);
+		}
+		if (combined.empty()) {
+			// It would silently become no predicate at all, and an empty OR is
+			// false, not true.
+			Refuse("an empty conjunction");
+		}
+		return "(" + combined + ")";
+	}
+	default:
+		Refuse("expression class " + ExpressionClassToString(expression.GetExpressionClass()));
+	}
+}
 
 //! An optional filter is a hint, not a requirement: DuckDB does not rely on it
-//! being applied, so one that cannot be translated is simply dropped.
-bool TryTranslateOptional(const TableFilter &filter, const FusionColumn &column, const string &quoted_name,
-                          string &out) {
-	const auto &optional = filter.Cast<OptionalFilter>();
-	if (!optional.child_filter) {
+//! being applied, so one that cannot be translated is simply dropped. Anything
+//! else must translate or refuse.
+bool TryTranslate(const TableFilter &filter, const FusionColumn &column, const string &quoted_name, string &out) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		// LogicalGet converts every legacy filter before a scan sees it, so one
+		// arriving here is a planner path this code has not met.
+		Refuse("filter kind " + std::to_string(static_cast<int>(filter.filter_type)));
+	}
+	const auto &expression = *filter.Cast<ExpressionFilter>().expr;
+	if (!IsOptionalWrapper(expression)) {
+		out = TranslateExpression(expression, column, quoted_name);
+		return true;
+	}
+	const auto *child = OptionalChild(expression);
+	if (!child) {
 		return false;
 	}
 	try {
-		out = TranslateFilter(*optional.child_filter, column, quoted_name);
+		out = TranslateExpression(*child, column, quoted_name);
 		return true;
 	} catch (const NotImplementedException &) {
+		// Dropping an optional filter is allowed; refusing the query is not.
 		return false;
-	}
-}
-
-string TranslateConjunction(const vector<unique_ptr<TableFilter>> &children, const FusionColumn &column,
-                            const string &quoted_name, const char *joiner) {
-	string combined;
-	for (const auto &child : children) {
-		const auto translated = TranslateFilter(*child, column, quoted_name);
-		if (!combined.empty()) {
-			combined += joiner;
-		}
-		combined += translated;
-	}
-	return combined.empty() ? combined : "(" + combined + ")";
-}
-
-string TranslateFilter(const TableFilter &filter, const FusionColumn &column, const string &quoted_name) {
-	switch (filter.filter_type) {
-	case TableFilterType::IS_NULL:
-		return quoted_name + " IS NULL";
-	case TableFilterType::IS_NOT_NULL:
-		return quoted_name + " IS NOT NULL";
-	case TableFilterType::CONSTANT_COMPARISON: {
-		const auto &comparison = filter.Cast<ConstantFilter>();
-		return quoted_name + " " + ComparisonOperator(comparison.comparison_type, column) + " " +
-		       OracleLiteral(comparison.constant, column);
-	}
-	case TableFilterType::IN_FILTER: {
-		const auto &in_filter = filter.Cast<InFilter>();
-		if (in_filter.values.size() > MAX_IN_LIST) {
-			Refuse("an IN list of " + std::to_string(in_filter.values.size()) + " values (Oracle allows " +
-			       std::to_string(MAX_IN_LIST) + ")");
-		}
-		string values;
-		for (const auto &value : in_filter.values) {
-			if (!values.empty()) {
-				values += ", ";
-			}
-			// One untranslatable element refuses the whole list: applying part
-			// of an IN would drop rows that belong in the result.
-			values += OracleLiteral(value, column);
-		}
-		if (values.empty()) {
-			Refuse("an empty IN list");
-		}
-		return quoted_name + " IN (" + values + ")";
-	}
-	case TableFilterType::CONJUNCTION_AND:
-		return TranslateConjunction(filter.Cast<ConjunctionAndFilter>().child_filters, column, quoted_name, " AND ");
-	case TableFilterType::CONJUNCTION_OR:
-		return TranslateConjunction(filter.Cast<ConjunctionOrFilter>().child_filters, column, quoted_name, " OR ");
-	case TableFilterType::OPTIONAL_FILTER: {
-		string translated;
-		if (!TryTranslateOptional(filter, column, quoted_name, translated)) {
-			Refuse("an optional filter");
-		}
-		return translated;
-	}
-	default:
-		// DYNAMIC_FILTER and BLOOM_FILTER are completed at run time from a join
-		// build side, so there is nothing to render at bind time at all.
-		Refuse("filter kind " + std::to_string(static_cast<int>(filter.filter_type)));
 	}
 }
 
@@ -213,13 +309,19 @@ string TranslateFilter(const TableFilter &filter, const FusionColumn &column, co
 
 string BuildOracleWhereClause(const TableFilterSet &filters, const vector<FusionColumn> &columns,
                               const vector<column_t> &scanned_columns) {
+	if (filters.HasMultiColumnFilters()) {
+		// Each column of such a predicate is bound as its own reference; this
+		// translator proves things about one column at a time.
+		Refuse("a predicate over more than one column");
+	}
 	string predicate;
-	for (const auto &entry : filters.filters) {
+	for (const auto &entry : filters) {
 		// The key indexes the projection, not the table.
-		if (entry.first >= scanned_columns.size()) {
+		const auto projection = entry.GetIndex().GetIndex();
+		if (projection >= scanned_columns.size()) {
 			Refuse("a filter on a column this scan does not read");
 		}
-		const auto column_index = scanned_columns[entry.first];
+		const auto column_index = scanned_columns[projection];
 		if (column_index >= columns.size()) {
 			Refuse("a filter on a virtual column");
 		}
@@ -230,17 +332,8 @@ string BuildOracleWhereClause(const TableFilterSet &filters, const vector<Fusion
 			Refuse("a filter on a column whose type was inferred rather than read from the dictionary");
 		}
 
-		const auto quoted_name = QuoteIdentifier(column.name);
 		string translated;
-		if (entry.second->filter_type == TableFilterType::OPTIONAL_FILTER) {
-			// Dropping an optional filter is allowed; refusing the query is not.
-			if (!TryTranslateOptional(*entry.second, column, quoted_name, translated)) {
-				continue;
-			}
-		} else {
-			translated = TranslateFilter(*entry.second, column, quoted_name);
-		}
-		if (translated.empty()) {
+		if (!TryTranslate(entry.Filter(), column, QuoteIdentifier(column.name), translated)) {
 			continue;
 		}
 		if (!predicate.empty()) {

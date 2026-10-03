@@ -38,15 +38,15 @@ void ScanSso(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 	auto &state = data.global_state->Cast<SsoState>();
 
 	if (state.offset >= bind_data.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t to_emit = MinValue<idx_t>(STANDARD_VECTOR_SIZE, bind_data.rows.size() - state.offset);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 	for (idx_t row = 0; row < to_emit; row++) {
 		const auto &values = bind_data.rows[state.offset + row];
 		for (idx_t column = 0; column < values.size(); column++) {
-			output.SetValue(column, row, values[column]);
+			output.data[column].SetValue(row, values[column]);
 		}
 	}
 	state.offset += to_emit;
@@ -75,7 +75,7 @@ Value TimestampFromEpoch(int64_t epoch_seconds) {
 }
 
 unique_ptr<FunctionData> SsoLoginBind(ClientContext &context, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FusionScanOptions options;
 	auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	const auto host = ofquack::HostOf(config.endpoint);
@@ -124,7 +124,7 @@ unique_ptr<FunctionData> SsoLoginBind(ClientContext &context, TableFunctionBindI
 }
 
 unique_ptr<FunctionData> SsoStatusBind(ClientContext &context, TableFunctionBindInput &input,
-                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<SsoBindData>();
 
 	// Works without a secret: with one, it reports that host specifically.
@@ -155,7 +155,7 @@ unique_ptr<FunctionData> SsoStatusBind(ClientContext &context, TableFunctionBind
 }
 
 unique_ptr<FunctionData> SsoLogoutBind(ClientContext &context, TableFunctionBindInput &input,
-                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FusionScanOptions options;
 	const auto config = ResolveFusionConfig(context, input.named_parameters, options);
 	const auto host = ofquack::HostOf(config.endpoint);
@@ -178,7 +178,7 @@ void RegisterFusionSsoFunctions(ExtensionLoader &loader) {
 	// unexpectedly in the middle of somebody's SELECT.
 	TableFunction login("fusion_scanner_sso_login", {}, ScanSso, SsoLoginBind, InitSso);
 	AddFusionNamedParameters(login);
-	login.named_parameters["force"] = LogicalType::BOOLEAN;
+	AddNamedParameter(login, "force", LogicalType::BOOLEAN);
 	RegisterDocumented(loader, std::move(login), {},
 	                   {"Signs in to Oracle Fusion through a browser window and caches the token for the host, "
 	                    "reusing a still-valid token unless force := true.",

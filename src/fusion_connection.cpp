@@ -92,7 +92,7 @@ unique_ptr<SecretEntry> LookupSoleSecret(ClientContext &context) {
 	vector<string> candidates;
 	for (auto &entry : all) {
 		if (entry.secret && entry.secret->GetType() == SECRET_TYPE) {
-			candidates.push_back(entry.secret->GetName());
+			candidates.push_back(entry.secret->GetName().GetIdentifierName());
 		}
 	}
 	if (candidates.empty()) {
@@ -110,31 +110,43 @@ unique_ptr<SecretEntry> LookupSoleSecret(ClientContext &context) {
 	return LookupByName(context, candidates[0]);
 }
 
-Value NamedParameter(const named_parameter_map_t &named_parameters, const char *key) {
+Value NamedParameter(const named_argument_map_t &named_parameters, const char *key) {
 	const auto entry = named_parameters.find(key);
 	return entry == named_parameters.end() ? Value() : entry->second;
 }
 
-std::string NamedString(const named_parameter_map_t &named_parameters, const char *key) {
+std::string NamedString(const named_argument_map_t &named_parameters, const char *key) {
 	const auto value = NamedParameter(named_parameters, key);
 	return value.IsNull() ? std::string() : value.ToString();
 }
 
 } // namespace
 
+void AddNamedParameter(TableFunction &function, const std::string &name, LogicalType type) {
+	const auto declare = [&](TypedKwargs &options) {
+		options.Add(Identifier(name), std::move(type));
+	};
+	auto &signature = function.GetSignature();
+	if (signature.GetTypedKwargs()) {
+		signature.ExtendTypedKwargs(declare);
+	} else {
+		signature.WithTypedKwargs(Identifier("options"), declare);
+	}
+}
+
 void AddFusionNamedParameters(TableFunction &function) {
-	function.named_parameters["secret"] = LogicalType::VARCHAR;
-	function.named_parameters["endpoint"] = LogicalType::VARCHAR;
-	function.named_parameters["report_path"] = LogicalType::VARCHAR;
-	function.named_parameters["username"] = LogicalType::VARCHAR;
-	function.named_parameters["password"] = LogicalType::VARCHAR;
-	function.named_parameters["fetch_size"] = LogicalType::UBIGINT;
-	function.named_parameters["number_mode"] = LogicalType::VARCHAR;
-	function.named_parameters["on_cast_error"] = LogicalType::VARCHAR;
-	function.named_parameters["schema"] = LogicalType::VARCHAR;
-	function.named_parameters["secured_views"] = LogicalType::BOOLEAN;
-	function.named_parameters["all_varchar"] = LogicalType::BOOLEAN;
-	function.named_parameters["stable_paging"] = LogicalType::BOOLEAN;
+	AddNamedParameter(function, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(function, "endpoint", LogicalType::VARCHAR);
+	AddNamedParameter(function, "report_path", LogicalType::VARCHAR);
+	AddNamedParameter(function, "username", LogicalType::VARCHAR);
+	AddNamedParameter(function, "password", LogicalType::VARCHAR);
+	AddNamedParameter(function, "fetch_size", LogicalType::UBIGINT);
+	AddNamedParameter(function, "number_mode", LogicalType::VARCHAR);
+	AddNamedParameter(function, "on_cast_error", LogicalType::VARCHAR);
+	AddNamedParameter(function, "schema", LogicalType::VARCHAR);
+	AddNamedParameter(function, "secured_views", LogicalType::BOOLEAN);
+	AddNamedParameter(function, "all_varchar", LogicalType::BOOLEAN);
+	AddNamedParameter(function, "stable_paging", LogicalType::BOOLEAN);
 }
 
 void ThrowConversionError(const string &source, const string &column_name, const LogicalType &type, const string &value,
@@ -188,7 +200,7 @@ void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 	                            host);
 }
 
-ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_parameter_map_t &named_parameters,
+ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_argument_map_t &named_parameters,
                                           FusionScanOptions &options) {
 	const auto secret_name = NamedString(named_parameters, "secret");
 	const auto endpoint_override = NamedString(named_parameters, "endpoint");
@@ -206,7 +218,7 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 
 	ofquack::FusionConfig config;
 	if (entry) {
-		const auto &secret = AsFusionSecret(*entry, entry->secret->GetName());
+		const auto &secret = AsFusionSecret(*entry, entry->secret->GetName().GetIdentifierName());
 		config.endpoint = SecretString(secret, "endpoint");
 		config.report_path = SecretString(secret, "report_path");
 		config.username = SecretString(secret, "username");

@@ -142,6 +142,13 @@ if(FUSION_SCANNER_BUILD_TESTS)
   add_executable(fusion_scanner_adapter_test test/cpp/adapter_test.cpp)
   target_link_libraries(fusion_scanner_adapter_test PRIVATE duckdb_static)
   link_extension_libraries(fusion_scanner_adapter_test PRIVATE)
+  # DuckDB 2.0 resolves which extensions are linked only after every extension
+  # directory has been processed, so the call above sees an empty list here.
+  # Name this extension's own archive and core_functions, whose target is
+  # declared after this directory -- which is why it is named rather than passed
+  # to duckdb_link_extensions. The test loads both explicitly.
+  target_link_libraries(fusion_scanner_adapter_test PRIVATE ${EXTENSION_NAME} core_functions_extension)
+  target_include_directories(fusion_scanner_adapter_test PRIVATE ${CMAKE_SOURCE_DIR}/extension/core_functions/include)
   target_include_directories(fusion_scanner_adapter_test PRIVATE src src/include)
   target_compile_features(fusion_scanner_adapter_test PRIVATE cxx_std_17)
   add_test(NAME fusion_scanner_adapter_test COMMAND fusion_scanner_adapter_test)

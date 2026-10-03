@@ -98,7 +98,7 @@ ofquack::ParsedReport ParseResponseOrThrow(const std::string &soap_xml, const st
 //! query stuck on a slow report can be interrupted.
 std::string ExecuteOrThrow(ofquack::FusionTransport &transport, const std::string &sql, ClientContext &context) {
 	ofquack::RequestContext request_context;
-	request_context.is_cancelled = [&context]() { return context.interrupted.load(); };
+	request_context.is_cancelled = [&context]() { return context.IsInterrupted(); };
 
 	try {
 		return transport.Execute(sql, request_context);
@@ -261,7 +261,9 @@ void ReadDeclaredColumns(ClientContext &context, const Value &declared, const of
 		                      "the data");
 	}
 	for (idx_t i = 0; i < children.size(); i++) {
-		const auto &column_name = children[i].first;
+		// The raw text, not the Identifier: an Identifier compares without
+		// regard to case, and these names are matched exactly.
+		const auto &column_name = children[i].first.GetIdentifierName();
 		if (values[i].IsNull()) {
 			throw BinderException("columns entry '%s' has no type", column_name);
 		}
@@ -297,7 +299,7 @@ void InferColumnTypes(const ofquack::ParsedReport &page, const vector<string> &c
 }
 
 unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<FusionQueryBindData>();
 	const auto raw_sql = input.inputs[0].GetValue<string>();
 	if (raw_sql.empty()) {
@@ -380,7 +382,7 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 	}
 
 	for (idx_t i = 0; i < bind_data->columns.size(); i++) {
-		names.push_back(bind_data->columns[i]);
+		names.push_back(Identifier(bind_data->columns[i]));
 		return_types.push_back(bind_data->column_types[i]);
 	}
 	return std::move(bind_data);
@@ -441,9 +443,9 @@ unique_ptr<GlobalTableFunctionState> FusionQueryInitGlobal(ClientContext &contex
 void EmitColumn(Vector &vector, const std::vector<ofquack::ReportRow> &rows, idx_t from, idx_t count,
                 const string &column_name, const LogicalType &type, CastErrorMode on_cast_error,
                 const string &source) {
-	auto &validity = FlatVector::Validity(vector);
+	auto &validity = FlatVector::ValidityMutable(vector);
 	const bool as_varchar = type.id() == LogicalTypeId::VARCHAR;
-	auto entries = as_varchar ? FlatVector::GetData<string_t>(vector) : nullptr;
+	auto entries = as_varchar ? FlatVector::GetDataMutable<string_t>(vector) : nullptr;
 
 	for (idx_t row_index = 0; row_index < count; row_index++) {
 		const auto &row = rows[from + row_index];
@@ -470,16 +472,16 @@ void EmitColumn(Vector &vector, const std::vector<ofquack::ReportRow> &rows, idx
 		//
 		// The error string is not optional: passing nullptr makes TryCast
 		// throw rather than report, which is the opposite of what is wanted.
-		Value converted;
 		string conversion_error;
-		if (!Value(entry->second).DefaultTryCastAs(type, converted, &conversion_error)) {
+		const auto converted = Value(entry->second).DefaultTryCastAs(type, &conversion_error);
+		if (!converted) {
 			if (on_cast_error == CastErrorMode::FAIL) {
 				ThrowConversionError(source, column_name, type, entry->second, conversion_error);
 			}
 			validity.SetInvalid(row_index);
 			continue;
 		}
-		vector.SetValue(row_index, converted);
+		vector.SetValue(row_index, *converted);
 	}
 }
 
@@ -491,7 +493,7 @@ void FusionQueryScan(ClientContext &context, TableFunctionInput &data, DataChunk
 	// page has been fully handed over.
 	while (state.offset_in_page >= state.page.rows.size()) {
 		if (!state.more_pages) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		auto fetched = FetchPageOf(*bind_data.transport, bind_data, state.paged_sql, context, state.rows_emitted);
@@ -504,7 +506,7 @@ void FusionQueryScan(ClientContext &context, TableFunctionInput &data, DataChunk
 
 	const idx_t to_emit =
 	    MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.page.rows.size() - state.offset_in_page);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 	for (idx_t column_index = 0; column_index < bind_data.columns.size(); column_index++) {
 		EmitColumn(output.data[column_index], state.page.rows, state.offset_in_page, to_emit,
 		           bind_data.columns[column_index], bind_data.column_types[column_index],
@@ -523,7 +525,7 @@ void RegisterFusionQueryFunction(ExtensionLoader &loader) {
 	// Only on this function, deliberately. An attached table's schema comes from
 	// the dictionary, so a `columns` accepted there would be accepted and
 	// ignored -- the shape of hole this codebase has already been caught by once.
-	query.named_parameters["columns"] = LogicalType::ANY;
+	AddNamedParameter(query, "columns", LogicalType::ANY);
 	RegisterDocumented(loader, std::move(query), {"sql"},
 	                   {"Runs a SQL query in Oracle Fusion through the BI Publisher report and returns its rows, "
 	                    "paging the result and inferring column types from the first page.",

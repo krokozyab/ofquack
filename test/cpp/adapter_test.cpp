@@ -20,7 +20,9 @@
 #include "fusion_scanner_extension.hpp"
 
 #include "base64.h"
+#include "core_functions_extension.hpp"
 #include "duckdb.hpp"
+#include "duckdb/main/query_result_stream.hpp"
 
 #include <algorithm>
 #include <set>
@@ -42,8 +44,107 @@
 		}                                                                                                              \
 	} while (0)
 
-using duckdb::Connection;
-using duckdb::DuckDB;
+// DuckDB 2.0 returns a QueryResult that is read unit by unit, with no
+// (column, row) access, and has no MaterializedQueryResult. These tests read
+// results after the fact, so this collects one up front: every row as Values,
+// or the error, whether it surfaced when the query was run or while its rows
+// were fetched.
+class MaterializedQueryResult {
+public:
+	explicit MaterializedQueryResult(duckdb::unique_ptr<duckdb::QueryResult> result) {
+		if (result->HasError()) {
+			error = result->GetError();
+			return;
+		}
+		types = result->GetTypes();
+		for (const auto &name : result->GetNames()) {
+			names.push_back(name.GetIdentifierName());
+		}
+		try {
+			while (auto chunk = result->Fetch()) {
+				if (chunk->size() == 0) {
+					break;
+				}
+				for (duckdb::idx_t row = 0; row < chunk->size(); row++) {
+					std::vector<duckdb::Value> values;
+					for (duckdb::idx_t column = 0; column < types.size(); column++) {
+						values.push_back(chunk->GetValue(column, row));
+					}
+					rows.push_back(std::move(values));
+				}
+			}
+		} catch (const std::exception &exception) {
+			error = duckdb::ErrorData(exception).Message();
+			rows.clear();
+		}
+		if (result->HasError() && error.empty()) {
+			error = result->GetError();
+			rows.clear();
+		}
+	}
+
+	bool HasError() const {
+		return !error.empty();
+	}
+	const std::string &GetError() const {
+		return error;
+	}
+	duckdb::idx_t RowCount() const {
+		return rows.size();
+	}
+	duckdb::idx_t ColumnCount() const {
+		return types.size();
+	}
+	duckdb::Value GetValue(duckdb::idx_t column, duckdb::idx_t row) const {
+		return rows.at(row).at(column);
+	}
+
+	std::vector<duckdb::LogicalType> types;
+	std::vector<std::string> names;
+
+private:
+	std::string error;
+	std::vector<std::vector<duckdb::Value>> rows;
+};
+
+// DuckDB 2.0 builds an extension and links it as separate decisions, and keeps
+// list_value and the other core functions in an extension of their own, so a
+// database opened here has neither until it is told to load them.
+class DuckDB : public duckdb::DuckDB {
+public:
+	explicit DuckDB(const char *path) : duckdb::DuckDB(path) {
+		LoadStaticExtension<duckdb::CoreFunctionsExtension>();
+		LoadStaticExtension<duckdb::FusionScannerExtension>();
+	}
+};
+
+class Connection {
+public:
+	explicit Connection(duckdb::DuckDB &db) : connection(db), context(connection.context) {
+	}
+
+	std::unique_ptr<MaterializedQueryResult> Query(const std::string &sql) {
+		return std::make_unique<MaterializedQueryResult>(connection.Query(sql));
+	}
+
+	//! The first chunk of a result read as a stream, which is what the shell
+	//! and every pipeline operator consume.
+	duckdb::unique_ptr<duckdb::DataChunk> FirstStreamedChunk(const std::string &sql) {
+		auto submitted = connection.Submit(sql);
+		if (submitted->HasError()) {
+			std::cerr << "query failed: " << submitted->GetError() << std::endl;
+			std::abort();
+		}
+		duckdb::QueryResultStream<> streamed(std::move(submitted));
+		return streamed.Fetch();
+	}
+
+private:
+	duckdb::Connection connection;
+
+public:
+	duckdb::shared_ptr<duckdb::ClientContext> context;
+};
 
 using ofquack::FusionConfig;
 using ofquack::FusionTransport;
@@ -126,7 +227,7 @@ void CreateSecret(Connection &connection, const char *name = "fusion") {
 	}
 }
 
-std::unique_ptr<duckdb::MaterializedQueryResult> RunQuery(Connection &connection, const std::string &sql) {
+std::unique_ptr<MaterializedQueryResult> RunQuery(Connection &connection, const std::string &sql) {
 	auto result = connection.Query(sql);
 	if (result->HasError()) {
 		std::cerr << "query failed: " << result->GetError() << std::endl;
@@ -295,6 +396,47 @@ void TestMissingColumnBecomesNull() {
 	CHECK(result->GetValue(1, 2).IsNull());           // absent -> NULL
 }
 
+//! Defined with the metadata tests below; the cache is a process-wide
+//! singleton, so a test asserting a fetch must start from an empty one.
+void ResetCache();
+
+// A NULL has to survive from the report to whatever DuckDB evaluates on top of
+// the scan. In DuckDB 2.0 every vector carries its own size, and a scan that set
+// only the chunk's cardinality emitted vectors of size zero; IS NULL sizes its
+// loop from the vector, evaluated over nothing, and read false on every row.
+//
+// The form of the query matters. A lone `CODE IS NULL`, a count(*) over a WHERE
+// and a materialized result all pass with the bug in place, because each
+// re-sizes what it reads from the chunk's count. What does not get repaired is
+// a reference to the scan's own vector inside a wider projection, read as a
+// stream -- so that is what these read.
+void TestNullsSurviveAboveTheScan() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;CODE&gt;A&lt;/CODE&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Gamma&lt;/NAME&gt;&lt;CODE&gt;C&lt;/CODE&gt;&lt;/ROW&gt;"
+	                  "&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	const std::string scan = "oracle_fusion_query('SELECT NAME, CODE FROM FND_CURRENCIES_TL')";
+
+	auto chunk = connection.FirstStreamedChunk("SELECT NAME, CODE, CODE IS NULL AS n FROM " + scan);
+	CHECK(chunk != nullptr && chunk->size() == 3);
+	CHECK(chunk->GetValue(1, 1).IsNull());
+	CHECK(chunk->GetValue(2, 0).GetValue<bool>() == false);
+	CHECK(chunk->GetValue(2, 1).GetValue<bool>() == true);
+	CHECK(chunk->GetValue(2, 2).GetValue<bool>() == false);
+
+	// And the aggregate, which counts non-NULLs by the same validity.
+	auto counted = RunQuery(connection, "SELECT count(CODE) FROM " + scan);
+	CHECK(counted->GetValue(0, 0).GetValue<int64_t>() == 2);
+}
+
 void TestScanEmitsMoreThanOneVector() {
 	std::string rowset = "&lt;ROWSET&gt;";
 	const int row_count = STANDARD_VECTOR_SIZE + 17;
@@ -430,10 +572,6 @@ void TestFullEndpointIsLeftAlone() {
 	CHECK(script.configs[0].endpoint ==
 	      "https://fusion.example.com/xmlpserver/services/ExternalReportWSSService?WSDL");
 }
-
-//! Defined with the metadata tests below; the cache is a process-wide
-//! singleton, so a test asserting a fetch must start from an empty one.
-void ResetCache();
 
 //! A metadata query that gets something other than a report must say what it
 //! got. "Missing SOAP Envelope" describes the shape of a response without
@@ -1996,6 +2134,9 @@ public:
 			    "&lt;KEY_SEQ&gt;1&lt;/KEY_SEQ&gt;&lt;/ROW&gt;&lt;/ROWSET&gt;"));
 		}
 		// A scan of the table itself.
+		if (!script.response.empty()) {
+			return script.response;
+		}
 		return MakeSoapResponse(MakeReportXML(
 		    "&lt;ROWSET&gt;"
 		    "&lt;ROW&gt;&lt;JE_HEADER_ID&gt;1&lt;/JE_HEADER_ID&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;/ROW&gt;"
@@ -2293,6 +2434,34 @@ void TestRetainedCatalogColumnsSurviveInvalidation() {
 	DuckDB db(nullptr);
 	Connection connection(db);
 	CHECK(duckdb::CatalogColumnsSurviveInvalidationForTesting(*connection.context));
+}
+
+// The attached scan writes its chunks in a function of its own, so the NULL
+// has to be shown to survive there as well; see TestNullsSurviveAboveTheScan.
+void TestNullsSurviveAboveAnAttachedScan() {
+	ResetCache();
+	Script script;
+	script.response = MakeSoapResponse(MakeReportXML(
+	    "&lt;ROWSET&gt;"
+	    "&lt;ROW&gt;&lt;JE_HEADER_ID&gt;1&lt;/JE_HEADER_ID&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;/ROW&gt;"
+	    "&lt;ROW&gt;&lt;JE_HEADER_ID&gt;2&lt;/JE_HEADER_ID&gt;&lt;/ROW&gt;"
+	    "&lt;/ROWSET&gt;"));
+	auto installed = InstallCatalog(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	Attach(connection);
+
+	auto chunk =
+	    connection.FirstStreamedChunk("SELECT JE_HEADER_ID, NAME, NAME IS NULL AS n FROM fus.main.GL_JE_HEADERS");
+	CHECK(chunk != nullptr && chunk->size() == 2);
+	CHECK(chunk->GetValue(1, 1).IsNull());
+	CHECK(chunk->GetValue(2, 0).GetValue<bool>() == false);
+	CHECK(chunk->GetValue(2, 1).GetValue<bool>() == true);
+
+	auto counted = RunQuery(connection, "SELECT count(NAME) FROM fus.main.GL_JE_HEADERS");
+	CHECK(counted->GetValue(0, 0).GetValue<int64_t>() == 1);
 }
 
 void TestFilterPushdownIsOffByDefault() {
@@ -2864,6 +3033,7 @@ const TestCase TESTS[] = {
     {"html login page becomes an error", TestHtmlLoginPageBecomesAnError},
     {"empty result is an error", TestEmptyResultIsAnErrorRatherThanAGuessedSchema},
     {"missing column becomes null", TestMissingColumnBecomesNull},
+    {"nulls survive above the scan", TestNullsSurviveAboveTheScan},
     {"scan emits more than one vector", TestScanEmitsMoreThanOneVector},
     {"transport failure surfaces as query error", TestTransportFailureSurfacesAsQueryError},
     {"missing secret is explained", TestMissingSecretIsExplained},
@@ -2931,6 +3101,7 @@ const TestCase TESTS[] = {
     {"attached scan orders by the primary key", TestAttachedScanOrdersByThePrimaryKey},
     {"attached entry rejects invalidated metadata", TestAttachedEntryRejectsInvalidatedMetadata},
     {"retained catalog columns survive invalidation", TestRetainedCatalogColumnsSurviveInvalidation},
+    {"nulls survive above an attached scan", TestNullsSurviveAboveAnAttachedScan},
     {"filter pushdown is off by default", TestFilterPushdownIsOffByDefault},
     {"filter pushdown when enabled", TestFilterPushdownWhenEnabled},
     {"untranslatable filter is refused", TestUntranslatableFilterIsRefusedRatherThanApproximated},
@@ -2957,11 +3128,18 @@ const TestCase TESTS[] = {
 
 } // namespace
 
-int main() {
+// With an argument, runs only the tests whose name contains it.
+int main(int argc, char **argv) {
+	const std::string wanted = argc > 1 ? argv[1] : "";
+	size_t ran = 0;
 	for (const auto &test : TESTS) {
+		if (!wanted.empty() && std::string(test.name).find(wanted) == std::string::npos) {
+			continue;
+		}
 		std::cout << "  " << test.name << std::endl;
 		test.run();
+		ran++;
 	}
-	std::cout << sizeof(TESTS) / sizeof(TESTS[0]) << " adapter tests passed" << std::endl;
+	std::cout << ran << " adapter tests passed" << std::endl;
 	return 0;
 }

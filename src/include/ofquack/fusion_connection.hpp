@@ -54,7 +54,7 @@ struct FusionScanOptions {
 //!   3. neither                   -- the only oracle_fusion secret, if there is
 //!                                   exactly one.
 //! Named parameters override whatever the secret carries.
-ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_parameter_map_t &named_parameters,
+ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_argument_map_t &named_parameters,
                                           FusionScanOptions &options);
 
 //! Raised for a value that does not fit its column under
@@ -67,6 +67,13 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_pa
 //! function. Call from anything that is about to send a request; the SSO
 //! functions deliberately do not.
 void RequireUsableCredentials(const ofquack::FusionConfig &config);
+
+//! Declares one optional named parameter on a table function.
+//!
+//! DuckDB 2.0 has no `named_parameters` map on a function: an optional named
+//! argument is an option of a typed `**options` parameter, as read_csv declares
+//! its own. The bind still finds it in `input.named_parameters`.
+void AddNamedParameter(TableFunction &function, const std::string &name, LogicalType type);
 
 //! Registers `secret`, `endpoint`, `report_path`, `fetch_size` and friends on a
 //! table function, so every entry point accepts the same spelling.

@@ -111,6 +111,63 @@ std::string Escape(const std::string &value) {
 	return escaped;
 }
 
+//! The rows of a cache query, read up front.
+//!
+//! DuckDB 2.0 hands back a QueryResult that is read unit by unit, with no
+//! (column, row) access. Every reader here wants a handful of values after the
+//! fact, so this collects them once. A failure, whenever it surfaced, leaves it
+//! failed and empty -- which every caller already treats as a cache miss.
+class CacheRows {
+public:
+	CacheRows(Connection &connection, const std::string &sql) {
+		try {
+			auto result = connection.Query(sql);
+			if (!result || result->HasError()) {
+				failed = true;
+				return;
+			}
+			const auto column_count = result->ColumnCount();
+			while (auto chunk = result->Fetch()) {
+				if (chunk->size() == 0) {
+					break;
+				}
+				for (idx_t row = 0; row < chunk->size(); row++) {
+					std::vector<Value> values;
+					values.reserve(column_count);
+					for (idx_t column = 0; column < column_count; column++) {
+						values.push_back(chunk->GetValue(column, row));
+					}
+					rows.push_back(std::move(values));
+				}
+			}
+			failed = result->HasError();
+		} catch (const std::exception &) {
+			failed = true;
+		}
+		if (failed) {
+			rows.clear();
+		}
+	}
+
+	bool HasError() const {
+		return failed;
+	}
+	idx_t RowCount() const {
+		return rows.size();
+	}
+	const Value &GetValue(idx_t column, idx_t row) const {
+		return rows.at(row).at(column);
+	}
+
+private:
+	bool failed = false;
+	std::vector<std::vector<Value>> rows;
+};
+
+unique_ptr<CacheRows> ReadRows(Connection &connection, const std::string &sql) {
+	return make_uniq<CacheRows>(connection, sql);
+}
+
 void CheckedQuery(Connection &connection, const std::string &sql) {
 	auto result = connection.Query(sql);
 	if (!result || result->HasError()) {
@@ -208,7 +265,7 @@ void MetadataCache::Open(const std::string &requested_path) {
 			config.options.access_mode = AccessMode::READ_ONLY;
 			database = make_uniq<DuckDB>(path, &config);
 			connection = make_uniq<Connection>(*database);
-			auto version = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'schema_version'");
+			auto version = ReadRows(*connection, "SELECT VALUE FROM CACHE_META WHERE KEY = 'schema_version'");
 			if (!version || version->HasError() || version->RowCount() != 1 ||
 			    version->GetValue(0, 0).ToString() != SCHEMA_VERSION) {
 				throw std::runtime_error("the read-only metadata cache has an incompatible schema");
@@ -243,7 +300,7 @@ void MetadataCache::EnsureSchema() {
 		return;
 	}
 	CheckedQuery(*connection, CREATE_META);
-	auto version = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'schema_version'");
+	auto version = ReadRows(*connection, "SELECT VALUE FROM CACHE_META WHERE KEY = 'schema_version'");
 	const bool matches = version && !version->HasError() && version->RowCount() == 1 &&
 	                     version->GetValue(0, 0).ToString() == SCHEMA_VERSION;
 	if (!matches) {
@@ -285,7 +342,7 @@ idx_t MetadataCache::CountTables(const std::string &endpoint_key) {
 		return 0;
 	}
 	auto result =
-	    connection->Query("SELECT count(*) FROM CACHED_TABLES WHERE ENDPOINT_KEY = '" + Escape(endpoint_key) + "'");
+	    ReadRows(*connection, "SELECT count(*) FROM CACHED_TABLES WHERE ENDPOINT_KEY = '" + Escape(endpoint_key) + "'");
 	if (!result || result->HasError() || result->RowCount() != 1) {
 		return 0;
 	}
@@ -298,7 +355,7 @@ idx_t MetadataCache::CountColumns(const std::string &endpoint_key) {
 		return 0;
 	}
 	// The marker rows are bookkeeping, not columns anyone asked about.
-	auto result = connection->Query("SELECT count(*) FROM CACHED_COLUMNS WHERE ENDPOINT_KEY = '" +
+	auto result = ReadRows(*connection, "SELECT count(*) FROM CACHED_COLUMNS WHERE ENDPOINT_KEY = '" +
 	                                Escape(endpoint_key) + "' AND COLUMN_NAME <> '" + NO_COLUMNS_MARKER + "'");
 	if (!result || result->HasError() || result->RowCount() != 1) {
 		return 0;
@@ -311,7 +368,7 @@ idx_t MetadataCache::CountFreshTables(const std::string &endpoint_key, int64_t t
 	if (!connection) {
 		return 0;
 	}
-	auto result = connection->Query("SELECT count(*) FROM CACHED_TABLES WHERE ENDPOINT_KEY = '" + Escape(endpoint_key) +
+	auto result = ReadRows(*connection, "SELECT count(*) FROM CACHED_TABLES WHERE ENDPOINT_KEY = '" + Escape(endpoint_key) +
 	                                "'" + FreshnessPredicate(ttl_seconds));
 	if (!result || result->HasError() || result->RowCount() != 1) {
 		return 0;
@@ -325,7 +382,7 @@ idx_t MetadataCache::CountFreshColumns(const std::string &endpoint_key, int64_t 
 		return 0;
 	}
 	auto result =
-	    connection->Query("SELECT count(*) FROM CACHED_COLUMNS WHERE ENDPOINT_KEY = '" + Escape(endpoint_key) +
+	    ReadRows(*connection, "SELECT count(*) FROM CACHED_COLUMNS WHERE ENDPOINT_KEY = '" + Escape(endpoint_key) +
 	                      "' AND COLUMN_NAME <> '" + NO_COLUMNS_MARKER + "'" + FreshnessPredicate(ttl_seconds));
 	if (!result || result->HasError() || result->RowCount() != 1) {
 		return 0;
@@ -338,7 +395,7 @@ idx_t MetadataCache::CountFreshDescribedTables(const std::string &endpoint_key, 
 	if (!connection) {
 		return 0;
 	}
-	auto result = connection->Query("SELECT count(DISTINCT upper(TABLE_NAME)) FROM CACHED_COLUMNS"
+	auto result = ReadRows(*connection, "SELECT count(DISTINCT upper(TABLE_NAME)) FROM CACHED_COLUMNS"
 	                                " WHERE ENDPOINT_KEY = '" +
 	                                Escape(endpoint_key) + "'" + FreshnessPredicate(ttl_seconds));
 	if (!result || result->HasError() || result->RowCount() != 1) {
@@ -374,7 +431,7 @@ int64_t MetadataCache::ExpectedTables(const std::string &endpoint_key) {
 		return -1;
 	}
 	auto result =
-	    connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'tables_expected:" + Escape(endpoint_key) + "'");
+	    ReadRows(*connection, "SELECT VALUE FROM CACHE_META WHERE KEY = 'tables_expected:" + Escape(endpoint_key) + "'");
 	if (!result || result->HasError() || result->RowCount() != 1) {
 		return -1;
 	}
@@ -396,7 +453,7 @@ bool MetadataCache::TryGetOrderKey(const std::string &endpoint_key, const std::s
 		return false;
 	}
 	try {
-		auto result = connection->Query("SELECT KEY_COLUMNS FROM CACHED_ORDER_KEYS WHERE ENDPOINT_KEY = '" +
+		auto result = ReadRows(*connection, "SELECT KEY_COLUMNS FROM CACHED_ORDER_KEYS WHERE ENDPOINT_KEY = '" +
 		                                Escape(endpoint_key) + "' AND upper(TABLE_NAME) = upper('" +
 		                                Escape(table_name) + "')" + FreshnessPredicate(ttl_seconds));
 		if (!result || result->HasError() || result->RowCount() != 1) {
@@ -454,7 +511,7 @@ bool MetadataCache::TryGetTables(const std::string &endpoint_key, int64_t ttl_se
 	}
 	try {
 		int64_t expected = -1;
-		auto expected_result = connection->Query("SELECT VALUE FROM CACHE_META WHERE KEY = 'tables_expected:" +
+		auto expected_result = ReadRows(*connection, "SELECT VALUE FROM CACHE_META WHERE KEY = 'tables_expected:" +
 		                                         Escape(endpoint_key) + "'");
 		if (expected_result && !expected_result->HasError() && expected_result->RowCount() == 1) {
 			try {
@@ -464,7 +521,7 @@ bool MetadataCache::TryGetTables(const std::string &endpoint_key, int64_t ttl_se
 			}
 		}
 		auto result =
-		    connection->Query("SELECT TABLE_NAME, TABLE_TYPE, REMARKS, TABLE_ID FROM CACHED_TABLES"
+		    ReadRows(*connection, "SELECT TABLE_NAME, TABLE_TYPE, REMARKS, TABLE_ID FROM CACHED_TABLES"
 		                      " WHERE ENDPOINT_KEY = '" +
 		                      Escape(endpoint_key) + "'" + FreshnessPredicate(ttl_seconds) + " ORDER BY TABLE_NAME");
 		if (!result || result->HasError() || result->RowCount() == 0) {
@@ -496,7 +553,7 @@ bool MetadataCache::TryGetColumns(const std::string &endpoint_key, const std::st
 		return false;
 	}
 	try {
-		auto result = connection->Query(
+		auto result = ReadRows(*connection, 
 		    "SELECT COLUMN_NAME, TYPE_NAME, PRECISION, SCALE, ORDINAL, NULLABLE, REMARKS FROM CACHED_COLUMNS"
 		    " WHERE ENDPOINT_KEY = '" +
 		    Escape(endpoint_key) + "' AND upper(TABLE_NAME) = upper('" + Escape(table_name) + "')" +
@@ -645,9 +702,12 @@ std::shared_ptr<std::mutex> MetadataCache::PopulationMutex(const std::string &re
 	}
 
 	auto *raw = new std::mutex();
-	std::shared_ptr<std::mutex> created(raw, [this, resource_key](std::mutex *released) {
+	// An init-capture, so the closure holds a plain std::string. Capturing the
+	// const reference by copy would make the member const, and moving the
+	// closure would then copy the string -- which can throw where a move must not.
+	std::shared_ptr<std::mutex> created(raw, [this, key = resource_key](std::mutex *released) {
 		std::lock_guard<std::mutex> cleanup_guard(population_lock);
-		const auto found = population_mutexes.find(resource_key);
+		const auto found = population_mutexes.find(key);
 		if (found != population_mutexes.end()) {
 			auto replacement = found->second.lock();
 			// The last owner can disappear just before another caller takes the

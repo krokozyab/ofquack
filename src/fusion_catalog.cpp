@@ -71,7 +71,7 @@ struct FusionAttachedState {
 	ofquack::RequestContext RequestContextFor(ClientContext &context) {
 		ofquack::RequestContext request_context;
 		request_context.is_cancelled = [&context]() {
-			return context.interrupted.load();
+			return context.IsInterrupted();
 		};
 		return request_context;
 	}
@@ -398,7 +398,7 @@ ofquack::ParsedReport FetchCatalogPage(FusionCatalogScanBindData &bind_data, Fus
 	const auto statement = NextPageStatement(bind_data, state, offset);
 	ofquack::RequestContext request_context;
 	request_context.is_cancelled = [&context]() {
-		return context.interrupted.load();
+		return context.IsInterrupted();
 	};
 	try {
 		return ofquack::ParseRows(
@@ -438,7 +438,7 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 			select_list += ", ";
 		}
 		const auto &column = bind_data.columns[column_index];
-		select_list += KeywordHelper::WriteQuoted(column.name, '"');
+		select_list += KeywordHelper::WriteQuotedAndEscaped(column.name, '"');
 		state->projected_names.push_back(column.name);
 		state->projected_types.push_back(column.type);
 	}
@@ -447,7 +447,7 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 		state->where_clause = BuildOracleWhereClause(*input.filters, bind_data.columns, selected);
 	}
 
-	const auto from_table = " FROM " + KeywordHelper::WriteQuoted(bind_data.object_name, '"');
+	const auto from_table = " FROM " + KeywordHelper::WriteQuotedAndEscaped(bind_data.object_name, '"');
 	const auto where = state->where_clause.empty() ? string() : " WHERE " + state->where_clause;
 	state->paginate =
 	    ofquack::ClassifyForPagination("SELECT " + select_list + from_table + where,
@@ -476,7 +476,7 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 			vector<FusionCatalogScanState::KeyPart> parts;
 			bool seekable = true;
 			for (const auto &name : bind_data.state->OrderKey(context, *table)) {
-				order_by_names += (order_by_names.empty() ? "" : ", ") + KeywordHelper::WriteQuoted(name, '"');
+				order_by_names += (order_by_names.empty() ? "" : ", ") + KeywordHelper::WriteQuotedAndEscaped(name, '"');
 				optional_ptr<const FusionColumn> column;
 				for (const auto &candidate : bind_data.columns) {
 					if (StringUtil::CIEquals(candidate.name, name)) {
@@ -490,7 +490,7 @@ unique_ptr<GlobalTableFunctionState> FusionCatalogScanInit(ClientContext &contex
 					seekable = false;
 					continue;
 				}
-				parts.push_back({KeywordHelper::WriteQuoted(name, '"'), column->name, kind});
+				parts.push_back({KeywordHelper::WriteQuotedAndEscaped(name, '"'), column->name, kind});
 			}
 			if (seekable && parts.empty()) {
 				// No key at all. ROWID is unique and, short of row movement,
@@ -563,7 +563,7 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 
 	while (state.offset_in_page >= state.page.rows.size()) {
 		if (!state.more_pages) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		auto fetched = FetchCatalogPage(bind_data, state, context, state.rows_emitted);
@@ -585,17 +585,17 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 	}
 
 	const idx_t to_emit = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.page.rows.size() - state.offset_in_page);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 
 	// COUNT(*) wants the cardinality and no vectors at all; writing one would
 	// be writing past the chunk.
 	for (idx_t column_index = 0; column_index < state.chunk_columns; column_index++) {
 		auto &vector = output.data[column_index];
-		auto &validity = FlatVector::Validity(vector);
+		auto &validity = FlatVector::ValidityMutable(vector);
 		const auto &column_name = state.projected_names[column_index];
 		const auto &type = state.projected_types[column_index];
 		const bool as_varchar = type.id() == LogicalTypeId::VARCHAR;
-		auto entries = as_varchar ? FlatVector::GetData<string_t>(vector) : nullptr;
+		auto entries = as_varchar ? FlatVector::GetDataMutable<string_t>(vector) : nullptr;
 
 		for (idx_t row_index = 0; row_index < to_emit; row_index++) {
 			const auto &row = state.page.rows[state.offset_in_page + row_index];
@@ -608,9 +608,9 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 				entries[row_index] = StringVector::AddString(vector, entry->second);
 				continue;
 			}
-			Value converted;
 			string conversion_error;
-			if (!Value(entry->second).DefaultTryCastAs(type, converted, &conversion_error)) {
+			const auto converted = Value(entry->second).DefaultTryCastAs(type, &conversion_error);
+			if (!converted) {
 				// The dictionary can disagree with the data -- a NUMBER column
 				// holding something Oracle stored before the type was narrowed,
 				// say. Same choice as the query function, and the same default.
@@ -620,7 +620,7 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 				validity.SetInvalid(row_index);
 				continue;
 			}
-			vector.SetValue(row_index, converted);
+			vector.SetValue(row_index, *converted);
 		}
 	}
 	state.offset_in_page += to_emit;
@@ -645,9 +645,17 @@ public:
 	FusionTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
 	                 std::shared_ptr<FusionAttachedState> state_p, string object_name_p, vector<FusionColumn> columns_p,
 	                 uint64_t tables_revision_p, uint64_t columns_revision_p)
-	    : TableCatalogEntry(catalog, schema, info), state(std::move(state_p)), object_name(std::move(object_name_p)),
-	      fusion_columns(std::move(columns_p)), tables_revision(tables_revision_p),
-	      columns_revision(columns_revision_p) {
+	    : TableCatalogEntry(catalog, schema, info), columns(std::move(info.columns)), state(std::move(state_p)),
+	      object_name(std::move(object_name_p)), fusion_columns(std::move(columns_p)),
+	      tables_revision(tables_revision_p), columns_revision(columns_revision_p) {
+	}
+
+	//! DuckDB 2.0 leaves the column list to the entry, as DuckTableEntry keeps
+	//! its own. It is virtual now, which 1.5 was not, but this still answers
+	//! from what is already known: it has no ClientContext to cancel a fetch
+	//! with, and a schema listing may ask it of every table there is.
+	const ColumnList &GetColumns() const override {
+		return columns;
 	}
 
 	//! Returns nullptr when Fusion has no such object.
@@ -673,9 +681,7 @@ public:
 			return nullptr;
 		}
 		if (lazy && !state->ColumnsAreCached(*table)) {
-			auto info = make_uniq<CreateTableInfo>();
-			info->schema = schema.name;
-			info->table = table->name;
+			auto info = make_uniq<CreateTableInfo>(schema, Identifier(table->name));
 			info->columns.AddColumn(ColumnDefinition(UNRESOLVED_COLUMN, LogicalType::VARCHAR));
 			info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 			auto &cache = MetadataCache::Get();
@@ -698,14 +704,12 @@ public:
 			    table->name, table->name, table->name);
 		}
 
-		auto info = make_uniq<CreateTableInfo>();
-		info->schema = schema.name;
-		info->table = table->name;
+		auto info = make_uniq<CreateTableInfo>(schema, Identifier(table->name));
 		vector<FusionColumn> fusion_columns;
 		for (const auto &column : columns) {
 			bool from_dictionary = false;
 			auto type = TypeOf(column, state->options.number_mode, from_dictionary);
-			info->columns.AddColumn(ColumnDefinition(column.name, type));
+			info->columns.AddColumn(ColumnDefinition(Identifier(column.name), type));
 			fusion_columns.push_back(FusionColumn {column.name, type, column.type_name, from_dictionary});
 		}
 		info->on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
@@ -746,11 +750,11 @@ public:
 		for (const auto &column : fetched) {
 			bool from_dictionary = false;
 			auto type = TypeOf(column, state->options.number_mode, from_dictionary);
-			resolved.AddColumn(ColumnDefinition(column.name, type));
+			resolved.AddColumn(ColumnDefinition(Identifier(column.name), type));
 			described.push_back(FusionColumn {column.name, type, column.type_name, from_dictionary});
 		}
-		// `columns` is TableCatalogEntry's own protected member; replacing it
-		// here is what turns a listed name into a queryable table.
+		// Replacing the entry's column list is what turns a listed name into a
+		// queryable table.
 		columns = std::move(resolved);
 		fusion_columns = std::move(described);
 		columns_revision = MetadataCache::Get().ColumnsRevision(state->endpoint_key, object_name);
@@ -821,6 +825,7 @@ public:
 	}
 
 private:
+	ColumnList columns;
 	std::shared_ptr<FusionAttachedState> state;
 	string object_name;
 	vector<FusionColumn> fusion_columns;
@@ -854,7 +859,7 @@ public:
 	//! is none: the alternative is a multi-second dictionary read per table
 	//! before the list can even be returned, from a callback that has no
 	//! ClientContext to cancel. Use fusion_scanner_cache_warm() to fill it in.
-	vector<string> GetDefaultEntries() override {
+	vector<Identifier> GetDefaultEntries() override {
 		std::lock_guard<std::mutex> guard(state->metadata_lock);
 		auto &cache = MetadataCache::Get();
 		const auto current_tables_revision = cache.TablesRevision(state->endpoint_key);
@@ -879,10 +884,10 @@ public:
 		// is what the JDBC driver's getTables() gives DBeaver. The columns are
 		// not needed to say a table exists, and CreateDefaultEntry is told not
 		// to fetch them.
-		vector<string> names;
+		vector<Identifier> names;
 		names.reserve(state->tables.size());
 		for (const auto &table : state->tables) {
-			names.push_back(table.name);
+			names.emplace_back(table.name);
 		}
 		return names;
 	}
@@ -890,8 +895,9 @@ public:
 	//! Called once per name offered by GetDefaultEntries, and once for a name
 	//! looked up directly. Both must be cheap, so neither fetches columns: a
 	//! query resolves them in GetScanFunction instead.
-	unique_ptr<CatalogEntry> CreateDefaultEntry(ClientContext &context, const string &entry_name) override {
-		return FusionTableEntry::Create(context, catalog, schema, state, entry_name, /* lazy */ true);
+	unique_ptr<CatalogEntry> CreateDefaultEntry(ClientContext &context, const Identifier &entry_name) override {
+		return FusionTableEntry::Create(context, catalog, schema, state, entry_name.GetIdentifierName(),
+		                                /* lazy */ true);
 	}
 
 private:
@@ -955,7 +961,7 @@ public:
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override {
 		// DuckCatalog::Initialize creates `main` through this very method, so
 		// refusing unconditionally would refuse our own construction.
-		if (info.schema == DEFAULT_SCHEMA) {
+		if (info.SchemaName() == DEFAULT_SCHEMA) {
 			return DuckCatalog::CreateSchema(transaction, info);
 		}
 		throw NotImplementedException("ofquack exposes a single schema and cannot create another");
@@ -1011,13 +1017,13 @@ unique_ptr<Catalog> FusionAttach(optional_ptr<StorageExtensionInfo>, ClientConte
 	// The named parameters of the query function are reused here, so ATTACH
 	// accepts the same spellings; the secret may come from the path or from a
 	// SECRET option.
-	named_parameter_map_t parameters;
+	named_argument_map_t parameters;
 	for (const auto &option : info.options) {
 		const auto key = StringUtil::Lower(option.first);
 		if (key == "type" || key == "read_only" || key == "readonly") {
 			continue;
 		}
-		parameters[key] = option.second;
+		parameters[Identifier(key)] = option.second;
 	}
 	if (!info.path.empty() && parameters.find("secret") == parameters.end()) {
 		parameters["secret"] = Value(info.path);
