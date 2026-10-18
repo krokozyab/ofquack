@@ -26,7 +26,7 @@ CircuitBreaker::State CircuitBreaker::StateAtLocked(std::chrono::steady_clock::t
 	return State::OPEN;
 }
 
-void CircuitBreaker::RequireClosed(const std::string &host) {
+bool CircuitBreaker::RequireClosed(const std::string &host) {
 	std::lock_guard<std::mutex> guard(lock);
 	const auto now = now_fn();
 	const auto effective = StateAtLocked(now);
@@ -52,6 +52,12 @@ void CircuitBreaker::RequireClosed(const std::string &host) {
 		probe_in_flight = true;
 	}
 	state = effective;
+	return effective == State::HALF_OPEN;
+}
+
+void CircuitBreaker::ReleaseProbe() {
+	std::lock_guard<std::mutex> guard(lock);
+	probe_in_flight = false;
 }
 
 void CircuitBreaker::RecordSuccess() {
@@ -80,6 +86,12 @@ void CircuitBreaker::RecordFailure() {
 CircuitBreaker::State CircuitBreaker::CurrentState() const {
 	std::lock_guard<std::mutex> guard(lock);
 	return StateAtLocked(now_fn());
+}
+
+bool CountsAgainstBreaker(const FusionError &error) {
+	return dynamic_cast<const PermanentError *>(&error) == nullptr &&
+	       dynamic_cast<const TokenExpiredError *>(&error) == nullptr &&
+	       dynamic_cast<const CancelledError *>(&error) == nullptr;
 }
 
 } // namespace ofquack

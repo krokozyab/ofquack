@@ -139,6 +139,30 @@ bool LooksLikeSignIn(const std::string &location) {
 	    "secret needs PROVIDER browser and SELECT * FROM fusion_scanner_sso_login().");
 }
 
+//! Releases a half-open probe that ends without recording an outcome: a
+//! refusal, a redirect to sign-in, an HTML page, a missing token. Recording
+//! releases it already, so the release is disarmed then.
+class ProbeRelease {
+public:
+	ProbeRelease(CircuitBreaker &breaker_p, bool is_probe_p) : breaker(breaker_p), is_probe(is_probe_p) {
+	}
+	~ProbeRelease() {
+		if (is_probe) {
+			breaker.ReleaseProbe();
+		}
+	}
+	ProbeRelease(const ProbeRelease &) = delete;
+	ProbeRelease &operator=(const ProbeRelease &) = delete;
+
+	void Recorded() {
+		is_probe = false;
+	}
+
+private:
+	CircuitBreaker &breaker;
+	bool is_probe;
+};
+
 class SoapTransport : public FusionTransport {
 public:
 	explicit SoapTransport(FusionConfig config_p)
@@ -198,7 +222,7 @@ private:
 		// Checked after the slot, not before. A queue of callers that all passed
 		// the check while the breaker was closed would otherwise run one after
 		// another into an instance that failed on the first of them.
-		breaker->RequireClosed(host);
+		ProbeRelease probe(*breaker, breaker->RequireClosed(host));
 
 		HttpRequest request;
 		request.url = config.endpoint;
@@ -216,18 +240,13 @@ private:
 		HttpResponse response;
 		try {
 			response = client->Post(request);
-		} catch (const CancelledError &) {
-			// The caller stopped, which says nothing about the instance. Counting
-			// it would let a few interrupted queries close the breaker on a host
-			// that was answering perfectly well.
-			throw;
-		} catch (const PermanentError &) {
-			// Same rule as for a rejected status: a refusal is not a failure. A
-			// bad CA file or an unusable proxy will not fix itself by waiting,
-			// and tripping on it would block every other query to this host.
-			throw;
-		} catch (const FusionError &) {
-			breaker->RecordFailure();
+		} catch (const FusionError &error) {
+			// A cancellation, a bad CA file or an unusable proxy says nothing
+			// about the instance; see CountsAgainstBreaker.
+			if (CountsAgainstBreaker(error)) {
+				breaker->RecordFailure();
+				probe.Recorded();
+			}
 			throw;
 		}
 
@@ -242,14 +261,16 @@ private:
 
 		if (response.status_code >= 400) {
 			// Not counted as a breaker failure when it is the caller's fault:
-			// a bad password or a missing table says nothing about the health
-			// of the instance, and tripping on it would block every other query.
+			// a bad password, a missing table or a token without the Access SOAP
+			// privilege says nothing about the health of the instance, and
+			// tripping on it would block every other query.
 			try {
 				ThrowForStatus(response, config.endpoint);
-			} catch (const PermanentError &) {
-				throw;
-			} catch (const FusionError &) {
-				breaker->RecordFailure();
+			} catch (const FusionError &error) {
+				if (CountsAgainstBreaker(error)) {
+					breaker->RecordFailure();
+					probe.Recorded();
+				}
 				throw;
 			}
 		}
@@ -263,6 +284,7 @@ private:
 		}
 
 		breaker->RecordSuccess();
+		probe.Recorded();
 		return response.body;
 	}
 

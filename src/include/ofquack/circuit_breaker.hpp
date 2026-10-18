@@ -30,11 +30,17 @@ public:
 	explicit CircuitBreaker(CircuitBreakerSettings settings = {});
 
 	//! Called before a request. Throws CircuitOpenError if it must not proceed.
-	//! `host` only shapes the error message.
-	void RequireClosed(const std::string &host);
+	//! `host` only shapes the error message. Returns true when the caller is the
+	//! half-open probe, which then owes the breaker an outcome or a release.
+	bool RequireClosed(const std::string &host);
 
 	void RecordSuccess();
 	void RecordFailure();
+	//! The probe ended without saying anything about the instance -- a refusal,
+	//! a cancellation. The breaker stays half-open and the next caller probes.
+	//! Without this the flag stayed set, and every later request was told a
+	//! probe was out for the rest of the process.
+	void ReleaseProbe();
 
 	State CurrentState() const;
 
@@ -53,5 +59,15 @@ private:
 	std::chrono::steady_clock::time_point opened_at;
 	std::function<std::chrono::steady_clock::time_point()> now_fn;
 };
+
+class FusionError;
+
+//! Whether an error says the instance is unwell, and so counts towards opening
+//! the breaker. A refusal is not a failure: a PermanentError (bad SQL, a
+//! rejected password, a bad CA file), a TokenExpiredError (a token that expired
+//! or lacks the Access SOAP privilege) and a CancelledError (the caller
+//! stopped) came from a host that answered, or from no host at all. Counting
+//! them would block every other query to that host.
+bool CountsAgainstBreaker(const FusionError &error);
 
 } // namespace ofquack

@@ -1411,6 +1411,42 @@ void TestBreakerAdmitsOnlyOneProbe() {
 	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
 }
 
+//! A probe that ends in a refusal reports no outcome. It used to keep the probe
+//! flag set, so every later request was told a probe was out -- for as long as
+//! the process lived. Released, it hands the probe to the next caller.
+void TestBreakerReleasedProbeLetsNextCallerProbe() {
+	ofquack::CircuitBreaker breaker(ofquack::CircuitBreakerSettings {1, 60000});
+	TestClock clock;
+	breaker.SetClockForTesting(clock.Fn());
+
+	CHECK(!breaker.RequireClosed("host")); // closed: not a probe
+
+	breaker.RecordFailure();
+	clock.Advance(61000);
+	CHECK(breaker.RequireClosed("host")); // the probe
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+
+	breaker.ReleaseProbe();
+	CHECK(breaker.CurrentState() == ofquack::CircuitBreaker::State::HALF_OPEN);
+	CHECK(breaker.RequireClosed("host")); // the next caller probes
+	CHECK(Throws([&]() { breaker.RequireClosed("host"); }));
+
+	breaker.RecordSuccess();
+	CHECK(!breaker.RequireClosed("host"));
+}
+
+//! A refusal is not a failure. A token without the Access SOAP privilege used
+//! to count, and on a live instance two such queries opened the breaker and
+//! blocked the host for a minute.
+void TestBreakerCountsOnlyInstanceFailures() {
+	CHECK(ofquack::CountsAgainstBreaker(ofquack::RetryableError("timeout")));
+	CHECK(ofquack::CountsAgainstBreaker(ofquack::FusionError("unexpected")));
+	CHECK(!ofquack::CountsAgainstBreaker(ofquack::PermanentError("ORA-00942")));
+	CHECK(!ofquack::CountsAgainstBreaker(ofquack::AuthenticationError("bad password")));
+	CHECK(!ofquack::CountsAgainstBreaker(ofquack::TokenExpiredError("lacks the Access SOAP privilege")));
+	CHECK(!ofquack::CountsAgainstBreaker(ofquack::CancelledError("interrupted")));
+}
+
 //! The error names the host and says how long the wait is, since "circuit open"
 //! on its own tells an analyst nothing actionable.
 void TestBreakerErrorIsInformative() {
@@ -1537,6 +1573,8 @@ const TestCase TESTS[] = {
     {"breaker resets on success", TestBreakerResetsOnSuccess},
     {"breaker probes after recovery window", TestBreakerProbesAfterRecoveryWindow},
     {"breaker admits only one probe", TestBreakerAdmitsOnlyOneProbe},
+    {"breaker released probe lets next caller probe", TestBreakerReleasedProbeLetsNextCallerProbe},
+    {"breaker counts only instance failures", TestBreakerCountsOnlyInstanceFailures},
     {"breaker error is informative", TestBreakerErrorIsInformative},
     {"order by detection", TestOrderByDetection},
     {"ordering rewrites", TestOrderingRewrites},

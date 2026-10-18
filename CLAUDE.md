@@ -166,15 +166,21 @@ Three rules that are easy to break by accident:
   concurrency, not rate. Throttle and breaker are keyed by host and shared process-wide.
 - **A refusal is not a failure.** `PermanentError` (bad SQL, missing table, rejected password)
   is never retried and does not trip the breaker: it says nothing about the instance's health,
-  and tripping on it would block every other query. Only `RetryableError` counts. The same rule
-  applies to what the HTTP client throws, not just to statuses — a `CancelledError` from Ctrl-C
-  and a `PermanentError` from a bad CA file are both excluded, or a few interrupted queries
-  would close the breaker on a host that was answering perfectly well.
+  and tripping on it would block every other query. `TokenExpiredError` is excluded the same
+  way: Fusion reports a token without the Access SOAP privilege as a 500, and on a live instance
+  two such queries used to open the breaker for a minute. The same rule applies to what the HTTP
+  client throws, not just to statuses — a `CancelledError` from Ctrl-C and a `PermanentError`
+  from a bad CA file are both excluded, or a few interrupted queries would close the breaker on
+  a host that was answering perfectly well. `CountsAgainstBreaker` is the one place the rule
+  lives; both catch sites in `SoapTransport::Attempt` ask it.
 - **Half-open means one probe.** `RequireClosed` holds a `probe_in_flight` flag until the probe
   reports back; without it every caller that arrived after the recovery window saw `HALF_OPEN`
   and went through together. It is also checked *after* the throttle slot, not before, or a
   queue of callers that all passed the check while the breaker was closed would run one after
-  another into an instance that failed on the first of them.
+  another into an instance that failed on the first of them. A probe that ends without an
+  outcome — a refusal, a cancellation, a redirect to sign-in — must `ReleaseProbe()`
+  (`ProbeRelease` does it on scope exit), or the flag stays set and every later request is told
+  a probe is out for the rest of the process.
 
 `ExecuteWithRetry` takes its sleep and its randomness as parameters, which is the only reason
 the loop is testable without waiting.
