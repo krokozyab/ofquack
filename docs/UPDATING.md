@@ -5,7 +5,13 @@ stable between releases. A loadable extension also refuses to load into any
 DuckDB other than the one it was built against, so the version is not a detail
 that can drift.
 
-Currently: **v1.5.5**, extension-ci-tools **v1.5-variegata**.
+Currently: DuckDB **2.0 pre-release**, commit `b15358c3` tagged
+`v2.0.0-alpha46057` on the `v2.0-cyanoptera` branch, extension-ci-tools
+**v2.0-cyanoptera**. That pair is exactly what the community registry's
+`build.yml` builds `ref` against; pin the commit, not the branch, which moves
+daily and takes the internal API with it. The 1.5 line lives on `main`
+(v1.5.5) and reaches the registry through `repo.variegata`, built against
+v1.5.6.
 
 ## Four pins that must move together
 
@@ -49,6 +55,12 @@ Work through the files, then do a full build for the link errors it cannot see.
 - **`SetChildCardinality` exists on `main` and not on v1.5.5.** On `main` a
   vector carries its own size and a scan that does not set it emits NULLs that
   read as values — visible only on a streaming result, not a materialised one.
+- **Within the 2.0 pre-release, `get_bind_info` stopped naming the table.**
+  `BindInfo` lost its `TableCatalogEntry` constructor between `2866f801` and
+  `b15358c3`; a scan now says which table it reads through
+  `TableFunction::get_table_entry`, which is what `LogicalGet::GetTable()` asks.
+  A pre-release branch breaks the internal API between commits, not only
+  between releases.
 
 The weekly `DuckDB next` workflow compiles against `main` and reports the error
 count per file, so the size of the next gap is known before the release lands
@@ -64,11 +76,18 @@ rather than after.
 ## Releasing
 
 1. Bump `EXTENSION_VERSION` in `extension_config.cmake`.
-2. Tag `vX.Y.Z`. The deploy job publishes to the maintainer's bucket on a tag.
+2. Tag `vX.Y.Z`. Nothing is published from the tag: there is no deploy job,
+   because the community registry builds and serves the binaries itself.
 3. For the community channel, open a PR against
    `duckdb/community-extensions` updating `extensions/fusion_scanner/description.yml`:
    the new `version`, and `ref` set to the **commit SHA** of the release — not
    a tag, which can be moved. That commit must already have the `duckdb`
    submodule on the version named in this file.
+
+The registry picks a ref per DuckDB line (`scripts/build.py` there): `ref`
+for the version its `build.yml` defaults to (2.0 now), `variegata` for
+v1.5.6, `andium` for v1.4.5, and `ref_next` for anything newer than the
+default. A line without its own key builds `ref`, which for a C++ extension
+fails: a 2.0 commit does not compile against 1.5.
 
 `docs/community-extension-description.yml` holds the file to copy.

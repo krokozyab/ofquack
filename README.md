@@ -356,7 +356,8 @@ Built binaries:
 - `./build/release/extension/fusion_scanner/fusion_scanner.duckdb_extension` — the loadable binary
 - `./build/release/test/unittest` — DuckDB's test runner
 
-Built against DuckDB **v1.5.5**. A loadable extension refuses to load into any
+Built against DuckDB **2.0** (pre-release `v2.0.0-alpha46057`); the 1.5 line
+is built from `main` against v1.5.5. A loadable extension refuses to load into any
 other version, so the `duckdb` submodule, the `extension-ci-tools` submodule
 and `duckdb_version` in the CI workflow have to move together.
 

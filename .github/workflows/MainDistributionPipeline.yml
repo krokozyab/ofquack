@@ -18,12 +18,16 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      # duckdb-2.0 branch: DuckDB's 2.0 release branch, the same ref the
-      # community registry's build_next.yml builds ref_next against.
-      duckdb_version: v2.0-cyanoptera
-      ci_tools_version: main
+      # The exact commit and tag the community registry's build.yml builds
+      # `ref` against. 2.0 has no release yet, so this is a commit on the
+      # v2.0-cyanoptera branch rather than the branch itself: the branch moves
+      # daily, and the internal API with it. The tag is what the binary reports
+      # as its DuckDB version, and so decides which DuckDB will load it.
+      duckdb_version: b15358c371daf10dad799a43b6167f6ccdce84d8
+      duckdb_tag: v2.0.0-alpha46057
+      ci_tools_version: v2.0-cyanoptera
       extension_name: fusion_scanner
       # wasm: no process spawning, no sockets, no libcurl, so the SOAP transport
       # cannot work there at all. Shipping an artifact that always refuses is

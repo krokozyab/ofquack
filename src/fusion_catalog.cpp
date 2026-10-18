@@ -628,12 +628,12 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 }
 
 //! Without this DuckDB does not recognise the scan as reading a base table.
-BindInfo FusionCatalogScanBindInfo(const optional_ptr<FunctionData> bind_data) {
-	auto &bind = bind_data->CastNoConst<FusionCatalogScanBindData>();
+optional_ptr<TableCatalogEntry> FusionCatalogScanTableEntry(optional_ptr<const FunctionData> bind_data) {
+	auto &bind = bind_data->Cast<FusionCatalogScanBindData>();
 	if (!bind.table_entry) {
 		throw InternalException("an attached Oracle Fusion scan has no table entry");
 	}
-	return BindInfo(*bind.table_entry);
+	return bind.table_entry;
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +783,7 @@ public:
 		// filters arrive. Nothing reaches Fusion during binding.
 		TableFunction function({}, FusionCatalogScan, nullptr, FusionCatalogScanInit);
 		function.name = "fusion_scanner_attached_scan";
-		function.get_bind_info = FusionCatalogScanBindInfo;
+		function.get_table_entry = FusionCatalogScanTableEntry;
 		function.projection_pushdown = true;
 
 		Value pushdown;
