@@ -11,7 +11,7 @@
 extension:
   name: fusion_scanner
   description: Query Oracle Fusion from DuckDB through BI Publisher, with SSO, an ATTACH-able catalog and cached metadata
-  version: 0.4.0
+  version: 0.4.1
   language: C++
   build: cmake
   license: MIT
@@ -33,12 +33,12 @@ repo:
   # without its own key builds `ref`, and a 2.0 commit does not compile
   # against 1.5, so both keys are needed.
   #
-  # ref -- 0.4.0, branch duckdb-2.0. Its duckdb submodule is b15358c3, tagged
+  # ref -- 0.4.1, branch main. Its duckdb submodule is b15358c3, tagged
   # v2.0.0-alpha46057: the commit build.yml defaults to. Full matrix passed:
   # clang-tidy, linux_amd64, linux_arm64, osx_amd64, osx_arm64 and
-  # windows_amd64, run 39123463808.
-  ref: ee6f8d3802cec897f4285feb8b0bd3c284b34cb6
-  # variegata -- 0.3.1, branch main. Its duckdb submodule is d8cdaa33fd
+  # windows_amd64, run 39140710085.
+  ref: 8a84de39955ed45a9600b6cb1387f574a6cbdf33
+  # variegata -- 0.3.1, branch v1.5. Its duckdb submodule is d8cdaa33fd
   # (v1.5.5); full matrix passed in run 36334543221, and it builds and passes
   # every suite against v1.5.6 unchanged.
   variegata: 6850e13b516756a3872714a0118dd380788ff7b9
