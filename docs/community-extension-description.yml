@@ -11,7 +11,7 @@
 extension:
   name: fusion_scanner
   description: Query Oracle Fusion from DuckDB through BI Publisher, with SSO, an ATTACH-able catalog and cached metadata
-  version: 0.3.1
+  version: 0.4.0
   language: C++
   build: cmake
   license: MIT
@@ -28,10 +28,20 @@ repo:
   # at when it builds, and a tag can be moved afterwards -- which would let the
   # published artifact drift away from the reviewed one.
   #
-  # The commit whose full matrix passed under this name: clang-tidy,
-  # linux_amd64, linux_arm64, osx_amd64, osx_arm64 and windows_amd64,
-  # run 36334543221. Its duckdb submodule is d8cdaa33fd, which is v1.5.5.
-  ref: 6850e13b516756a3872714a0118dd380788ff7b9
+  # The registry picks one ref per DuckDB line (scripts/build.py there): `ref`
+  # for the version its build.yml defaults to, `variegata` for v1.5.6. A line
+  # without its own key builds `ref`, and a 2.0 commit does not compile
+  # against 1.5, so both keys are needed.
+  #
+  # ref -- 0.4.0, branch duckdb-2.0. Its duckdb submodule is b15358c3, tagged
+  # v2.0.0-alpha46057: the commit build.yml defaults to. Full matrix passed:
+  # clang-tidy, linux_amd64, linux_arm64, osx_amd64, osx_arm64 and
+  # windows_amd64, run 39123463808.
+  ref: ee6f8d3802cec897f4285feb8b0bd3c284b34cb6
+  # variegata -- 0.3.1, branch main. Its duckdb submodule is d8cdaa33fd
+  # (v1.5.5); full matrix passed in run 36334543221, and it builds and passes
+  # every suite against v1.5.6 unchanged.
+  variegata: 6850e13b516756a3872714a0118dd380788ff7b9
 
 docs:
   hello_world: |
