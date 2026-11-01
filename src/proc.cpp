@@ -15,6 +15,7 @@
 #else
 #include <arpa/inet.h>
 #include <csignal>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <spawn.h>
 #include <sys/socket.h>
@@ -22,6 +23,14 @@
 #include <unistd.h>
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables) -- POSIX's own declaration.
 extern char **environ;
+#endif
+
+#ifdef __APPLE__
+// Not in a public header, but what Chromium itself and Apple's tools use: the
+// child answers for itself to macOS's privacy checks instead of the process
+// that started it. Weak, so a system without it still starts the child.
+extern "C" int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attrs, int disclaim)
+    __attribute__((weak_import));
 #endif
 
 namespace ofquack {
@@ -136,8 +145,29 @@ ChildProcess::ChildProcess(const std::string &executable, const std::vector<std:
 	}
 	argv.push_back(nullptr);
 
+	// The browser talks to its own log, not to the host's: a daemon's log fills
+	// with Chrome's updater and crash reporter otherwise.
+	posix_spawn_file_actions_t files;
+	posix_spawn_file_actions_init(&files);
+	posix_spawn_file_actions_addopen(&files, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_addopen(&files, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+	posix_spawn_file_actions_addopen(&files, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+	posix_spawnattr_t attributes;
+	posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+	// Chrome wakes its updater, which updates Chrome.app. Charged to an
+	// unsigned host started by launchd -- a daemon -- that is "modifying apps",
+	// and macOS stops it with a warning naming the host. Charged to Chrome, it
+	// is an app updating itself.
+	if (responsibility_spawnattrs_setdisclaim) {
+		responsibility_spawnattrs_setdisclaim(&attributes, 1);
+	}
+#endif
+
 	pid_t pid = -1;
-	const int status = posix_spawn(&pid, executable.c_str(), nullptr, nullptr, argv.data(), environ);
+	const int status = posix_spawn(&pid, executable.c_str(), &files, &attributes, argv.data(), environ);
+	posix_spawnattr_destroy(&attributes);
+	posix_spawn_file_actions_destroy(&files);
 	if (status != 0) {
 		throw PermanentError("Could not start " + executable + ": " + std::strerror(status));
 	}

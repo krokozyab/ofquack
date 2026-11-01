@@ -15,6 +15,7 @@
 #include "ofquack/jwt.hpp"
 #include "ofquack/metadata_queries.hpp"
 #include "ofquack/oracle_type_map.hpp"
+#include "ofquack/proc.hpp"
 #include "ofquack/secured_views.hpp"
 #include "ofquack/soap_envelope.hpp"
 #include "ofquack/sql_rewrite.hpp"
@@ -32,6 +33,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef _WIN32
+#include <cstdio>
+#include <unistd.h>
+#endif
 
 // A release build defines NDEBUG, and assert() then removes not just the check
 // but the call inside it, so a suite written with assert silently stops testing
@@ -1478,6 +1484,38 @@ void TestHostOf() {
 
 //! The throttle bounds concurrency rather than rate: the slot is held for the
 //! whole request, so a second caller waits for the first to finish.
+//! The browser's output goes nowhere: a daemon that signs in through Chrome
+//! must not find Chrome's updater and crash reporter in its own log.
+void TestChildOutputStaysOutOfOurs() {
+#ifndef _WIN32
+	char path[] = "/tmp/fusion_scanner_child_output_XXXXXX";
+	const int capture = mkstemp(path);
+	CHECK(capture >= 0);
+	std::fflush(stdout);
+	std::fflush(stderr);
+	const int saved_out = dup(STDOUT_FILENO);
+	const int saved_err = dup(STDERR_FILENO);
+	dup2(capture, STDOUT_FILENO);
+	dup2(capture, STDERR_FILENO);
+	{
+		ofquack::ChildProcess child("/bin/sh", {"-c", "echo to-stdout; echo to-stderr >&2"});
+		const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+		while (child.IsRunning() && std::chrono::steady_clock::now() < give_up) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+	}
+	dup2(saved_out, STDOUT_FILENO);
+	dup2(saved_err, STDERR_FILENO);
+	close(saved_out);
+	close(saved_err);
+	char buffer[64];
+	const auto read_bytes = pread(capture, buffer, sizeof(buffer), 0);
+	close(capture);
+	unlink(path);
+	CHECK(read_bytes == 0);
+#endif
+}
+
 void TestThrottleSerialisesConcurrentCallers() {
 	ofquack::ResetHostStateForTesting();
 	auto throttle = ofquack::ThrottleForHost("host", 1);
@@ -1584,6 +1622,7 @@ const TestCase TESTS[] = {
     {"sortable oracle types", TestSortableOracleTypes},
     {"host of", TestHostOf},
     {"throttle serialises concurrent callers", TestThrottleSerialisesConcurrentCallers},
+    {"child output stays out of ours", TestChildOutputStaysOutOfOurs},
 };
 
 } // namespace
