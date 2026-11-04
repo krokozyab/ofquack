@@ -5,13 +5,11 @@ stable between releases. A loadable extension also refuses to load into any
 DuckDB other than the one it was built against, so the version is not a detail
 that can drift.
 
-Currently: DuckDB **2.0 pre-release**, commit `b15358c3` tagged
-`v2.0.0-alpha46057` on the `v2.0-cyanoptera` branch, extension-ci-tools
+Currently: DuckDB **v2.0.0**, commit `d54cbbe3`, extension-ci-tools
 **v2.0-cyanoptera**. That pair is exactly what the community registry's
-`build.yml` builds `ref` against; pin the commit, not the branch, which moves
-daily and takes the internal API with it. The 1.5 line lives on `main`
-(v1.5.5) and reaches the registry through `repo.variegata`, built against
-v1.5.6.
+`build.yml` builds `ref` against; the workflow names the commit as well as the
+tag, as the registry does. The 1.5 line lives on the `v1.5` branch (v1.5.5) and
+reaches the registry through `repo.variegata`, built against v1.5.6.
 
 ## Four pins that must move together
 
