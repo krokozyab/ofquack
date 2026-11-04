@@ -42,8 +42,10 @@ Consequences worth planning around:
   true` turns inference off. An attached catalog does not have this problem: it
   types columns from the dictionary.
 - Values with leading zeros stay VARCHAR — `'00123'` is an account code.
-- A column Oracle returned as NULL arrives as SQL NULL; a column that is
-  present but empty arrives as an empty string. They are different.
+- A NULL arrives as SQL NULL, whether the report omitted the element or wrote
+  it empty, and in a VARCHAR column too: Oracle stores the empty string as
+  NULL, so an empty element has no other value it could be. An `EMPTY_CLOB()`
+  reads as NULL for the same reason.
 
 ## Filter pushdown is conservative
 

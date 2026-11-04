@@ -202,7 +202,7 @@ select list and types inferred from the first page.
 | `endpoint`, `report_path` | Override the secret's. |
 | `username`, `password` | Override the secret's. Puts the password into the SQL text — prefer a secret. |
 | `fetch_size` | Rows per request, 1–10000. `0` means one request for everything. |
-| `all_varchar` | `true` returns every column as text, skipping type inference. |
+| `all_varchar` | `true` returns every column as text, skipping type inference: each value as Oracle wrote it, a NULL as NULL. |
 | `on_cast_error` | What a value that does not fit its column does: `null` (default) reads it as NULL, `error` fails the query and names the value. Applies to attached tables too. |
 | `number_mode` | What an Oracle `NUMBER` with no declared precision becomes: `double` (default), `decimal` for `DECIMAL(38,6)`, or `text`. Only reaches types that come from the dictionary — attached tables and `oracle_fusion_columns` — because `oracle_fusion_query` infers from the data instead. |
 | `columns` | `oracle_fusion_query` only. A declared schema, `{'ID': 'BIGINT', 'NAME': 'VARCHAR'}`, in the shape `read_csv` uses. Overrides inference **always**, and is the only way to read a result that came back empty, which carries no column names to infer from. A name the report did not return is refused rather than served as a column of NULLs. |
@@ -511,6 +511,40 @@ timestamp is not the one you just built, restart your client.
 
 Internal. It is the scan behind an attached table and appears in `EXPLAIN`
 output; you never call it yourself.
+
+---
+
+## Errors a program can act on
+
+The messages are written for a person and change when they can be said better.
+A program that needs to tell one failure from another reads the code instead:
+the exception carries it in its extra info under `ofquack_error`, and DuckDB
+does not print it, so the message stays as it was.
+
+| Code | Exception | When |
+|---|---|---|
+| `CREDENTIALS_REJECTED` | Invalid Input | Fusion refused the username and password, or sent the request to its sign-in page. Sending them again is refused again and counts towards a lockout. |
+| `CREDENTIALS_MISSING` | Invalid Input | The secret has no `USERNAME`, so nothing was sent. |
+| `NOT_SIGNED_IN` | Invalid Input, or I/O for a token Fusion refused and a browser sign-in that did not finish | No token, or one Fusion no longer takes. Sign in again. |
+| `QUERY_REJECTED` | I/O | Oracle understood the statement and refused it: an `ORA-` error, a SOAP fault. |
+| `NO_ROWS` | I/O | The statement returned no rows, so the result has no columns ([above](#a-query-that-returns-no-rows-is-an-error)). |
+| `UNAVAILABLE` | I/O | Fusion could not be reached or did not answer usably: the network, an HTTP error, a response that is not a report, the circuit breaker. |
+
+A cancelled query — Ctrl-C, or an interrupt from the program — is an Interrupt
+error and has no code. Any other error has none either; its type still says
+whether it came from the statement or from Fusion.
+
+In C++, through the `ErrorData` of a failed result:
+
+```cpp
+#include "ofquack/error_codes.hpp"
+
+const auto &info = result->GetErrorObject().ExtraInfo();
+const auto found = info.find(ofquack::error_code::KEY);
+if (found != info.end() && found->second == ofquack::error_code::CREDENTIALS_REJECTED) {
+	// forget the saved password
+}
+```
 
 ---
 

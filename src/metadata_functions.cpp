@@ -93,12 +93,8 @@ template <typename Callable>
 auto WithTranslatedErrors(Callable &&callable) -> decltype(callable()) {
 	try {
 		return callable();
-	} catch (const ofquack::CancelledError &) {
-		throw InterruptException();
-	} catch (const ofquack::AuthenticationError &auth_error) {
-		throw InvalidInputException("%s", auth_error.what());
-	} catch (const ofquack::FusionError &fusion_error) {
-		throw IOException("%s", fusion_error.what());
+	} catch (const ofquack::FusionError &error) {
+		ThrowFusionError(error);
 	}
 }
 
@@ -453,16 +449,16 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 					warmed += columns.empty() ? 0 : 1;
 					failed += columns.empty() ? 1 : 0;
 					view_updates.emplace_back(table.name, std::move(columns));
-				} catch (const ofquack::CancelledError &) {
-					throw InterruptException();
+				} catch (const ofquack::CancelledError &error) {
+					ThrowFusionError(error);
 				} catch (const ofquack::AuthenticationError &error) {
-					throw InvalidInputException("%s", error.what());
+					ThrowFusionError(error);
 				} catch (const ofquack::RetryableError &error) {
-					throw IOException("%s", error.what());
+					ThrowFusionError(error);
 				} catch (const ofquack::TokenExpiredError &error) {
-					throw IOException("%s", error.what());
+					ThrowFusionError(error);
 				} catch (const ofquack::CircuitOpenError &error) {
-					throw IOException("%s", error.what());
+					ThrowFusionError(error);
 				} catch (const ofquack::FusionError &error) {
 					// One unreadable object must not abandon the rest of the warm.
 					failed++;
@@ -495,16 +491,16 @@ unique_ptr<FunctionData> CacheWarmBind(ClientContext &context, TableFunctionBind
 		std::vector<ofquack::ColumnInfo> columns;
 		try {
 			columns = ofquack::FetchColumnsOfTables(*transport, request_context, options.schema, batch);
-		} catch (const ofquack::CancelledError &) {
-			throw InterruptException();
+		} catch (const ofquack::CancelledError &error) {
+			ThrowFusionError(error);
 		} catch (const ofquack::AuthenticationError &error) {
-			throw InvalidInputException("%s", error.what());
+			ThrowFusionError(error);
 		} catch (const ofquack::RetryableError &error) {
-			throw IOException("%s", error.what());
+			ThrowFusionError(error);
 		} catch (const ofquack::TokenExpiredError &error) {
-			throw IOException("%s", error.what());
+			ThrowFusionError(error);
 		} catch (const ofquack::CircuitOpenError &error) {
-			throw IOException("%s", error.what());
+			ThrowFusionError(error);
 		} catch (const ofquack::FusionError &error) {
 			failed += static_cast<int64_t>(batch.size());
 			if (first_error.empty()) {

@@ -72,13 +72,16 @@ void SleepRespectingCancellation(uint64_t delay_ms, const RequestContext &contex
 		if (StartsWithIgnoringCase(response.www_authenticate, "Bearer")) {
 			throw TokenExpiredError("Oracle Fusion rejected the bearer token" + suffix);
 		}
-		throw AuthenticationError("Oracle Fusion rejected the credentials (HTTP " +
-		                          std::to_string(response.status_code) + ")" + suffix +
-		                          ". Check the username and password on the secret");
+		throw CredentialsRejectedError("Oracle Fusion rejected the credentials (HTTP " +
+		                               std::to_string(response.status_code) + ")" + suffix +
+		                               ". Check the username and password on the secret");
 	}
 	if (response.status_code == 500 &&
 	    response.body.find("Access denied. Check \"Access SOAP\" privilege") != std::string::npos) {
 		throw TokenExpiredError("The Oracle Fusion token lacks the Access SOAP privilege" + suffix);
+	}
+	if (!ExtractOracleErrors(response.body).empty()) {
+		throw QueryRejectedError("Oracle Fusion rejected the request" + suffix);
 	}
 	if (DescribesPermanentFailure(response.body)) {
 		throw PermanentError("Oracle Fusion rejected the request" + suffix);
@@ -133,7 +136,7 @@ bool LooksLikeSignIn(const std::string &location) {
 		                        "), so the token was not accepted. Sign in again with "
 		                        "SELECT * FROM fusion_scanner_sso_login(force := true)");
 	}
-	throw AuthenticationError(
+	throw CredentialsRejectedError(
 	    "Oracle Fusion redirected the request to a sign-in page (" + target +
 	    ").\nThe credentials were not accepted, or this instance uses single sign-on -- in which case the "
 	    "secret needs PROVIDER browser and SELECT * FROM fusion_scanner_sso_login().");

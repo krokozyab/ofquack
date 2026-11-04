@@ -37,6 +37,24 @@ public:
 	}
 };
 
+//! The username and password themselves were refused, as opposed to there being
+//! nothing to send. A caller holding a saved password should drop it: sending it
+//! again will be refused again, and each attempt counts towards a lockout.
+class CredentialsRejectedError : public AuthenticationError {
+public:
+	explicit CredentialsRejectedError(const std::string &message) : AuthenticationError(message) {
+	}
+};
+
+//! Oracle understood the statement and refused it: an ORA- error, a missing
+//! table, a privilege the account lacks. The statement has to change, not the
+//! connection.
+class QueryRejectedError : public PermanentError {
+public:
+	explicit QueryRejectedError(const std::string &message) : PermanentError(message) {
+	}
+};
+
 //! A bearer token has expired. Distinct from AuthenticationError because it is
 //! recoverable -- refresh the token and try once more.
 class TokenExpiredError : public FusionError {

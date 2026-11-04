@@ -2,6 +2,7 @@
 
 #include "duckdb.hpp"
 #include "ofquack/browser_auth.hpp"
+#include "ofquack/errors.hpp"
 #include "ofquack/metadata_queries.hpp"
 #include "ofquack/oracle_type_map.hpp"
 #include "ofquack/transport.hpp"
@@ -62,6 +63,18 @@ ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_ar
 //! the query function report the same thing the same way.
 [[noreturn]] void ThrowConversionError(const string &source, const string &column_name, const LogicalType &type,
                                        const string &value, const string &reason);
+
+//! extra_info that carries one of the codes in ofquack/error_codes.hpp.
+unordered_map<string, string> WithErrorCode(const char *code);
+
+//! Rethrows what the transport threw as the DuckDB exception for its kind, with
+//! its code: cancellation as an interrupt, refused or missing credentials as
+//! invalid input, the rest as I/O. Every scan and function translates through
+//! here, so one failure reads -- and is coded -- the same wherever it surfaced.
+//!
+//! `sql`, when given, is appended to a failure of that statement. Not to a
+//! sign-in failure or an open breaker, which are about the connection.
+[[noreturn]] void ThrowFusionError(const ofquack::FusionError &error, const string &sql = string());
 
 //! Fails when a bearer configuration has no token yet, naming the sign-in
 //! function. Call from anything that is about to send a request; the SSO

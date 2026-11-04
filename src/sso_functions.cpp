@@ -1,6 +1,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "ofquack/browser_auth.hpp"
+#include "ofquack/error_codes.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
 #include "ofquack/function_docs.hpp"
@@ -107,7 +108,9 @@ unique_ptr<FunctionData> SsoLoginBind(ClientContext &context, TableFunctionBindI
 	try {
 		result = ofquack::AuthenticateThroughBrowser(settings);
 	} catch (const ofquack::FusionError &error) {
-		throw IOException("%s", error.what());
+		// Whatever stopped it -- a closed window, the timeout, no browser --
+		// there is no sign-in, and trying again is the remedy.
+		throw IOException(WithErrorCode(ofquack::error_code::NOT_SIGNED_IN), error.what());
 	}
 
 	ofquack::TokenCache::Get().Store(host, result.access_token, result.refresh_token, result.expires_in_seconds);

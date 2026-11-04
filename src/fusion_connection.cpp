@@ -4,6 +4,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "ofquack/error_codes.hpp"
 #include "ofquack/host_throttle.hpp"
 #include "ofquack/token_cache.hpp"
 
@@ -162,6 +163,36 @@ void ThrowConversionError(const string &source, const string &column_name, const
 	    column_name, source, value, type.ToString(), reason);
 }
 
+unordered_map<string, string> WithErrorCode(const char *code) {
+	return {{ofquack::error_code::KEY, code}};
+}
+
+void ThrowFusionError(const ofquack::FusionError &error, const string &sql) {
+	namespace code = ofquack::error_code;
+	if (dynamic_cast<const ofquack::CancelledError *>(&error)) {
+		throw InterruptException();
+	}
+	if (dynamic_cast<const ofquack::CredentialsRejectedError *>(&error)) {
+		throw InvalidInputException(WithErrorCode(code::CREDENTIALS_REJECTED), error.what());
+	}
+	if (dynamic_cast<const ofquack::AuthenticationError *>(&error)) {
+		throw InvalidInputException(WithErrorCode(code::NOT_SIGNED_IN), error.what());
+	}
+	// Left an I/O error, as it always was: refreshing the token did not help,
+	// so it is signing in again that will.
+	if (dynamic_cast<const ofquack::TokenExpiredError *>(&error)) {
+		throw IOException(WithErrorCode(code::NOT_SIGNED_IN), error.what());
+	}
+	if (dynamic_cast<const ofquack::CircuitOpenError *>(&error)) {
+		throw IOException(WithErrorCode(code::UNAVAILABLE), error.what());
+	}
+	const auto message = sql.empty() ? string(error.what()) : string(error.what()) + "\nSQL: " + sql;
+	if (dynamic_cast<const ofquack::QueryRejectedError *>(&error)) {
+		throw IOException(WithErrorCode(code::QUERY_REJECTED), message);
+	}
+	throw IOException(WithErrorCode(code::UNAVAILABLE), message);
+}
+
 void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 	// Checked before anything is sent, so a query that cannot possibly
 	// authenticate fails immediately and says what to do about it.
@@ -178,11 +209,13 @@ void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 		// has no password to give, and the secret needed PROVIDER browser.
 		if (config.username.empty()) {
 			throw InvalidInputException(
-			    "The secret for %s has no USERNAME, so it cannot authenticate.\n"
-			    "If this instance uses a username and password, add USERNAME and PASSWORD to the secret.\n"
-			    "If it is behind single sign-on, recreate the secret with PROVIDER browser and run "
-			    "SELECT * FROM fusion_scanner_sso_login().",
-			    host);
+			    WithErrorCode(ofquack::error_code::CREDENTIALS_MISSING),
+			    StringUtil::Format(
+			        "The secret for %s has no USERNAME, so it cannot authenticate.\n"
+			        "If this instance uses a username and password, add USERNAME and PASSWORD to the secret.\n"
+			        "If it is behind single sign-on, recreate the secret with PROVIDER browser and run "
+			        "SELECT * FROM fusion_scanner_sso_login().",
+			        host));
 		}
 		return;
 	}
@@ -195,9 +228,11 @@ void RequireUsableCredentials(const ofquack::FusionConfig &config) {
 	}
 	// Deliberately does not sign in here: a SELECT must never open a browser
 	// window on its own.
-	throw InvalidInputException("Not signed in to %s. Run:\n  SELECT * FROM fusion_scanner_sso_login();\n"
-	                            "or set TOKEN on the secret if you obtained one another way.",
-	                            host);
+	throw InvalidInputException(WithErrorCode(ofquack::error_code::NOT_SIGNED_IN),
+	                            StringUtil::Format("Not signed in to %s. Run:\n  SELECT * FROM "
+	                                               "fusion_scanner_sso_login();\n"
+	                                               "or set TOKEN on the secret if you obtained one another way.",
+	                                               host));
 }
 
 ofquack::FusionConfig ResolveFusionConfig(ClientContext &context, const named_argument_map_t &named_parameters,

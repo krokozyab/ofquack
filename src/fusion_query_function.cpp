@@ -5,6 +5,7 @@
 
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "ofquack/error_codes.hpp"
 #include "ofquack/error_decoder.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
@@ -102,14 +103,8 @@ std::string ExecuteOrThrow(ofquack::FusionTransport &transport, const std::strin
 
 	try {
 		return transport.Execute(sql, request_context);
-	} catch (const ofquack::CancelledError &) {
-		throw InterruptException();
-	} catch (const ofquack::AuthenticationError &auth_error) {
-		throw InvalidInputException("%s", auth_error.what());
-	} catch (const ofquack::CircuitOpenError &circuit_error) {
-		throw IOException("%s", circuit_error.what());
-	} catch (const ofquack::FusionError &fusion_error) {
-		throw IOException("%s\nSQL: %s", fusion_error.what(), sql);
+	} catch (const ofquack::FusionError &error) {
+		ThrowFusionError(error, sql);
 	}
 }
 
@@ -122,9 +117,11 @@ ofquack::ParsedReport ParseResponseOrThrow(const std::string &soap_xml, const st
 	} catch (const std::runtime_error &parse_error) {
 		const auto reported = ofquack::DescribeFailure(soap_xml);
 		if (!reported.empty()) {
-			throw IOException("Oracle Fusion rejected the query: %s\nSQL: %s", reported, sql);
+			throw IOException(WithErrorCode(ofquack::error_code::QUERY_REJECTED),
+			                  "Oracle Fusion rejected the query: %s\nSQL: %s", reported, sql);
 		}
-		throw IOException("Could not read the Oracle Fusion report response: %s\nSQL: %s", parse_error.what(), sql);
+		throw IOException(WithErrorCode(ofquack::error_code::UNAVAILABLE),
+		                  "Could not read the Oracle Fusion report response: %s\nSQL: %s", parse_error.what(), sql);
 	}
 }
 
@@ -354,6 +351,7 @@ unique_ptr<FunctionData> FusionQueryBind(ClientContext &context, TableFunctionBi
 			// nonsense on any query with a function call or a subquery in its
 			// select list, and the guess silently became the table's schema.
 			throw IOException(
+			    WithErrorCode(ofquack::error_code::NO_ROWS),
 			    "Oracle Fusion returned no rows, so the result has no columns and its schema is unknown.\n"
 			    "Declare it with columns := {'NAME': 'VARCHAR', …}, add a predicate that matches at least one "
 			    "row, or wrap the query so it always returns one (for example SELECT … FROM DUAL).\nSQL: %s",
@@ -450,19 +448,17 @@ void EmitColumn(Vector &vector, const std::vector<ofquack::ReportRow> &rows, idx
 	for (idx_t row_index = 0; row_index < count; row_index++) {
 		const auto &row = rows[from + row_index];
 		const auto entry = row.find(column_name);
-		if (entry == row.end()) {
-			// dbms_xmlgen omits NULL elements, so an absent column is SQL NULL.
-			// An element that is present but empty stays an empty string --
-			// the two are different values.
+		// dbms_xmlgen omits a NULL element, or writes it empty, depending on how
+		// the report asks it to handle NULLs. Either is SQL NULL, text included:
+		// Oracle stores the empty string as NULL, so an empty element has no
+		// other value it could be, and reading it as '' made `IS NULL` false
+		// for every NULL of an all_varchar result.
+		if (entry == row.end() || entry->second.empty()) {
 			validity.SetInvalid(row_index);
 			continue;
 		}
 		if (as_varchar) {
 			entries[row_index] = StringVector::AddString(vector, entry->second);
-			continue;
-		}
-		if (entry->second.empty()) {
-			validity.SetInvalid(row_index);
 			continue;
 		}
 		// The type was inferred from a sample, so a later row can disagree.

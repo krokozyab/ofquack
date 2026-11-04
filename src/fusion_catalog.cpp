@@ -15,6 +15,7 @@
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
+#include "ofquack/error_codes.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/fusion_connection.hpp"
 #include "ofquack/fusion_filter.hpp"
@@ -328,10 +329,6 @@ bool KeyKindOf(const LogicalType &type, ofquack::KeyKind &kind) {
 	}
 }
 
-[[noreturn]] void RethrowAsDatabaseError(const ofquack::FusionError &error, const string &sql) {
-	throw IOException("%s\nSQL: %s", error.what(), sql);
-}
-
 //! The statement for the next page, by the scan's paging mode.
 string NextPageStatement(const FusionCatalogScanBindData &bind_data, const FusionCatalogScanState &state,
                          idx_t offset) {
@@ -403,14 +400,13 @@ ofquack::ParsedReport FetchCatalogPage(FusionCatalogScanBindData &bind_data, Fus
 	try {
 		return ofquack::ParseRows(
 		    ofquack::ExtractReportXML(bind_data.state->transport->Execute(statement, request_context)));
-	} catch (const ofquack::CancelledError &) {
-		throw InterruptException();
 	} catch (const ofquack::FusionError &error) {
-		RethrowAsDatabaseError(error, statement);
+		ThrowFusionError(error, statement);
 	} catch (const std::runtime_error &error) {
 		// "Missing SOAP Envelope" on its own says what the response was not,
 		// which is no help; the first line of what did arrive usually is.
-		throw IOException("Could not read the Oracle Fusion report response: %s\nSQL: %s", error.what(), statement);
+		throw IOException(WithErrorCode(ofquack::error_code::UNAVAILABLE),
+		                  "Could not read the Oracle Fusion report response: %s\nSQL: %s", error.what(), statement);
 	}
 }
 
@@ -600,7 +596,8 @@ void FusionCatalogScan(ClientContext &context, TableFunctionInput &data, DataChu
 		for (idx_t row_index = 0; row_index < to_emit; row_index++) {
 			const auto &row = state.page.rows[state.offset_in_page + row_index];
 			const auto entry = row.find(column_name);
-			if (entry == row.end() || (!as_varchar && entry->second.empty())) {
+			// Absent or empty is NULL, text included: Oracle stores '' as NULL.
+			if (entry == row.end() || entry->second.empty()) {
 				validity.SetInvalid(row_index);
 				continue;
 			}

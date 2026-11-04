@@ -15,6 +15,7 @@
 #include "ofquack/metadata_queries.hpp"
 #include "ofquack/fusion_catalog.hpp"
 #include "ofquack/token_cache.hpp"
+#include "ofquack/error_codes.hpp"
 #include "ofquack/errors.hpp"
 #include "ofquack/transport.hpp"
 #include "fusion_scanner_extension.hpp"
@@ -27,6 +28,7 @@
 #include <algorithm>
 #include <set>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -54,6 +56,7 @@ public:
 	explicit MaterializedQueryResult(duckdb::unique_ptr<duckdb::QueryResult> result) {
 		if (result->HasError()) {
 			error = result->GetError();
+			error_data = result->GetErrorObject();
 			return;
 		}
 		types = result->GetTypes();
@@ -74,11 +77,13 @@ public:
 				}
 			}
 		} catch (const std::exception &exception) {
-			error = duckdb::ErrorData(exception).Message();
+			error_data = duckdb::ErrorData(exception);
+			error = error_data.Message();
 			rows.clear();
 		}
 		if (result->HasError() && error.empty()) {
 			error = result->GetError();
+			error_data = result->GetErrorObject();
 			rows.clear();
 		}
 	}
@@ -88,6 +93,18 @@ public:
 	}
 	const std::string &GetError() const {
 		return error;
+	}
+	const std::string &RawError() const {
+		return error_data.RawMessage();
+	}
+	duckdb::ExceptionType ErrorType() const {
+		return error_data.Type();
+	}
+	//! The stable code (ofquack/error_codes.hpp), or empty without one.
+	std::string ErrorCode() const {
+		const auto &info = error_data.ExtraInfo();
+		const auto found = info.find(ofquack::error_code::KEY);
+		return found == info.end() ? std::string() : found->second;
 	}
 	duckdb::idx_t RowCount() const {
 		return rows.size();
@@ -104,6 +121,7 @@ public:
 
 private:
 	std::string error;
+	duckdb::ErrorData error_data;
 	std::vector<std::vector<duckdb::Value>> rows;
 };
 
@@ -339,6 +357,7 @@ void TestSoapFaultBecomesAnError() {
 	CHECK(result->GetError().find("ORA-00942") != std::string::npos);
 	// The failing statement is echoed, since the error is about that statement.
 	CHECK(result->GetError().find("FND_CURRENCIES_TL") != std::string::npos);
+	CHECK(result->ErrorCode() == ofquack::error_code::QUERY_REJECTED);
 }
 
 void TestHtmlLoginPageBecomesAnError() {
@@ -370,10 +389,85 @@ void TestEmptyResultIsAnErrorRatherThanAGuessedSchema() {
 
 	CHECK(result->HasError());
 	CHECK(result->GetError().find("no rows") != std::string::npos);
+	CHECK(result->ErrorType() == duckdb::ExceptionType::IO);
+	CHECK(result->ErrorCode() == ofquack::error_code::NO_ROWS);
 }
 
-//! dbms_xmlgen omits NULL elements, so an absent column is NULL. It used to
-//! arrive as an empty string, which is a different value.
+//! Each kind of transport failure reaches SQL as its own exception type and
+//! stable code, so a program can act on it without reading the message -- and
+//! the message is still the one a person reads, with no code in it.
+void TestTransportFailuresCarryStableCodes() {
+	struct Case {
+		std::function<void()> fail;
+		duckdb::ExceptionType type;
+		const char *code;
+		bool echoes_sql;
+	};
+	const std::vector<Case> cases = {
+	    {[] { throw ofquack::CredentialsRejectedError("Oracle Fusion rejected the credentials (HTTP 401)"); },
+	     duckdb::ExceptionType::INVALID_INPUT, ofquack::error_code::CREDENTIALS_REJECTED, false},
+	    {[] { throw ofquack::AuthenticationError("No Oracle Fusion token is available"); },
+	     duckdb::ExceptionType::INVALID_INPUT, ofquack::error_code::NOT_SIGNED_IN, false},
+	    {[] { throw ofquack::TokenExpiredError("Oracle Fusion rejected the bearer token"); },
+	     duckdb::ExceptionType::IO, ofquack::error_code::NOT_SIGNED_IN, false},
+	    {[] { throw ofquack::QueryRejectedError("Oracle Fusion rejected the request: ORA-00942"); },
+	     duckdb::ExceptionType::IO, ofquack::error_code::QUERY_REJECTED, true},
+	    {[] { throw ofquack::RetryableError("Oracle Fusion returned HTTP 503"); }, duckdb::ExceptionType::IO,
+	     ofquack::error_code::UNAVAILABLE, true},
+	    {[] { throw ofquack::PermanentError("Oracle Fusion returned HTTP 404"); }, duckdb::ExceptionType::IO,
+	     ofquack::error_code::UNAVAILABLE, true},
+	    {[] { throw ofquack::CircuitOpenError("Oracle Fusion at fusion.example.com has failed 5 times"); },
+	     duckdb::ExceptionType::IO, ofquack::error_code::UNAVAILABLE, false},
+	};
+	for (const auto &failure : cases) {
+		struct FailingTransport : FusionTransport {
+			explicit FailingTransport(std::function<void()> fail_p) : fail(std::move(fail_p)) {
+			}
+			std::string Execute(const std::string &, const RequestContext &) override {
+				fail();
+				return std::string();
+			}
+			std::function<void()> fail;
+		};
+		ScopedTransportFactory installed(
+		    [&failure](const FusionConfig &) { return std::make_shared<FailingTransport>(failure.fail); });
+
+		DuckDB db(nullptr);
+		Connection connection(db);
+		CreateSecret(connection);
+		auto result = connection.Query(QUERY);
+
+		CHECK(result->HasError());
+		CHECK(result->ErrorType() == failure.type);
+		CHECK(result->ErrorCode() == failure.code);
+		CHECK(result->GetError().find(ofquack::error_code::KEY) == std::string::npos);
+		CHECK(result->GetError().find(failure.code) == std::string::npos);
+		// The message without the query location DuckDB adds for an error at bind.
+		CHECK((result->RawError().find("SQL: ") != std::string::npos) == failure.echoes_sql);
+	}
+}
+
+//! Cancellation is an interrupt, as Ctrl-C is, and carries no code.
+void TestCancellationIsAnInterrupt() {
+	struct CancelledTransport : FusionTransport {
+		std::string Execute(const std::string &, const RequestContext &) override {
+			throw ofquack::CancelledError("cancelled");
+		}
+	};
+	ScopedTransportFactory installed([](const FusionConfig &) { return std::make_shared<CancelledTransport>(); });
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = connection.Query(QUERY);
+
+	CHECK(result->HasError());
+	CHECK(result->ErrorType() == duckdb::ExceptionType::INTERRUPT);
+	CHECK(result->ErrorCode().empty());
+}
+
+//! dbms_xmlgen omits NULL elements, so an absent column is NULL; an empty one
+//! is NULL too, since Oracle stores the empty string as NULL.
 void TestMissingColumnBecomesNull() {
 	Script script;
 	script.response = MakeSoapResponse(
@@ -390,10 +484,34 @@ void TestMissingColumnBecomesNull() {
 	auto result = RunQuery(connection, QUERY);
 
 	CHECK(result->RowCount() == 3);
-	CHECK(!result->GetValue(1, 0).IsNull());          // present, "A"
-	CHECK(!result->GetValue(1, 1).IsNull());          // present but empty
-	CHECK(result->GetValue(1, 1).ToString().empty()); //   -> empty string
-	CHECK(result->GetValue(1, 2).IsNull());           // absent -> NULL
+	CHECK(!result->GetValue(1, 0).IsNull()); // present, "A"
+	CHECK(result->GetValue(1, 1).IsNull());  // present but empty -> NULL
+	CHECK(result->GetValue(1, 2).IsNull());  // absent -> NULL
+}
+
+//! all_varchar returns text exactly as it arrived, but a NULL stays NULL:
+//! whether the report omits the element or writes it empty, Oracle has no empty
+//! string it could stand for.
+void TestAllVarcharKeepsNullsNull() {
+	Script script;
+	script.response = MakeSoapResponse(
+	    MakeReportXML("&lt;ROWSET&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Alpha&lt;/NAME&gt;&lt;CODE&gt;0012&lt;/CODE&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Beta&lt;/NAME&gt;&lt;CODE/&gt;&lt;/ROW&gt;"
+	                  "&lt;ROW&gt;&lt;NAME&gt;Gamma&lt;/NAME&gt;&lt;/ROW&gt;"
+	                  "&lt;/ROWSET&gt;"));
+	auto installed = InstallFake(script);
+
+	DuckDB db(nullptr);
+	Connection connection(db);
+	CreateSecret(connection);
+	auto result = RunQuery(connection, "SELECT CODE IS NULL FROM oracle_fusion_query("
+	                                   "'SELECT NAME, CODE FROM FND_CURRENCIES_TL', all_varchar := true)");
+
+	CHECK(result->RowCount() == 3);
+	CHECK(result->GetValue(0, 0) == duckdb::Value::BOOLEAN(false)); // "0012", untouched
+	CHECK(result->GetValue(0, 1) == duckdb::Value::BOOLEAN(true));  // <CODE/>
+	CHECK(result->GetValue(0, 2) == duckdb::Value::BOOLEAN(true));  // no CODE
 }
 
 //! Defined with the metadata tests below; the cache is a process-wide
@@ -617,6 +735,8 @@ void TestSecretWithNoCredentialNamesBothPossibilities() {
 	CHECK(result->HasError());
 	CHECK(result->GetError().find("USERNAME") != std::string::npos);
 	CHECK(result->GetError().find("PROVIDER browser") != std::string::npos);
+	CHECK(result->ErrorType() == duckdb::ExceptionType::INVALID_INPUT);
+	CHECK(result->ErrorCode() == ofquack::error_code::CREDENTIALS_MISSING);
 	// Nothing was sent: an empty credential never reaches Fusion.
 	CHECK(script.executed_sql.empty());
 }
@@ -2936,6 +3056,7 @@ void TestBearerQueryWithoutTokenExplainsHowToSignIn() {
 	auto result = connection.Query("SELECT * FROM oracle_fusion_query('SELECT NAME FROM T', secret := 'sso')");
 	CHECK(result->HasError());
 	CHECK(result->GetError().find("fusion_scanner_sso_login") != std::string::npos);
+	CHECK(result->ErrorCode() == ofquack::error_code::NOT_SIGNED_IN);
 	// Nothing was sent: the request never got as far as the transport.
 	CHECK(script.executed_sql.empty());
 }
@@ -3030,6 +3151,9 @@ const TestCase TESTS[] = {
     {"secret redacts credentials", TestSecretRedactsCredentials},
     {"named parameters override the secret", TestNamedParametersOverrideTheSecret},
     {"soap fault becomes an error", TestSoapFaultBecomesAnError},
+    {"all_varchar keeps nulls null", TestAllVarcharKeepsNullsNull},
+    {"transport failures carry stable codes", TestTransportFailuresCarryStableCodes},
+    {"cancellation is an interrupt", TestCancellationIsAnInterrupt},
     {"html login page becomes an error", TestHtmlLoginPageBecomesAnError},
     {"empty result is an error", TestEmptyResultIsAnErrorRatherThanAGuessedSchema},
     {"missing column becomes null", TestMissingColumnBecomesNull},
